@@ -1,7 +1,7 @@
 import { Component, useState } from 'react'
 import { Card, Layout, Menu, Typography } from 'antd'
 import {
-  AppstoreOutlined, BookOutlined, ExperimentOutlined,
+  ApiOutlined, AppstoreOutlined, AuditOutlined, BookOutlined, ExperimentOutlined,
   NotificationOutlined, RobotOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import Agents from './pages/Agents'
@@ -10,6 +10,8 @@ import Models from './pages/Models'
 import Tasks from './pages/Tasks'
 import Assets from './pages/Assets'
 import Evals from './pages/Evals'
+import Governance from './pages/Governance'
+import Integrations from './pages/Integrations'
 import Overview from './pages/Overview'
 
 const { Sider, Content, Header } = Layout
@@ -22,6 +24,8 @@ const PAGES: Record<string, React.ReactNode> = {
   tasks: <Tasks />,
   assets: <Assets />,
   evals: <Evals />,
+  gov: <Governance />,
+  conn: <Integrations />,
 }
 
 const MENU = [
@@ -32,6 +36,8 @@ const MENU = [
   { key: 'tasks', icon: <NotificationOutlined />, label: '任务 · 审批' },
   { key: 'assets', icon: <ExperimentOutlined />, label: '技能 / Prompt / 工作流' },
   { key: 'evals', icon: <ExperimentOutlined />, label: '评测' },
+  { key: 'gov', icon: <AuditOutlined />, label: '治理 · 发布 · 成本' },
+  { key: 'conn', icon: <ApiOutlined />, label: '连接器 · 企业 IM' },
 ]
 
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { err: Error | null }> {
