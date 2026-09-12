@@ -65,5 +65,6 @@ class FaqAgent(AgentApp):
                 citations=[h["citation"] for h in hits],
                 steps=[f"retrieve: {len(hits)} hits from {MANIFEST.knowledge[0]}",
                        f"answer via {record.name}"],
-                usage={"tokens_in": result.tokens_in, "tokens_out": result.tokens_out},
+                usage={"tokens_in": result.tokens_in, "tokens_out": result.tokens_out,
+                       "model": record.name},
             )

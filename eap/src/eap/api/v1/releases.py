@@ -39,6 +39,7 @@ class EvalGateRequest(BaseModel):
 def _view(r: AgentReleaseRecord) -> dict:
     return {"id": r.id, "agent": r.agent, "version": r.version, "state": r.state,
             "eval_run_id": r.eval_run_id, "eval_verdict": r.eval_verdict,
+            "canary_percent": r.canary_percent, "overrides": r.overrides,
             "notes": r.notes, "updated_at": str(r.updated_at)}
 
 
@@ -104,7 +105,7 @@ async def run_gate(release_id: str, body: EvalGateRequest, db: Session = fastapi
 
 @router.post("/{release_id}/promote")
 def promote(release_id: str, db: Session = fastapi.Depends(get_db)):
-    """推进状态：draft→review；review→prod（需评测 PASS 门禁，旧 prod 自动退役）。"""
+    """推进状态：draft→review；review→prod（需评测 PASS 门禁，旧 prod 自动退役）；canary→prod。"""
     record = _get(db, release_id)
     if record.state == "draft":
         record.state = "review"
@@ -119,23 +120,63 @@ def promote(release_id: str, db: Session = fastapi.Depends(get_db)):
             old.state = "retired"
         db.commit()
         return _view(record)
+    if record.state == "canary":
+        if record.eval_verdict != "PASS":
+            raise fastapi.HTTPException(status_code=403, detail=_EVAL_NOT_PASSED)
+        old = _current_prod(db, record.agent)
+        record.state = "prod"
+        record.canary_percent = 0
+        if old and old.id != record.id:
+            old.state = "retired"
+        db.commit()
+        return _view(record)
     raise fastapi.HTTPException(status_code=409, detail=f"EAP-6002 状态 {record.state} 不允许提升")
+
+
+class CanarySet(BaseModel):
+    percent: int = Field(ge=0, le=100)
+    overrides: dict = Field(default_factory=dict,
+                            description='灰度覆盖配置，MVP: {"model": "模型名"}')
+
+
+@router.post("/{release_id}/canary")
+def set_canary(release_id: str, body: CanarySet, db: Session = fastapi.Depends(get_db)):
+    """进入/调整灰度：review→canary（需评测 PASS），设置流量百分比与覆盖配置。"""
+    record = _get(db, release_id)
+    if record.state == "canary":
+        record.canary_percent = body.percent
+        if body.overrides:
+            record.overrides = body.overrides
+        db.commit()
+        return _view(record)
+    if record.state == "review":
+        if record.eval_verdict != "PASS":
+            raise fastapi.HTTPException(status_code=403, detail=_EVAL_NOT_PASSED)
+        record.state = "canary"
+        record.canary_percent = body.percent
+        record.overrides = body.overrides
+        db.commit()
+        return _view(record)
+    raise fastapi.HTTPException(status_code=409, detail=f"EAP-6002 状态 {record.state} 不允许灰度")
 
 
 @router.post("/{release_id}/rollback")
 def rollback(release_id: str, db: Session = fastapi.Depends(get_db)):
-    """回滚：prod 退役为 rolled_back，把上一个 retired 版本重新置回 prod。"""
+    """回滚：prod 退役为 rolled_back 并恢复上一个 retired 版本；canary 直接下线。"""
     record = _get(db, release_id)
-    if record.state != "prod":
+    if record.state not in ("prod", "canary"):
         raise fastapi.HTTPException(status_code=409,
-                                    detail=f"EAP-6002 仅 prod 状态可回滚，当前 {record.state}")
-    previous = db.scalars(
-        select(AgentReleaseRecord)
-        .where(AgentReleaseRecord.agent == record.agent,
-               AgentReleaseRecord.state == "retired",
-               AgentReleaseRecord.eval_verdict == "PASS")
-        .order_by(AgentReleaseRecord.updated_at.desc())).first()
+                                    detail=f"EAP-6002 仅 prod/canary 可回滚，当前 {record.state}")
+    previous = None
+    if record.state == "prod":
+        previous = db.scalars(
+            select(AgentReleaseRecord)
+            .where(AgentReleaseRecord.agent == record.agent,
+                   AgentReleaseRecord.state == "retired",
+                   AgentReleaseRecord.eval_verdict == "PASS")
+            .order_by(AgentReleaseRecord.updated_at.desc())).first()
     record.state = "rolled_back"
+    record.canary_percent = 0
     if previous:
         previous.state = "prod"
     db.commit()

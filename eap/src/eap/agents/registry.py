@@ -135,7 +135,27 @@ class AgentRegistry:
         if agent.status == "unhealthy":
             raise RuntimeError(f"智能体 {name} 健康检查未通过：{agent.health}")
         assert agent.instance is not None
-        result: InvokeResult = await agent.instance.on_invoke(request)
+        # Canary 灰度（docs/06 §2）：命中则注入 overrides.model，响应标记 canary
+        canary_info = None
+        token = None
+        try:
+            from ..runtime.canary import apply_override, pick_canary, reset_override
+
+            key = request.user_id or request.session_id or (trace_id or "")
+            release = pick_canary(db, name, key)
+            if release is not None:
+                token = apply_override((release.overrides or {}).get("model"))
+                canary_info = {"release_id": release.id, "version": release.version,
+                               "percent": release.canary_percent}
+        except Exception:
+            pass  # 灰度失败不阻断主流程
+        try:
+            result: InvokeResult = await agent.instance.on_invoke(request)
+        finally:
+            if token is not None:
+                from ..runtime.canary import reset_override
+
+                reset_override(token)
         return InvokeResponse(
             invocation_id=uuid.uuid4().hex,
             agent=agent.manifest.name,
@@ -145,6 +165,7 @@ class AgentRegistry:
             citations=result.citations,
             steps=result.steps,
             usage=result.usage,
+            canary=canary_info,
         )
 
 

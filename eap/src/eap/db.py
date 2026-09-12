@@ -33,3 +33,4 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     seed.run(engine)
+    # 注：开发版不做增量迁移——模型变更后删除 *.db 重建即可（开发数据可弃）；生产用 Alembic（docs/09）

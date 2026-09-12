@@ -98,7 +98,10 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
 curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/releases/<id>/eval \
   -d '{"dataset":"faq-smoke","min_pass_rate":0.8}'   # FAIL 则提升被 403 拦截
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/promote
-curl -s -H "$KEY" localhost:8300/api/v1/releases/current/faq-agent
+# Canary 灰度：review 态发布先进灰度（需 PASS 门禁），按 user/session 稳定 hash 分流
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/releases/<id>/canary \
+  -d '{"percent":10,"overrides":{"model":"my-lora"}}'   # 命中的调用响应带 canary 标记
+curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/promote   # 灰度满意 → 全量 prod
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/rollback
 
 # 成本中心：设月度 token 预算 → 用量汇总 → 超限后调用被 429 熔断
@@ -148,7 +151,7 @@ class MyAgent(AgentApp):
 | **Workflow Engine** | **DSL（llm/tool/retrieve/branch 节点 + 条件跳转）→ 创建即注册为智能体** | 画布前端、并行节点、子流程 |
 | **Prompt Center** | **模板/变量自动提取/渲染/API**，工作流与智能体引用 | 版本流水线、A/B 实验 |
 | **评测中心** | **数据集 + 规则裁判 + 通过率门禁**（发布门禁语义就位） | LLM-as-Judge、人工抽检、在线影子流量 |
-| **发布治理** | **版本生命周期（draft→review→prod→rolled_back/retired）+ 评测门禁强制 + 回滚恢复旧版（/api/v1/releases）** | Canary 灰度比例、环境体系（Dev/Staging/Prod）、制品组合版本 |
+| **发布治理** | **版本生命周期（draft→review→canary→prod→rolled_back/retired）+ 评测门禁强制 + Canary 灰度（user/session 稳定 hash 分流 + overrides.model 路由覆盖）+ 回滚恢复旧版（/api/v1/releases）** | 环境体系（Dev/Staging/Prod）、制品组合版本 |
 | **成本中心** | **租户月度 token 预算 + 用量汇总（按 kind/model 分组）+ 调用侧超限熔断 429（/api/v1/budgets）** | 单价计费账单、按模型差价、配额分层 |
 | **企业连接器** | **连接器注册/验证/启停 API + 端点→平台工具自动包装（rest + 内置 mock-erp）+ order-agent 经连接器调 ERP（/api/v1/connectors）** | SQL 连接器、飞书/钉钉、OAuth 凭证托管 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |

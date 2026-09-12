@@ -116,6 +116,7 @@ async def run_loop(
             continue
 
         steps.append(f"step{step}({record.name}): 生成最终回答")
+        usage["model"] = last_model
         return RunResult(
             content=result.content or "",
             steps=steps,
@@ -127,7 +128,7 @@ async def run_loop(
     return RunResult(
         content="（已达到最大步数预算，循环终止。请缩小问题范围后重试。）",
         steps=steps + [f"budget: max_steps={max_steps} 已耗尽"],
-        usage=usage,
+        usage={**usage, "model": last_model},
         citations=citations,
         model=last_model,
     )

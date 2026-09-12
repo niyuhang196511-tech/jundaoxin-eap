@@ -165,3 +165,4 @@ class InvokeResponse(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     usage: dict = Field(default_factory=dict)
+    canary: dict | None = None  # 命中灰度时：{"release_id","version","percent"}（docs/06 §2）

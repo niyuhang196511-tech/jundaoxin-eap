@@ -317,6 +317,8 @@ class AgentReleaseRecord(Base):
     # draft | review | prod | rolled_back | retired
     eval_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     eval_verdict: Mapped[str | None] = mapped_column(String(8), nullable=True)  # PASS | FAIL
+    canary_percent: Mapped[int] = mapped_column(Integer, default=0)  # 0-100，仅 canary 态生效
+    overrides: Mapped[dict] = mapped_column(JSON, default=dict)  # canary 覆盖，MVP: {"model": "..."}
     notes: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
