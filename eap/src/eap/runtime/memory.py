@@ -48,11 +48,11 @@ class MemoryService:
     # ---------- 读取 ----------
 
     def history(self, db: Session, session_id: str, limit: int = 6) -> list[dict]:
-        """会话消息（时间正序，取最近 limit 条）。"""
+        """会话消息（时间正序，取最近 limit 条）。按自增 id 排序：同一运行内时间戳可能相同。"""
         rows = db.scalars(
             select(MemoryRecord)
             .where(MemoryRecord.session_id == session_id, MemoryRecord.kind == MESSAGE)
-            .order_by(MemoryRecord.created_at.desc())
+            .order_by(MemoryRecord.id.desc())
             .limit(limit)
         ).all()
         return [{"role": r.meta.get("role", "user"), "content": r.content}

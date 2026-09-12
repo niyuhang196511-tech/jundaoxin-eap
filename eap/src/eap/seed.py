@@ -94,6 +94,33 @@ def run(engine) -> None:  # noqa: C901
                 ))
         db.commit()
 
+        # 示例企业连接器：内置 mock-erp（离线演示 ERP：库存查询 + 下单，docs/04 §4）
+        from .models import ConnectorRecord
+
+        if db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == "mock-erp")) is None:
+            db.add(ConnectorRecord(
+                name="mock-erp", kind="mock-erp",
+                description="内置演示 ERP（离线）：库存查询与销售下单",
+                status="verified",
+                endpoints=[
+                    {"name": "inventory.query", "tool_name": "erp.inventory.query",
+                     "method": "GET", "path": "/erp/inventory",
+                     "description": "查询产品库存（演示 ERP）",
+                     "params": {"type": "object", "properties": {
+                         "product": {"type": "string", "description": "产品名称"}},
+                         "required": ["product"]}},
+                    {"name": "order.create", "tool_name": "erp.order.create",
+                     "method": "POST", "path": "/erp/orders",
+                     "description": "在 ERP 创建销售订单（写操作，需人工审批）",
+                     "requires_approval": True,
+                     "params": {"type": "object", "properties": {
+                         "product": {"type": "string", "description": "产品名称"},
+                         "qty": {"type": "integer", "description": "数量"}},
+                         "required": ["product"]}},
+                ],
+            ))
+            db.commit()
+
         # 示例知识库（幂等：存在即跳过）
         from .knowledge import service as kb_svc
         from .models import KB

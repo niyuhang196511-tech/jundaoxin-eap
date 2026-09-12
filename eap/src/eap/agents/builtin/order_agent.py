@@ -27,6 +27,9 @@ MANIFEST = AgentManifest(
 SYSTEM_ROLE = ("你是销售下单助手。涉及下单的请求必须先调用 erp.order.create 工具；"
                "产品咨询仅依据资料回答并标注 [n]。")
 
+# 下单意图关键词：用于把下单工具排到工具列表前列（真实模型按语义自选，mock 按首工具确定性调用）
+_ORDER_INTENT = ("下单", "订购", "购买", "下一台", "来一台")
+
 
 def order_create_tool() -> Tool:
     async def handler(arguments: str) -> str:
@@ -74,6 +77,13 @@ class OrderAgent(AgentApp):
         with self.ctx.db() as db:
             retriever = self.ctx.retriever("product-docs")
             hits = retriever.search(db, request.input, top_k=2)
+            # ERP 能力优先走企业连接器（docs/04 §4）；未登记连接器时回退内置演示工具
+            erp = list(self.ctx.connector_tools("mock-erp")) or [order_create_tool()]
+            order = [t for t in erp if "order" in t.name]
+            others = [t for t in erp if "order" not in t.name]
+            if any(kw in request.input for kw in _ORDER_INTENT):
+                erp = order + others  # 下单意图 → 下单工具优先
+            tools = [*erp, retriever.as_tool()]
             system = build_system(
                 role=SYSTEM_ROLE,
                 knowledge_context=retriever.render(hits),
@@ -83,7 +93,7 @@ class OrderAgent(AgentApp):
                 db,
                 messages=[{"role": "user", "content": request.input}],
                 system=system,
-                tools=[order_create_tool(), retriever.as_tool()],
+                tools=tools,
                 approval_gate=gate,
                 resume_messages=(resume or {}).get("messages"),
             )

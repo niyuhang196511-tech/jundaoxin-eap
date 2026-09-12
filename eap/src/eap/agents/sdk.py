@@ -131,6 +131,17 @@ class PlatformContext:
 
         return await load_mcp_tools(server_url, prefix=prefix)
 
+    def connector_tools(self, name: str) -> list:
+        """企业连接器工具（docs/04 §4）：按名称取启用连接器的端点工具。"""
+        from sqlalchemy import select
+
+        from ..models import ConnectorRecord
+        from ..runtime.connectors import load_connector_tools
+
+        with SessionLocal() as db:
+            record = db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == name))
+            return load_connector_tools(record) if record else []
+
 
 def register_agent(manifest: AgentManifest, source: str = "sdk"):
     """注册钩子：装饰 AgentApp 子类，加载期自声明能力（docs/03 §7.2）。

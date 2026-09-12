@@ -153,6 +153,29 @@ class BudgetRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class ConnectorRecord(Base):
+    """企业连接器（docs/04 §4，M3）：把外部系统的端点注册为平台工具。
+
+    - kind=rest：base_url + endpoint path 经 httpx 调用（管理端登记，超时熔断）
+    - kind=mock-erp：内置离线演示 ERP（库存查询/下单），测试与开发用
+    - endpoints：[{tool_name, method, path, description, params, requires_approval}]
+    """
+
+    __tablename__ = "connectors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="rest")  # rest | mock-erp
+    description: Mapped[str] = mapped_column(String(256), default="")
+    base_url: Mapped[str] = mapped_column(String(256), default="")
+    header_name: Mapped[str] = mapped_column(String(64), default="Authorization")
+    api_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    endpoints: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="registered")  # registered | verified | unreachable
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class SkillRecord(Base):
     """技能注册表（docs/04 §3）：SKILL.md 的结构化存储。
 
