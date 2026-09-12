@@ -151,6 +151,17 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
   -d '{"agent":"faq-agent","dataset":"answer-quality","judge":"llm","min_pass_rate":0.8}'
 # → 逐用例返回 {"passed":bool,"reason":"理由"}；发布门禁 /eval 同样支持 judge=llm
 
+# Prompt 版本流水线 + A/B：建草稿版 → 发布（试渲染校验）→ 按 session/user 稳定分流 → 可回滚
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/prompts/faq-answer-style/versions \
+  -d '{"version":"1.1.0","template":"资深客服模式：{{question}}","notes":"结构化改版"}'
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/prompts/faq-answer-style/publish \
+  -d '{"version":"1.1.0","variables_sample":{"question":"样例"}}'
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/prompts/experiments \
+  -d '{"name":"style-exp","prompt":"faq-answer-style","version_a":"1.0.0","version_b":"1.1.0","percent_b":20}'
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/prompts/faq-answer-style/render \
+  -d '{"variables":{"question":"怎么退货"},"key":"session-42"}'   # 返回命中版本 + 实验信息
+curl -s -X POST -H "$KEY" localhost:8300/api/v1/prompts/faq-answer-style/rollback
+
 # 技能包（技能市场地基）：导出签名包 → 导入（验签失败 401 EAP-8101；导入默认停用待审）
 curl -s -H "$KEY" localhost:8300/api/v1/skills/customer-service/package > skill.bundle.json
 curl -s -H "$KEY" localhost:8300/api/v1/skills/public-key    # 公钥分发：Harness 本地验签
@@ -189,7 +200,7 @@ class MyAgent(AgentApp):
 | **多智能体** | **Supervisor 委派（agent.\* 工具化）+ 深度护栏 + 内置 supervisor-agent** | Handoff 策略编排 UI、跨租户 A2A 委派 |
 | **Memory** | **会话/长期记忆读写、向量+词面召回、遗忘 API（/api/v1/memory）** | 摘要压缩、组织记忆联动知识中心 |
 | **Workflow Engine** | **DSL（llm/tool/retrieve/branch 节点 + 条件跳转）→ 创建即注册为智能体** | 画布前端、并行节点、子流程 |
-| **Prompt Center** | **模板/变量自动提取/渲染/API**，工作流与智能体引用 | 版本流水线、A/B 实验 |
+| **Prompt Center** | **模板/变量自动提取/渲染/API + 版本流水线（draft→publish→archived，试渲染校验+回滚）+ A/B 实验（key 稳定 hash 分流，/api/v1/prompts）** | 实验效果报表、灰度发布联动 |
 | **评测中心** | **数据集 + 规则裁判 + LLM-as-Judge（按评分标准出 JSON 结论，逐用例带理由）+ 通过率门禁**（发布门禁两种裁判均可选） | 人工抽检、在线影子流量 |
 | **发布治理** | **版本生命周期（draft→review→canary→prod→rolled_back/retired）+ 评测门禁强制 + Canary 灰度（user/session 稳定 hash 分流 + overrides.model 路由覆盖）+ 回滚恢复旧版（/api/v1/releases）** | 环境体系（Dev/Staging/Prod）、制品组合版本 |
 | **成本中心** | **租户月度 token 预算 + 用量汇总（按 kind/model 分组）+ 调用侧超限熔断 429（/api/v1/budgets）** | 单价计费账单、按模型差价、配额分层 |

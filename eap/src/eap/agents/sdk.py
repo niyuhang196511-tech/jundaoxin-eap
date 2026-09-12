@@ -110,20 +110,25 @@ class PlatformContext:
 
         return memory_service
 
-    def prompt(self, name: str, variables: dict[str, str]) -> str:
-        """Prompt 中心渲染：模板 + 变量 → 文本（缺失变量报错，docs/05 §3）。"""
+    def prompt(self, name: str, variables: dict[str, str], key: str | None = None) -> str:
+        """Prompt 中心渲染：模板 + 变量 → 文本（缺失变量报错，docs/05 §3）。
+
+        key（session_id/user_id）提供时参与 A/B 实验分流，返回命中版本的渲染结果。
+        """
         from sqlalchemy import select
 
         from ..models import PromptRecord
+        from ..runtime import prompts as prompt_rt
         from ..runtime.context import render_prompt
 
         with SessionLocal() as db:
             record = db.scalar(
                 select(PromptRecord).where(PromptRecord.name == name, PromptRecord.enabled == True)  # noqa: E712
             )
-        if record is None:
-            raise ValueError(f"Prompt {name} 不存在或未启用")
-        return render_prompt(record.template, variables)
+            if record is None:
+                raise ValueError(f"Prompt {name} 不存在或未启用")
+            template, _version, _exp = prompt_rt.resolve_template(db, name, key)
+        return render_prompt(template, variables)
 
     async def mcp_tools(self, server_url: str, prefix: str = "mcp") -> list:
         """从外部 MCP Server 动态拉取工具（docs/04 §5）。"""

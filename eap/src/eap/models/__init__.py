@@ -253,7 +253,10 @@ class WorkflowRecord(Base):
 
 
 class PromptRecord(Base):
-    """Prompt 中心（docs/05 §3）：Prompt 是独立资产——模板/变量/版本。"""
+    """Prompt 中心（docs/05 §3）：Prompt 是独立资产——模板/变量/版本。
+
+    PromptRecord 为「当前发布指针」；历史版本在 PromptVersionRecord（版本流水线）。
+    """
 
     __tablename__ = "prompts"
 
@@ -264,6 +267,39 @@ class PromptRecord(Base):
     template: Mapped[str] = mapped_column(Text, default="")
     variables: Mapped[list] = mapped_column(JSON, default=list)  # 自动提取 {{var}}
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PromptVersionRecord(Base):
+    """Prompt 版本流水线（docs/05 §3，M3）：draft→published→archived，支持回滚。"""
+
+    __tablename__ = "prompt_versions"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_prompt_name_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    template: Mapped[str] = mapped_column(Text, default="")
+    variables: Mapped[list] = mapped_column(JSON, default=list)
+    state: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # draft | published | archived
+    notes: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PromptExperimentRecord(Base):
+    """Prompt A/B 实验（docs/05 §3，M3）：按 key 稳定 hash 在两个版本间分流。"""
+
+    __tablename__ = "prompt_experiments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    prompt_name: Mapped[str] = mapped_column(String(64), index=True)
+    version_a: Mapped[str] = mapped_column(String(32))
+    version_b: Mapped[str] = mapped_column(String(32))
+    percent_b: Mapped[int] = mapped_column(Integer, default=50)  # 0-100
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

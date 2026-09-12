@@ -33,8 +33,16 @@ class FaqAgent(AgentApp):
             retriever = self.ctx.retriever(MANIFEST.knowledge[0])
             hits = retriever.search(db, request.input, top_k=3)
             skill_ctx = self.ctx.skill_context(MANIFEST.skills)  # 渐进披露 L2：按需加载
+            # Prompt 中心 A/B：faq-answer-style 模板存在则按分流键渲染风格指令
+            style = ""
+            try:
+                key = request.session_id or request.user_id
+                style = self.ctx.prompt("faq-answer-style", {"question": request.input}, key=key)
+            except ValueError:
+                pass  # 未配置 Prompt 或变量不匹配 → 回退内置角色
+            role = SYSTEM_ROLE + (f"\n\n{style}" if style else "")
             system = build_system(
-                role=SYSTEM_ROLE + (f"\n\n{skill_ctx}" if skill_ctx else ""),
+                role=role + (f"\n\n{skill_ctx}" if skill_ctx else ""),
                 knowledge_context=retriever.render(hits),
                 max_chars=self.ctx.settings.max_context_chars,
             )

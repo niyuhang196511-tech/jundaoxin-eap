@@ -58,6 +58,14 @@ def run(engine) -> None:  # noqa: C901
                 template=template,
                 variables=extract_prompt_variables(template),
             ))
+            # 初始版本进流水线（A/B 实验与回滚依赖版本记录）
+            from .models import PromptVersionRecord
+
+            db.add(PromptVersionRecord(
+                name="faq-answer-style", version="1.0.0", template=template,
+                variables=extract_prompt_variables(template),
+                state="published", notes="seed",
+            ))
 
         # 示例评测数据集（faq-agent 冒烟门禁）
         from .models import EvalDatasetRecord
