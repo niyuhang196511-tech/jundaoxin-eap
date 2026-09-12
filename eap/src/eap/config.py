@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     embed_session_ttl: int = 2 * 3600  # 秒
     embed_rate_limit: int = 60  # 每分钟每令牌请求数
 
+    # 技能包签名密钥（32 字节 hex，Ed25519 seed）：技能市场分发链的信任根（docs/04 §3）
+    skill_signing_key: str | None = None  # 未配置用开发默认密钥，生产必换
+
 
 @lru_cache
 def get_settings() -> Settings:

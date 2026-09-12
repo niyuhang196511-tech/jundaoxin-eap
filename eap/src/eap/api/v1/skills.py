@@ -1,4 +1,4 @@
-"""技能中心 API：注册 / 目录（L1 渐进披露）/ 详情（L2）/ 停用（docs/04 §3）。"""
+"""技能中心 API：注册 / 目录（L1）/ 详情（L2）/ 停用 / 技能包打包与签名导入（docs/04 §3）。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...config import get_settings
 from ...db import get_db
 from ...models import SkillRecord
+from ...runtime import skill_pkg
 from ..deps import require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/skills",
@@ -45,6 +47,41 @@ def create_skill(body: SkillCreate, db: Session = fastapi.Depends(get_db)):
     return {"name": skill.name, "version": skill.version, "status": "registered"}
 
 
+# ---------- 技能包（技能市场地基）：打包签名 / 验签导入 / 公钥分发 ----------
+# 注意：静态路径必须注册在 /{name} 之前，否则被路径参数匹配吞掉
+
+@router.get("/public-key")
+def signing_public_key():
+    """签名公钥（hex）：Harness / 第三方据此本地校验技能包。"""
+    return {"public_key": skill_pkg.public_key_hex(get_settings().skill_signing_key)}
+
+
+class SkillImport(BaseModel):
+    bundle: dict = Field(description="技能包 bundle（format/skill/signature）")
+
+
+@router.post("/import")
+def import_skill(body: SkillImport, db: Session = fastapi.Depends(get_db)):
+    """导入技能包：验签失败 401（EAP-8101）；导入后默认停用，人工审查后启用。"""
+    try:
+        skill = skill_pkg.verify_bundle(body.bundle, get_settings().skill_signing_key)
+    except PermissionError as e:
+        raise fastapi.HTTPException(status_code=401, detail=str(e)) from e
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    record = db.scalar(select(SkillRecord).where(SkillRecord.name == skill["name"]))
+    if record is None:
+        record = SkillRecord(name=skill["name"])
+        db.add(record)
+    record.version = skill["version"]
+    record.description = skill.get("description", "")
+    record.instructions = skill["instructions"]
+    record.permissions = skill.get("permissions", [])
+    record.enabled = False  # 导入不可信来源内容：审查后人工启用
+    db.commit()
+    return {"name": record.name, "version": record.version, "status": "imported-disabled"}
+
+
 @router.get("/{name}")
 def get_skill(name: str, db: Session = fastapi.Depends(get_db)):
     """L2 详情：完整指令文本（Agent 显式引用时才加载）。"""
@@ -66,3 +103,18 @@ def toggle_skill(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)
     skill.enabled = enabled
     db.commit()
     return {"name": name, "enabled": enabled}
+
+
+# ---------- 技能包导出 ----------
+
+@router.get("/{name}/package")
+def package_skill(name: str, db: Session = fastapi.Depends(get_db)):
+    """导出签名技能包：SKILL.md（人读）+ signature（机器验），可直接分发到市场。"""
+    skill = db.scalar(select(SkillRecord).where(SkillRecord.name == name))
+    if skill is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 技能 {name} 不存在")
+    bundle = skill_pkg.sign_bundle(
+        {"name": skill.name, "version": skill.version, "description": skill.description,
+         "instructions": skill.instructions, "permissions": skill.permissions},
+        get_settings().skill_signing_key)
+    return bundle

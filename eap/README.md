@@ -143,6 +143,12 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
   -d '{"name":"fs-1","platform":"feishu","agent":"faq-agent","secret":"verification-token","webhook_url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx"}'
 # 把回调地址配到飞书/钉钉/企微后台（钉钉加签、企微需 token+EncodingAESKey 存入 extra）
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/im/channels/fs-1/test   # 推送连通性冒烟
+
+# 技能包（技能市场地基）：导出签名包 → 导入（验签失败 401 EAP-8101；导入默认停用待审）
+curl -s -H "$KEY" localhost:8300/api/v1/skills/customer-service/package > skill.bundle.json
+curl -s -H "$KEY" localhost:8300/api/v1/skills/public-key    # 公钥分发：Harness 本地验签
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" \
+  localhost:8300/api/v1/skills/import -d "{\"bundle\": $(cat skill.bundle.json)}"
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -183,7 +189,7 @@ class MyAgent(AgentApp):
 | **企业连接器** | **连接器注册/验证/启停 API + 端点→平台工具自动包装（rest + 内置 mock-erp）+ order-agent 经连接器调 ERP（/api/v1/connectors）** | SQL 连接器、OAuth 凭证托管 |
 | **企业 IM** | **飞书/钉钉/企业微信渠道：群机器人 Webhook 推送 + 回调接入智能体（飞书 challenge/钉钉加签/企业微信 SHA1+AES 解密），回复自动推回群（/api/v1/im）** | 卡片消息、应用级 API（发消息/通讯录）、事件重试队列 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |
-| Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入 | SKILL.md 打包/签名、技能市场 |
+| Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入、**技能包打包/Ed25519 签名/验签导入（默认停用待审）/公钥分发（技能市场地基）** | 技能市场分发、scripts/assets 附件包 |
 | MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |
 | 注册 SDK | @register_agent、manifest 校验、entry_points 发现、健康检查 | 生命周期全钩子、热加载、灰度 |
 | 接入 | OpenAI 兼容（含 SSE）、Agent 调用、KB API、嵌入外链（EmbedToken+JS Widget）、**A2A 1.0（Agent Card + Task）**、**React 控制台（总览/模型/知识/智能体/任务/资产/评测）** | OIDC/SSO、多租户计费 |
