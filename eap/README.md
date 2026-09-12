@@ -91,6 +91,15 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
 # MCP Registry：纳管外部 MCP Server（校验可达后启用，其工具注入平台工具池）
 curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/mcp/servers \
   -d '{"name":"company-tools","url":"https://mcp.corp.cn","header_name":"Authorization","api_key":"sk-x"}'
+
+# 发布治理：登记 → 门禁评测 → 提升 prod → 回滚
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/releases \
+  -d '{"agent":"faq-agent","version":"1.1.0","notes":"新增退货政策问答"}'
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/releases/<id>/eval \
+  -d '{"dataset":"faq-smoke","min_pass_rate":0.8}'   # FAIL 则提升被 403 拦截
+curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/promote
+curl -s -H "$KEY" localhost:8300/api/v1/releases/current/faq-agent
+curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/rollback
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -126,6 +135,7 @@ class MyAgent(AgentApp):
 | **Workflow Engine** | **DSL（llm/tool/retrieve/branch 节点 + 条件跳转）→ 创建即注册为智能体** | 画布前端、并行节点、子流程 |
 | **Prompt Center** | **模板/变量自动提取/渲染/API**，工作流与智能体引用 | 版本流水线、A/B 实验 |
 | **评测中心** | **数据集 + 规则裁判 + 通过率门禁**（发布门禁语义就位） | LLM-as-Judge、人工抽检、在线影子流量 |
+| **发布治理** | **版本生命周期（draft→review→prod→rolled_back/retired）+ 评测门禁强制 + 回滚恢复旧版（/api/v1/releases）** | Canary 灰度比例、环境体系（Dev/Staging/Prod）、制品组合版本 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |
 | Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入 | SKILL.md 打包/签名、技能市场 |
 | MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |

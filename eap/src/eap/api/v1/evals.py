@@ -59,16 +59,22 @@ def list_datasets(db: Session = fastapi.Depends(get_db)):
 
 @router.post("/runs")
 async def run_evaluation(body: EvalRunRequest, db: Session = fastapi.Depends(get_db)):
-    """对智能体执行规则裁判评测：输出包含任一关键词即通过；通过率过门禁 → PASS。"""
-    dataset = db.scalar(select(EvalDatasetRecord).where(EvalDatasetRecord.name == body.dataset))
+    result = await execute_evaluation(db, body.agent, body.dataset, body.min_pass_rate)
+    return result
+
+
+async def execute_evaluation(db: Session, agent: str, dataset_name: str,
+                             min_pass_rate: float = 0.8) -> dict:
+    """规则裁判评测（发布门禁复用）：输出包含任一关键词即通过；通过率过门禁 → PASS。"""
+    dataset = db.scalar(select(EvalDatasetRecord).where(EvalDatasetRecord.name == dataset_name))
     if dataset is None:
-        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 数据集 {body.dataset} 不存在")
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 数据集 {dataset_name} 不存在")
 
     scores = []
     passed = 0
     for case in dataset.cases:
         try:
-            resp = await _invoke(db, body.agent, case["input"])
+            resp = await _invoke(db, agent, case["input"])
             output = resp["output"]
         except Exception as e:
             scores.append({"input": case["input"], "passed": False, "error": str(e)[:200]})
@@ -78,12 +84,12 @@ async def run_evaluation(body: EvalRunRequest, db: Session = fastapi.Depends(get
         scores.append({"input": case["input"], "passed": ok, "output_snippet": output[:120]})
 
     rate = passed / len(dataset.cases) if dataset.cases else 0.0
-    verdict = "PASS" if rate >= body.min_pass_rate else "FAIL"
-    run = EvalRunRecord(id=uuid.uuid4().hex, agent=body.agent, dataset=body.dataset,
-                        verdict=verdict, min_pass_rate=body.min_pass_rate, scores=scores)
+    verdict = "PASS" if rate >= min_pass_rate else "FAIL"
+    run = EvalRunRecord(id=uuid.uuid4().hex, agent=agent, dataset=dataset_name,
+                        verdict=verdict, min_pass_rate=min_pass_rate, scores=scores)
     db.add(run)
     db.commit()
-    return {"run_id": run.id, "agent": body.agent, "dataset": body.dataset,
+    return {"run_id": run.id, "agent": agent, "dataset": dataset_name,
             "verdict": verdict, "pass_rate": round(rate, 4), "scores": scores}
 
 

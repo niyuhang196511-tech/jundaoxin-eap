@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -262,3 +262,25 @@ class EmbedChannel(Base):
     status: Mapped[str] = mapped_column(String(16), default="enabled")  # enabled | disabled
     note: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AgentReleaseRecord(Base):
+    """Agent 发布治理（docs/06 §2，M3）：版本生命周期 Draft→Review→Prod→Rollback。
+
+    - 评测门禁：进入 prod 必须绑定一条 PASS 的评测运行（EvalRunRecord）
+    - prod 指针：同一时刻每个 agent 至多一条 state=prod 的发布（提升时自动退役旧版）
+    """
+
+    __tablename__ = "agent_releases"
+    __table_args__ = (UniqueConstraint("agent", "version", name="uq_release_agent_version"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    agent: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    state: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # draft | review | prod | rolled_back | retired
+    eval_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    eval_verdict: Mapped[str | None] = mapped_column(String(8), nullable=True)  # PASS | FAIL
+    notes: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
