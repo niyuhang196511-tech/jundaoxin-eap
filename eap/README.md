@@ -100,6 +100,12 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/promote
 curl -s -H "$KEY" localhost:8300/api/v1/releases/current/faq-agent
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/releases/<id>/rollback
+
+# 成本中心：设月度 token 预算 → 用量汇总 → 超限后调用被 429 熔断
+curl -s -X PUT -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/budgets \
+  -d '{"tenant_id":1,"monthly_token_budget":1000000}'
+curl -s -H "$KEY" localhost:8300/api/v1/budgets/1            # 预算+当月用量+是否熔断
+curl -s -H "$KEY" localhost:8300/api/v1/budgets/1/summary    # 按 kind/model 分组明细
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -136,6 +142,7 @@ class MyAgent(AgentApp):
 | **Prompt Center** | **模板/变量自动提取/渲染/API**，工作流与智能体引用 | 版本流水线、A/B 实验 |
 | **评测中心** | **数据集 + 规则裁判 + 通过率门禁**（发布门禁语义就位） | LLM-as-Judge、人工抽检、在线影子流量 |
 | **发布治理** | **版本生命周期（draft→review→prod→rolled_back/retired）+ 评测门禁强制 + 回滚恢复旧版（/api/v1/releases）** | Canary 灰度比例、环境体系（Dev/Staging/Prod）、制品组合版本 |
+| **成本中心** | **租户月度 token 预算 + 用量汇总（按 kind/model 分组）+ 调用侧超限熔断 429（/api/v1/budgets）** | 单价计费账单、按模型差价、配额分层 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |
 | Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入 | SKILL.md 打包/签名、技能市场 |
 | MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |

@@ -14,6 +14,7 @@ from . import __version__
 from .agents.registry import registry
 from .api.v1 import a2a as api_a2a
 from .api.v1 import agents as api_agents
+from .api.v1 import budgets as api_budgets
 from .api.v1 import chat as api_chat
 from .api.v1 import embed as api_embed
 from .api.v1 import evals as api_evals
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_chat.router)
     app.include_router(api_agents.router)
+    app.include_router(api_budgets.router)
     app.include_router(api_a2a.router)
     app.include_router(api_a2a.wellknown)
     app.include_router(api_kb.router)

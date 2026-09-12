@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ...agents.registry import registry
 from ...db import get_db
 from ...observability.middleware import record_usage
+from ...runtime import budget
 from ...schemas import InvokeRequest
 from ..deps import resolve_tenant
 
@@ -61,6 +62,11 @@ async def invoke(
     embed_agent = getattr(request.state, "embed_agent", None)
     if embed_agent and embed_agent != name:
         raise fastapi.HTTPException(status_code=403, detail=f"EAP-3002 会话令牌仅限智能体 {embed_agent}")
+    # 成本中心熔断：token 预算超限 → 429（docs/08 §4）
+    try:
+        budget.guard(db, getattr(request.state, "tenant_id", 0))
+    except RuntimeError as e:
+        raise fastapi.HTTPException(status_code=429, detail=str(e)) from e
     if body.stream:
         return StreamingResponse(
             _stream_invoke(name, body, request, db),

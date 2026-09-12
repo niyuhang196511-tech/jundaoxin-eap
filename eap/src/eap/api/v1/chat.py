@@ -14,6 +14,7 @@ from ...db import get_db
 from ...modelhub.providers import ProviderError
 from ...modelhub.router import hub
 from ...observability.middleware import record_usage
+from ...runtime import budget
 from ...schemas import ChatCompletionRequest
 from ..deps import require_api_key, resolve_tenant
 
@@ -32,6 +33,11 @@ async def chat_completions(
 ):
     trace_id = getattr(request.state, "trace_id", uuid.uuid4().hex)
     tenant_id = getattr(request.state, "tenant_id", 0)
+    # 成本中心熔断：token 预算超限 → 429（docs/08 §4）
+    try:
+        budget.guard(db, tenant_id)
+    except RuntimeError as e:
+        raise fastapi.HTTPException(status_code=429, detail=str(e)) from e
     messages = [m.model_dump(exclude_none=True) for m in body.messages]
     prefer = None if body.model in ("auto", "") else body.model
     t0 = time.monotonic()

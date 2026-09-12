@@ -140,6 +140,19 @@ class UsageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class BudgetRecord(Base):
+    """成本中心·租户预算（docs/08 §4）：按自然月统计 token 用量，超限熔断调用。"""
+
+    __tablename__ = "budgets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    monthly_token_budget: Mapped[int] = mapped_column(Integer, default=0)  # 0 = 不限
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(128), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class SkillRecord(Base):
     """技能注册表（docs/04 §3）：SKILL.md 的结构化存储。
 
