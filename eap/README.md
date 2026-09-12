@@ -122,6 +122,12 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
   -d '{"name":"local-only","tenant_id":1,"kind":"provider-allowlist","config":{"providers":["mock"]},"priority":10}'
 # → 该租户调用只路由到本地供应商（数据不出域）；违规返回 403 EAP-7101
 curl -s -H "$KEY" "localhost:8300/api/v1/policies?tenant_id=1"
+
+# 企业 IM：登记渠道（飞书/钉钉/企业微信）→ 回调端点挂到 IM 开放平台 → 群里 @机器人 即问即答
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/im/channels \
+  -d '{"name":"fs-1","platform":"feishu","agent":"faq-agent","secret":"verification-token","webhook_url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx"}'
+# 把回调地址配到飞书/钉钉/企微后台（钉钉加签、企微需 token+EncodingAESKey 存入 extra）
+curl -s -X POST -H "$KEY" localhost:8300/api/v1/im/channels/fs-1/test   # 推送连通性冒烟
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -159,7 +165,8 @@ class MyAgent(AgentApp):
 | **评测中心** | **数据集 + 规则裁判 + 通过率门禁**（发布门禁语义就位） | LLM-as-Judge、人工抽检、在线影子流量 |
 | **发布治理** | **版本生命周期（draft→review→canary→prod→rolled_back/retired）+ 评测门禁强制 + Canary 灰度（user/session 稳定 hash 分流 + overrides.model 路由覆盖）+ 回滚恢复旧版（/api/v1/releases）** | 环境体系（Dev/Staging/Prod）、制品组合版本 |
 | **成本中心** | **租户月度 token 预算 + 用量汇总（按 kind/model 分组）+ 调用侧超限熔断 429（/api/v1/budgets）** | 单价计费账单、按模型差价、配额分层 |
-| **企业连接器** | **连接器注册/验证/启停 API + 端点→平台工具自动包装（rest + 内置 mock-erp）+ order-agent 经连接器调 ERP（/api/v1/connectors）** | SQL 连接器、飞书/钉钉、OAuth 凭证托管 |
+| **企业连接器** | **连接器注册/验证/启停 API + 端点→平台工具自动包装（rest + 内置 mock-erp）+ order-agent 经连接器调 ERP（/api/v1/connectors）** | SQL 连接器、OAuth 凭证托管 |
+| **企业 IM** | **飞书/钉钉/企业微信渠道：群机器人 Webhook 推送 + 回调接入智能体（飞书 challenge/钉钉加签/企业微信 SHA1+AES 解密），回复自动推回群（/api/v1/im）** | 卡片消息、应用级 API（发消息/通讯录）、事件重试队列 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |
 | Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入 | SKILL.md 打包/签名、技能市场 |
 | MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |

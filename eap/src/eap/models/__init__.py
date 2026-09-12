@@ -175,6 +175,28 @@ class PolicyRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class IMChannelRecord(Base):
+    """企业 IM 渠道（docs/04 §4，M3）：飞书/钉钉/企业微信 机器人接入。
+
+    - 推送：群机器人 Webhook（三平台格式不同，runtime/im.py 统一封装）
+    - 接入：回调端点 /api/v1/im/{platform}/{name}/webhook → 路由到绑定智能体，回复推回群
+    - secret：飞书=Verification Token；钉钉=加签密钥；企业微信用 extra={"token","aes_key"}
+    """
+
+    __tablename__ = "im_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(16))  # feishu | dingtalk | wecom
+    agent: Mapped[str] = mapped_column(String(64))  # 接入消息路由到的智能体
+    webhook_url: Mapped[str] = mapped_column(String(512), default="")  # 群机器人推送地址
+    secret: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)  # 企业微信: {"token","aes_key"}
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ConnectorRecord(Base):
     """企业连接器（docs/04 §4，M3）：把外部系统的端点注册为平台工具。
 
