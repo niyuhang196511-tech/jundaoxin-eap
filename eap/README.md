@@ -22,6 +22,21 @@ EAP_OPENAI_MODEL=deepseek-chat \
 uv run python -m eap
 ```
 
+## Docker 部署（单机）
+
+```bash
+cd eap
+cp .env.example .env        # 更换 API Key / SESSION_SECRET / POSTGRES 口令
+docker compose up -d --build
+curl localhost:8300/health  # {"status":"ok",...}
+```
+
+- 镜像多阶段构建：Node 构建控制台 → Python 3.12 运行时（uv 锁定依赖、非 root、健康检查）
+- PostgreSQL 16 持久化（`postgres` extra 提供驱动），启动自动建表 + 种子
+- 生产检查清单见 docker-compose.yml 注释；部署验证冒烟：
+  `docker compose exec -T eap python -` 后粘贴 docs/10 附录的冒烟脚本（管道输入）
+- 完整配置项说明见 [.env.example](.env.example)
+
 ## 冒烟验证
 
 ```bash

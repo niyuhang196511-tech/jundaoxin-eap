@@ -10,3 +10,5 @@ __pycache__/
 .env
 # uv
 # uv.lock 建议提交，此处不忽略
+# Docker 本地构建
+docker-compose.override.yml

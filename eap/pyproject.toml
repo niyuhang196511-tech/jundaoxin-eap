@@ -15,6 +15,10 @@ dependencies = [
     "cryptography>=42.0",
 ]
 
+[project.optional-dependencies]
+# 生产数据库驱动：EAP_DB_URL=postgresql+psycopg://... 时需要（docs/05 §5）
+postgres = ["psycopg[binary]>=3.1"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
