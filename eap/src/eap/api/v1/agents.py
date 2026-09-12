@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ...agents.registry import registry
 from ...db import get_db
 from ...observability.middleware import record_usage
+from ...runtime import budget, policy
 from ...runtime import budget
 from ...schemas import InvokeRequest
 from ..deps import resolve_tenant
@@ -75,12 +76,17 @@ async def invoke(
     import time as _time
 
     t0 = _time.monotonic()
+    token = policy.set_tenant(getattr(request.state, "tenant_id", None))
     try:
         resp = await registry.invoke(db, name, body, trace_id=getattr(request.state, "trace_id", None))
+    except policy.PolicyDenied as e:
+        raise fastapi.HTTPException(status_code=403, detail=str(e)) from e
     except KeyError as e:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
     except RuntimeError as e:
         raise fastapi.HTTPException(status_code=503, detail=f"EAP-4005 {e}") from e
+    finally:
+        policy.reset_tenant(token)
     record_usage(
         getattr(request.state, "trace_id", ""), getattr(request.state, "tenant_id", 0),
         kind="agent", model=resp.usage.get("model", name),
@@ -102,6 +108,7 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
         return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     yield send("start", {"agent": name, "trace_id": trace_id})
+    token = policy.set_tenant(getattr(request.state, "tenant_id", None))
     try:
         resp = await registry.invoke(db, name, body, trace_id=trace_id)
         for step in resp.steps:
@@ -112,3 +119,5 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
                      latency_ms=int((_time.monotonic() - t0) * 1000))
     except Exception as e:
         yield send("error", {"message": str(e)})
+    finally:
+        policy.reset_tenant(token)

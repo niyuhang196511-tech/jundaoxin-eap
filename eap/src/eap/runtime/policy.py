@@ -1,0 +1,78 @@
+"""Policy Engine（docs/02 ①，M3）：模型中心租户策略，在模型网关路由链上强制执行。
+
+租户上下文：入口端点（agents/chat）设 contextvar，任务引擎等无租户的内部调用
+不生效（平台内部模式）。策略评估顺序：租户策略按 priority 升序，随后平台默认
+（tenant_id=0）；模型链逐层过滤，prompt 上限超限即拒（EAP-7101）。
+"""
+
+from __future__ import annotations
+
+import contextvars
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..modelhub.providers import approx_tokens
+from ..models import ModelRecord, PolicyRecord
+
+tenant_scope: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "eap_policy_tenant", default=None)
+
+
+class PolicyDenied(RuntimeError):
+    """策略拒绝（EAP-7101）：调用方应映射为 403。"""
+
+
+def set_tenant(tenant_id: int | None) -> contextvars.Token:
+    return tenant_scope.set(tenant_id)
+
+
+def reset_tenant(token: contextvars.Token) -> None:
+    tenant_scope.reset(token)
+
+
+def _policies_for(db: Session, tenant_id: int | None) -> list[PolicyRecord]:
+    if tenant_id is None:
+        return []
+    rows = db.scalars(
+        select(PolicyRecord)
+        .where(PolicyRecord.enabled == True)  # noqa: E712
+        .order_by(PolicyRecord.priority)
+    ).all()
+    tenant_rows = [p for p in rows if p.tenant_id == tenant_id]
+    if tenant_rows:
+        return tenant_rows  # 租户有自己的策略时，平台默认不叠加
+    return [p for p in rows if p.tenant_id == 0]
+
+
+def enforce_chain(db: Session, records: list[ModelRecord]) -> list[ModelRecord]:
+    """对候选模型链应用策略过滤；过滤后为空 → PolicyDenied。"""
+    tenant_id = tenant_scope.get()
+    chain = records
+    for policy in _policies_for(db, tenant_id):
+        cfg = policy.config or {}
+        if policy.kind == "model-allowlist":
+            allow = set(cfg.get("models") or [])
+            chain = [r for r in chain if r.name in allow]
+        elif policy.kind == "provider-allowlist":
+            allow = set(cfg.get("providers") or [])
+            chain = [r for r in chain if r.provider in allow]
+    if records and not chain:
+        raise PolicyDenied(
+            f"EAP-7101 租户 {tenant_id} 的模型策略拒绝了全部候选模型"
+            f"（候选 {[r.name for r in records]}），请检查策略中心配置")
+    return chain
+
+
+def check_prompt(db: Session, messages: list[dict]) -> None:
+    """单次调用 prompt token 上限（docs/08 §4 的成本策略子项）。"""
+    tenant_id = tenant_scope.get()
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind == "max-prompt-tokens":
+            limit = int((policy.config or {}).get("limit") or 0)
+            if limit > 0:
+                used = sum(approx_tokens(str(m.get("content") or "")) for m in messages)
+                if used > limit:
+                    raise PolicyDenied(
+                        f"EAP-7101 prompt 约 {used} tokens 超过租户 {tenant_id} "
+                        f"单次调用上限 {limit}（策略 {policy.name}）")

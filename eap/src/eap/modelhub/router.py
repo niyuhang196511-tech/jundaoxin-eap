@@ -49,7 +49,10 @@ class ModelHub:
             from ..runtime.canary import current_model_override
 
             prefer = current_model_override()  # canary 灰度覆盖（显式 prefer 优先）
-        chain = self.chain_for(db, capability=capability, prefer=prefer)
+        from ..runtime.policy import check_prompt, enforce_chain
+
+        check_prompt(db, messages)  # Policy Engine：单次调用 prompt 上限
+        chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
         if not chain:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
         errors: list[str] = []

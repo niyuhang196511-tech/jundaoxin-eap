@@ -116,6 +116,12 @@ curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api
 curl -s -X POST -H "$KEY" localhost:8300/api/v1/connectors/corp-erp/validate
 curl -s -H "$KEY" localhost:8300/api/v1/connectors/mock-erp/tools
 # order-agent 自动改用连接器 ERP：库存查询走 erp.inventory.query，下单仍触发 HITL 审批
+
+# Policy Engine：租户策略在模型网关强制执行（租户策略存在时平台默认不叠加）
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/policies \
+  -d '{"name":"local-only","tenant_id":1,"kind":"provider-allowlist","config":{"providers":["mock"]},"priority":10}'
+# → 该租户调用只路由到本地供应商（数据不出域）；违规返回 403 EAP-7101
+curl -s -H "$KEY" "localhost:8300/api/v1/policies?tenant_id=1"
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -143,7 +149,7 @@ class MyAgent(AgentApp):
 
 | 模块 | 已实现 | 待实现（见 docs/09 路线） |
 |---|---|---|
-| 模型中心 | 能力路由、降级链、mock/OpenAI 兼容、定制模型注册 API | Policy Engine、评测门禁接入路由、vLLM multi-LoRA 托管 |
+| 模型中心 | 能力路由、降级链、mock/OpenAI 兼容、定制模型注册 API、**Policy Engine（租户模型/供应商白名单 + prompt 上限，网关强制执行，EAP-7101）** | 评测门禁接入路由、vLLM multi-LoRA 托管 |
 | 知识中心 | 多 KB、分块、hash/openai 嵌入、BM25+向量+RRF、Citation、级联删除 | 图谱路（LightRAG）、Reranker、Milvus |
 | Agent Runtime | Context 预算、Agent Loop、工具协议、HITL 审批门控 + 挂起/恢复 | 人工审批 UI、持久化 Checkpoint |
 | **多智能体** | **Supervisor 委派（agent.\* 工具化）+ 深度护栏 + 内置 supervisor-agent** | Handoff 策略编排 UI、跨租户 A2A 委派 |

@@ -153,6 +153,28 @@ class BudgetRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class PolicyRecord(Base):
+    """Policy Engine（docs/02 ①，M3）：模型中心租户策略，模型网关路由时强制执行。
+
+    - tenant_id=0 为平台默认策略，具体租户策略按 priority 升序先于默认生效
+    - kind=model-allowlist：config={"models": [...]} 只允许路由到指定模型
+    - kind=provider-allowlist：config={"providers": ["mock", ...]} 数据不出域（只允许本地/内网供应商）
+    - kind=max-prompt-tokens：config={"limit": N} 单次调用 prompt token 预算上限
+    """
+
+    __tablename__ = "policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 0 = 平台默认
+    kind: Mapped[str] = mapped_column(String(24), default="model-allowlist")
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)  # 小者先生效
+    notes: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ConnectorRecord(Base):
     """企业连接器（docs/04 §4，M3）：把外部系统的端点注册为平台工具。
 

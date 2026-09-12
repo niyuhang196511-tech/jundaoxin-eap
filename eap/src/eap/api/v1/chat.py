@@ -14,7 +14,7 @@ from ...db import get_db
 from ...modelhub.providers import ProviderError
 from ...modelhub.router import hub
 from ...observability.middleware import record_usage
-from ...runtime import budget
+from ...runtime import budget, policy
 from ...schemas import ChatCompletionRequest
 from ..deps import require_api_key, resolve_tenant
 
@@ -42,13 +42,18 @@ async def chat_completions(
     prefer = None if body.model in ("auto", "") else body.model
     t0 = time.monotonic()
 
+    token = policy.set_tenant(tenant_id)
     try:
         completion = await hub.complete(
             db, messages, capability="chat", tools=body.tools or None,
             prefer=prefer, temperature=body.temperature,
         )
+    except policy.PolicyDenied as e:
+        raise fastapi.HTTPException(status_code=403, detail=str(e)) from e
     except ProviderError as e:
         raise fastapi.HTTPException(status_code=502, detail=f"EAP-4001 {e}") from e
+    finally:
+        policy.reset_tenant(token)
 
     result, record = completion.result, completion.record
     latency_ms = int((time.monotonic() - t0) * 1000)
