@@ -1,0 +1,24 @@
+flowchart TB
+    TR["trace_id（网关生成 · 全局贯穿）"]
+    S1["span: gateway.receive<br/>凭证 / 租户 / 限流"]
+    S2["span: agent.runtime<br/>agent_version · invocation_id"]
+    S3["span: context.build<br/>预算分配 · 注入源清单"]
+    S4["span: gen_ai.llm<br/>model · tokens · cost · 首 token"]
+    S5["span: rag.retrieve<br/>kb · 改写 · 三路分数 · rerank"]
+    S6["span: tool.call<br/>tool · connector · 审计ID"]
+    S7["span: a2a.handoff<br/>跨系统 task_id 透传"]
+    S8["span: connector.exec<br/>业务系统响应"]
+    S9["span: guardrail<br/>拦截原因（100% 采样）"]
+    TR --> S1 --> S2
+    S2 --> S3
+    S2 --> S4
+    S2 --> S5
+    S2 --> S6
+    S2 --> S7
+    S6 --> S8
+    S2 --> S9
+    S1 --> LG["Langfuse 会话回放 / Jaeger 拓扑 / 成本中心聚合"]
+    S2 --> LG
+    S4 --> LG
+    S5 --> LG
+    S6 --> LG

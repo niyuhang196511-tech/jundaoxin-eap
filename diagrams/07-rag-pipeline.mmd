@@ -1,0 +1,20 @@
+flowchart LR
+    subgraph Idx["知识摄入与索引"]
+        ING["Ingestion 解析<br/>MinerU/DeepDoc·OCR·表格"] --> CHK["分块<br/>父子/语义/QA对"]
+        CHK --> V["向量索引"]
+        CHK --> S["稀疏索引 BM25"]
+        CHK --> G["图谱抽取<br/>实体·关系·社区摘要（LightRAG式增量）"]
+    end
+    Q["Query"] --> RW["查询改写<br/>HyDE·拆解·扩展"]
+    RW --> QR{"查询路由"}
+    QR -->|语义| V
+    QR -->|关键词| S
+    QR -->|多跳关系| G
+    V --> FU["融合 RRF"]
+    S --> FU
+    G --> FU
+    FU --> RR["重排 Reranker"]
+    RR --> CP["上下文压缩"]
+    CP --> GEN["生成"]
+    GEN --> CT["Citation 引用溯源<br/>文档+页码+chunk+KB版本"]
+    CT --> VF["Verifier 校验"]

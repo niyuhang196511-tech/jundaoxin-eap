@@ -1,0 +1,32 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户/渠道
+    participant GW as 网关
+    participant RT as Agent Runtime
+    participant CX as Context Engine
+    participant RG as RAG Runtime
+    participant TL as 工具/连接器
+    participant ML as 模型网关
+    participant ST as State Manager
+    U->>GW: 请求（Embed/API Key 凭证）
+    GW->>RT: 校验 · 租户解析 · trace_id 注入
+    RT->>ST: 载入会话 / Checkpoint
+    loop Agent Loop（Token/步数预算内）
+        RT->>CX: 组装上下文（Budget 分配）
+        CX-->>RT: Prompt（13 类上下文源）
+        RT->>ML: LLM 调用（独立 span）
+        ML-->>RT: 决策：调工具 / 检索 / 直接回答
+        alt 需要检索
+            RT->>RG: retrieve(kb, query)
+            RG-->>RT: 命中 + Citation
+        else 需要工具
+            RT->>RT: 策略校验（工具权限/参数护栏/数据分级）
+            RT->>TL: 工具调用（独立 span）
+            TL-->>RT: 结果（消毒后）
+        else 直接回答
+            RT-->>U: 流式答案 + Citation
+        end
+        RT->>ST: 写 Checkpoint
+    end
+    RT->>GW: 完成（usage / 成本上报）
+    GW-->>U: 结果信封（trace_id）

@@ -1,0 +1,22 @@
+sequenceDiagram
+    autonumber
+    participant P as 第三方页面
+    participant W as eap-widget.js
+    participant BE as 页面后端（可选）
+    participant GW as EAP 网关
+    participant AG as 智能体
+    P->>W: 挂载 eap-chat 组件
+    opt 可编程模式（服务端换令牌，避免前端暴露长期凭证）
+        BE->>GW: EmbedToken → 换短时会话令牌（绑定 agent/域名/租户）
+        GW-->>BE: session_token（短时效可刷新）
+        BE-->>W: 注入 session_token
+    end
+    W->>GW: 建立会话（域名白名单校验 · 频控 · 身份透传签名）
+    loop 用户对话
+        P->>W: 输入
+        W->>GW: 消息（SSE 流式）
+        GW->>AG: 运行（工具调用 + 知识库检索）
+        AG-->>W: 流式答案 + Citation + usage
+        W-->>P: 渲染（引用可点击定位原文）
+    end
+    GW->>GW: 会话级审计记录

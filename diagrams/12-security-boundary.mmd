@@ -1,0 +1,26 @@
+flowchart TB
+    subgraph Z0["不可信区：公网"]
+        TP["第三方页面嵌入"] ; EXT["外部模型 API"]
+    end
+    subgraph Z1["半可信区：DMZ"]
+        GW["API 网关<br/>WAF · 鉴权 · 限流 · EmbedToken 校验"]
+    end
+    subgraph Z2["可信区：平台内网 K8s"]
+        CP["Control Plane"] ; RT["Runtime Plane"]
+        SG["执行沙箱<br/>容器/gVisor 隔离 · NetworkPolicy · 只读根文件系统"]
+    end
+    subgraph Z3["高价值区：数据层"]
+        DB[("PG / 向量 / 图 / 对象存储")]
+        BIZ["业务系统 ERP / CRM"]
+    end
+    subgraph Z4["员工端点：Harness（独立信任域）"]
+        SB["本地沙箱<br/>文件/网络/进程/浏览器四域策略"]
+    end
+    TP -->|"仅 EmbedToken 通道"| GW
+    GW --> CP
+    GW --> RT
+    RT --> SG --> DB
+    RT -->|"策略放行"| EXT
+    SG -->|"连接器 · 白名单"| BIZ
+    SB <-->|"同步协议 · 设备授权"| GW
+    SB -.->|"默认拒绝 · 白名单放行"| BIZ

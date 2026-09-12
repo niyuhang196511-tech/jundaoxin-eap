@@ -1,0 +1,46 @@
+# EAP · 企业级 Agent Operating Platform
+
+> 平台定位：统一管理模型、知识、智能体、工具、技能、Prompt 六类资产，覆盖注册→发布→运行→观测→评测→计费全生命周期，延伸至员工桌面（Harness）与第三方系统（嵌入外链 / A2A）。
+
+## 代码工程（可运行）
+
+[eap/](eap/) —— **M1 核心已实现并通过全量测试（18/18）**：模型中心（能力路由+降级链）、知识中心（混合检索+Citation）、Agent Runtime（Loop+工具调用）、注册钩子 SDK、OpenAI 兼容 API（含 SSE）。默认离线可跑（mock 模型 + hash 嵌入 + SQLite）。
+
+```bash
+cd eap
+uv sync                 # uv + Python 3.12
+uv run pytest           # 18 个测试
+uv run python -m eap    # 启动 → http://localhost:8300/docs
+```
+
+详见 [eap/README.md](eap/README.md)。
+
+## 设计文档
+
+- **想 3 分钟看懂全貌** → 打开 [architecture.html](architecture.html)（交互式架构图：点击模块查看职责，滚轮缩放，拖拽平移）
+- **想 10 分钟读懂架构** → [docs/02-总体架构设计.md](docs/02-总体架构设计.md)
+- **评审/立项汇报** → architecture.html + docs/01 + docs/09
+
+## 文档目录（建议阅读顺序）
+
+| # | 文档 | 一句话说明 |
+|---|---|---|
+| 01 | [需求与竞品分析](docs/01-需求与竞品分析.md) | 10 项需求→模块映射、竞品能力矩阵、文献来源 |
+| 02 | [总体架构设计](docs/02-总体架构设计.md) | 三面七层、十大中心、七大运行组件、部署概览 |
+| 03 | [Agent Runtime 与执行模型](docs/03-AgentRuntime与执行模型.md) | 内核三件套、Context Engineering、长任务、注册钩子与 Manifest |
+| 04 | [核心机制设计](docs/04-核心机制设计.md) | 知识/RAG V2、模型中心与专用模型接法、技能、MCP/A2A、外链、Harness |
+| 05 | [领域模型与数据模型](docs/05-领域模型与数据模型.md) | ER、核心表、组合版本、数据生命周期 |
+| 06 | [安全与治理架构](docs/06-安全与治理架构.md) | 安全六域、信任边界、多租户隔离、版本发布环境治理 |
+| 07 | [API / SDK / Protocol 规范](docs/07-API-SDK-Protocol规范.md) | 凭证、对外 API、Manifest Schema、platform-sdk、JS SDK |
+| 08 | [观测评测成本与 SLO](docs/08-观测评测成本与SLO.md) | 链路追踪、监控告警、评测门禁、成本中心、SLO/容量 |
+| 09 | [技术选型与实施路线](docs/09-技术选型与实施路线.md) | 选型与许可证风险、M1/M2/M3 里程碑、团队分工、风险清单 |
+
+## 架构图源文件
+
+`diagrams/` 下 17 个 mermaid 源文件（01 总体架构 … 17 发布生命周期），已内嵌到各文档对应章节，也可在支持 mermaid 的工具中独立维护。
+
+## 下一步
+
+- **M1 收尾**（见 docs/09）：嵌入外链 JS SDK + EmbedToken、Workflow 画布、Redis Streams 任务队列
+- **M2**：Agent Runtime 完整版（Checkpoint/HITL）、MCP 全栈、Skill Registry、Prompt/评测/成本中心、Harness Beta
+- 在会话中直接说"继续实现 XX"即可推进对应模块

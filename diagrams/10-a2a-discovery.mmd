@@ -1,0 +1,13 @@
+sequenceDiagram
+    autonumber
+    participant PA as 平台（A2A Client）
+    participant EA as 外部 Agent（A2A Server）
+    participant RG as Agent Registry
+    PA->>EA: GET /.well-known/agent-card.json
+    EA-->>PA: Agent Card（身份/技能/端点/鉴权要求）
+    PA->>RG: 校验 · 登记 · 健康检查
+    RG-->>PA: 纳管为外部 Agent（统一目录/鉴权/计量）
+    PA->>EA: A2A message/send（委派任务）
+    EA-->>PA: Task 事件流（working → input-required → completed）
+    EA-->>PA: 产物 + 终态
+    Note over PA,RG: 反向身份：平台为每个已发布 Agent 生成 agent-card.json<br/>供集团兄弟系统 / 伙伴系统发现并调用（A2A 1.0.0 规范）

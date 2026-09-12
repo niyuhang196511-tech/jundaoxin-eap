@@ -1,0 +1,14 @@
+flowchart TB
+    U["用户"] --> SUP["Supervisor 主管 Agent"]
+    SUP --> S1["销售分析 Agent"]
+    SUP --> S2["库存 Agent"]
+    SUP --> S3["客服 Agent"]
+    S1 -->|"需要库存数据（Handoff）"| S2
+    S1 --> R1["product-docs 检索"]
+    S2 --> T1["erp.inventory.query"]
+    SUP --> EXT["A2A 外部 Agent<br/>集团风控系统"]
+    S1 --> SUP
+    S2 --> SUP
+    S3 --> SUP
+    EXT --> SUP
+    SUP -->|"汇总 + Citation + 分Agent计量"| U

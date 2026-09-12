@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EAP Widget 演示 · 官网客服外链嵌入</title>
+<style>
+  body{margin:0;font-family:'Segoe UI','Microsoft YaHei',system-ui,sans-serif;background:#0b1220;color:#e6edf7;}
+  .page{max-width:1100px;margin:0 auto;padding:40px 24px;}
+  h1{font-size:22px;} h1 em{font-style:normal;color:#4f8ef7;}
+  p.tip{color:#93a4bd;font-size:13px;line-height:1.8;}
+  code{background:#16233d;padding:2px 6px;border-radius:6px;font-size:12px;}
+  .cols{display:flex;gap:24px;margin-top:24px;flex-wrap:wrap;}
+  .fake-site{flex:1;min-width:300px;border:1px dashed #26385a;border-radius:12px;padding:20px;}
+  .fake-site h3{margin-top:0;font-size:14px;color:#93a4bd;}
+  eap-chat{width:100%;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>EAP · <em>嵌入外链</em>演示 —— 你的官网客服智能体</h1>
+  <p class="tip">
+    本页模拟<b>第三方网站</b>：页面里只有一行组件标签
+    <code>&lt;eap-chat agent="faq-agent" token="…"&gt;</code>，
+    智能体经 EmbedToken 换取短时会话（域名白名单 + 频控 + 最小权限：只能调用绑定的智能体）。
+  </p>
+  <div class="cols">
+    <div class="fake-site">
+      <h3>模拟的第三方站点（官方客服入口）</h3>
+      <eap-chat id="w" agent="faq-agent" token="dev-embed-token" endpoint="" height="460px"></eap-chat>
+    </div>
+  </div>
+</div>
+<script>
+  /* endpoint 留空 = 同源（直接用本平台静态页演示）；跨站嵌入时填平台地址 */
+  var el = document.getElementById("w");
+  el.setAttribute("endpoint", location.origin);
+</script>
+<script>
+  window.addEventListener("error", function (e) {
+    document.title = "ERR: " + e.message + " @" + (e.filename || "") + ":" + e.lineno;
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    document.title = "REJ: " + (e.reason && e.reason.message ? e.reason.message : e.reason);
+  });
+</script>
+<script src="./eap-widget.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+# 数据与密钥
+*.db
+*.db-journal
+.env
+# 前端
+node_modules/
+# 工具状态目录
+.mimosa/
+.zcode/
+# 系统文件
+Thumbs.db
+.DS_Store

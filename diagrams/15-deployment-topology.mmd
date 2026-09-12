@@ -1,0 +1,39 @@
+flowchart TB
+    subgraph OFFICE["员工端点"]
+        H1["Harness（Windows）"] ; H2["Harness（macOS）"]
+    end
+    subgraph NET["公网 / 第三方"]
+        TP["第三方页面（嵌入 Widget）"] ; EXT["外部模型 API<br/>OpenAI / DeepSeek / 通义"]
+    end
+    subgraph IDC["企业内网 K8s 集群"]
+        subgraph ING["接入"]
+            NGINX["Ingress / WAF"] ; GW0["API 网关 Pod ×n"]
+        end
+        subgraph CTRL["控制面"]
+            CP0["十大中心服务"] ; UI0["控制台前端"]
+        end
+        subgraph RUN["运行面"]
+            RT0["Agent Runtime Pod ×n"] ; WRK["Worker 池（Agent/RAG/Tool）"] ; VLLM["vLLM GPU 池（A100×2 起）"]
+        end
+        subgraph DATA["存储"]
+            PG[("PostgreSQL")] ; RDS[("Redis 集群")] ; MIL[("Milvus")] ; NEO[("Neo4j/TuGraph")] ; MIO[("MinIO")]
+        end
+        OBS["观测栈：OTel / Langfuse / Prometheus / Grafana"]
+    end
+    subgraph BIZSYS["业务系统内网"]
+        ERP["ERP（下单/库存）"] ; CRM["CRM"] ; OAS["OA / 飞书 / 钉钉"]
+    end
+    H1 --> NGINX
+    H2 --> NGINX
+    TP --> NGINX
+    NGINX --> GW0
+    GW0 --> CTRL
+    GW0 --> RUN
+    RT0 --> VLLM
+    RT0 --> EXT
+    WRK --> ERP
+    WRK --> CRM
+    WRK --> OAS
+    CTRL --> DATA
+    RUN --> DATA
+    OBS --> DATA

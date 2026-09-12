@@ -1,0 +1,53 @@
+"""官网客服智能体：绑定 website-faq 知识库，检索增强回答 + 引用溯源。
+
+演示注册钩子 SDK 标准用法：import 即注册 → 平台自动纳管（docs/04 §8）。
+"""
+
+from __future__ import annotations
+
+from ..app import AgentApp
+from ..manifest import AgentManifest
+from ..sdk import register_agent
+from ...runtime.context import build_system
+from ...schemas import InvokeRequest, InvokeResult
+
+MANIFEST = AgentManifest(
+    name="faq-agent",
+    version="1.1.0",
+    description="官网客服智能体：绑定 website-faq 知识库 + customer-service 技能，回答带 [n] 引用，可发布为嵌入外链",
+    models=[{"capability": "chat", "required": True}],
+    knowledge=["website-faq"],
+    skills=["customer-service"],
+    permissions=["kb.retrieve"],
+    embeddable=True,
+    domains=["*"],
+)
+
+SYSTEM_ROLE = "你是企业官网客服助手，礼貌、简洁、准确。"
+
+
+@register_agent(MANIFEST, source="builtin")
+class FaqAgent(AgentApp):
+    async def on_invoke(self, request: InvokeRequest) -> InvokeResult:
+        with self.ctx.db() as db:
+            retriever = self.ctx.retriever(MANIFEST.knowledge[0])
+            hits = retriever.search(db, request.input, top_k=3)
+            skill_ctx = self.ctx.skill_context(MANIFEST.skills)  # 渐进披露 L2：按需加载
+            system = build_system(
+                role=SYSTEM_ROLE + (f"\n\n{skill_ctx}" if skill_ctx else ""),
+                knowledge_context=retriever.render(hits),
+                max_chars=self.ctx.settings.max_context_chars,
+            )
+            completion = await self.ctx.chat(
+                db,
+                messages=[{"role": "user", "content": request.input}],
+                system=system,
+            )
+            result, record = completion.result, completion.record
+            return InvokeResult(
+                content=result.content or "",
+                citations=[h["citation"] for h in hits],
+                steps=[f"retrieve: {len(hits)} hits from {MANIFEST.knowledge[0]}",
+                       f"answer via {record.name}"],
+                usage={"tokens_in": result.tokens_in, "tokens_out": result.tokens_out},
+            )

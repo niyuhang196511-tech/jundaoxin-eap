@@ -1,0 +1,20 @@
+sequenceDiagram
+    autonumber
+    participant DV as 开发者
+    participant PKG as 代码包（entry_points）
+    participant RG as Agent Registry
+    participant PV as 策略中心
+    participant CT as 智能体目录
+    DV->>PKG: 实现 AgentApp + agent.yaml
+    DV->>PKG: @register_agent(manifest)
+    Note over PKG: 平台启动 / 插件变更时触发扫描
+    PKG->>PKG: DISCOVER：扫描 eap.agents entry_points
+    PKG->>RG: REGISTER：register() 注册钩子（名称/版本/能力声明）
+    RG->>RG: VALIDATE：Manifest JSON Schema 校验
+    RG->>PV: 审计权限声明（models/kb/tools/network）
+    PV-->>RG: 通过 / 驳回
+    RG->>RG: 版本化写入（旧版本不受影响）
+    RG->>PKG: LOAD → START：on_start() 构建 LLM/检索器/工具
+    PKG->>RG: health_check() 就绪上报
+    RG->>CT: 上架目录 + 生成统一调用端点 + 嵌入外链
+    Note over RG,CT: UPGRADE = 新版本并行加载 → 灰度切流<br/>ROLLBACK = 版本一键回切<br/>UNHEALTHY = 自动摘除流量

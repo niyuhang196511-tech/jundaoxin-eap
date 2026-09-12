@@ -1,0 +1,8 @@
+flowchart TB
+    T["租户 A / 租户 B"] --> L1["① 身份隔离<br/>Token 绑定 tenant_id（签名防篡改）"]
+    L1 --> L2["② 路由隔离<br/>Agent 目录 / 部署 / 灰度按租户解析"]
+    L2 --> L3["③ 数据隔离<br/>PG RLS · Milvus collection · 图 label 前缀 · 对象存储前缀"]
+    L3 --> L4["④ 执行隔离<br/>租户标签 Worker · K8s NetworkPolicy 出网限制"]
+    L4 --> L5["⑤ 计量隔离<br/>预算 / 配额 / 账单独立"]
+    L5 --> L6["⑥ 遥测隔离<br/>Trace/日志带租户属性 · 跨租户检索需审批"]
+    L6 --> OK["任一层失守仍有下一层兜底"]

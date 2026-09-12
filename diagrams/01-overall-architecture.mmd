@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph L0["L0 接入层"]
+        WEB[Web 控制台] ; EMB[嵌入外链<br/>iframe + JS SDK] ; API[开放 API] ; A2A0[A2A 端点] ; HAR[本地 Harness]
+    end
+    subgraph L1["L1 Gateway & Identity"]
+        GW["统一网关<br/>OAuth2/OIDC/SSO · APIKey · EmbedToken<br/>租户路由 · 限流配额 · 审计"]
+    end
+    subgraph L2["L2 Control Plane（管理面）"]
+        direction LR
+        MC["①模型中心"] ; KC["②知识中心"] ; AC["③智能体中心+Agent Registry"] ; TC["④工具与连接器中心"] ; SC["⑤技能中心"]
+        PC["⑥Prompt中心"] ; EC["⑦评测中心"] ; PL["⑧策略中心"] ; CC["⑨成本中心"] ; GC["⑩制品与发布治理"]
+    end
+    subgraph L3["L3 Runtime Plane（执行面）"]
+        direction LR
+        CE["Context Engine<br/>上下文工程+预算"] ; AR["Agent Runtime 内核<br/>Loop·Checkpoint·HITL"] ; WE["Workflow Engine"] ; TE["Task/Job Engine<br/>状态机·队列·Worker"] ; MM["Memory Service"] ; RR["RAG Runtime"] ; MAR["Multi-Agent Runtime"]
+    end
+    subgraph L4["L4 Integration & Protocol"]
+        MCP4["MCP Client/Server/Registry"] ; A2A4["A2A 1.0 对外"] ; CONN["企业连接器<br/>ERP·CRM·OA·飞书·钉钉·SQL"] ; OHK["Webhook/事件"]
+    end
+    subgraph L5["L5 Local Runtime（本地 Harness）"]
+        HS["Harness 客户端<br/>本地Agent运行时·技能运行时<br/>Permission Manager·沙箱·同步客户端"]
+    end
+    subgraph L6["L6 Data & Compute（数据面）"]
+        direction LR
+        VLM["vLLM/GPU"] ; VEC["Milvus/pgvector"] ; GRAPH["Neo4j/TuGraph"] ; PG["PostgreSQL"] ; REDIS["Redis+MQ"] ; MINIO["MinIO"] ; BIZ["业务系统"]
+    end
+    L0 --> GW --> L2
+    GW --> L3
+    L2 -.->|"配置/制品下发"| L3
+    L3 --> L4 --> L6
+    L5 <-->|"技能/知识/策略订阅 · 遥测上报"| GW
+    L5 -.->|"沙箱内直连"| L6
+    L2 --> L6

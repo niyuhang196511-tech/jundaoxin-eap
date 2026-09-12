@@ -1,0 +1,30 @@
+[project]
+name = "eap"
+version = "0.1.0"
+description = "EAP 企业级 Agent 智能体平台 — M1 核心：模型中心 / 知识中心 / Agent Runtime / 注册钩子 SDK / OpenAI 兼容 API"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy>=2.0",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "mcp>=2.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

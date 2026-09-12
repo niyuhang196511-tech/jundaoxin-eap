@@ -1,0 +1,14 @@
+# 手写智能体能力声明（K8s 风格，docs/03 §7.3 的 M1 子集）
+apiVersion: agent.eap.io/v1
+kind: AgentApp
+metadata:
+  name: sales-helper
+  version: 0.1.0
+  description: 示例手写智能体：绑定 product-docs 知识库的销售助手
+spec:
+  models:
+    - { capability: chat, required: true }
+  knowledge:
+    - product-docs
+  permissions:
+    - kb.retrieve

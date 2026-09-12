@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+# 本地数据
+*.db
+*.db-journal
+.env
+# uv
+# uv.lock 建议提交，此处不忽略

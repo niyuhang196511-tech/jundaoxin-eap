@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> DRAFT
+    DRAFT --> TESTING: 提交测试
+    TESTING --> REVIEW: 评测报告生成
+    REVIEW --> PUBLISHED: 审核通过
+    REVIEW --> DRAFT: 打回
+    PUBLISHED --> CANARY: 灰度 5% 流量
+    CANARY --> PRODUCTION: 指标达标
+    CANARY --> PUBLISHED: 指标异常自动回退
+    PRODUCTION --> PUBLISHED: Rollback（版本回切）
+    PUBLISHED --> DRAFT: 下线修改

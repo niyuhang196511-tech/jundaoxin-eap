@@ -1,0 +1,15 @@
+flowchart TB
+    subgraph CLOUD["云端平台"]
+        MKT["技能市场"] ; AGL["智能体目录"] ; KBC["知识中心"] ; POL["策略中心"] ; AUD["审计服务"]
+    end
+    subgraph HAR["Harness 客户端（Tauri + Python sidecar）"]
+        UI["桌面 UI"] ; LAR["本地 Agent Runtime<br/>轻量 Loop·可离线"] ; SYN["同步客户端<br/>订阅/断点续传"] ; SKR["技能运行时<br/>签名校验·渐进披露"] ; PM["Permission Manager<br/>HITL 确认弹窗"] ; SBX["沙箱：文件/网络/进程/浏览器 四域策略"] ; LT["本地工具<br/>Office·文件·浏览器·系统"]
+        UI --> LAR
+        LAR --> SKR
+        SKR --> PM
+        PM --> SBX
+        SBX --> LT
+    end
+    SYN <-->|"技能包 / 知识缓存 / 策略 下发"| CLOUD
+    SYN -->|"遥测 · 审计日志 上报（离线暂存）"| AUD
+    LAR -->|"按需调用云端模型/知识"| CLOUD

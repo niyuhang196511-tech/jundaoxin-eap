@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EAP · 企业级 Agent 智能体平台 · 架构总览</title>
+<style>
+  :root{
+    --bg:#0b1220; --bg2:#0f1a2e; --panel:#111d33; --line:#1e2f4d;
+    --txt:#e6edf7; --sub:#93a4bd; --dim:#5b6b85;
+    --access:#22d3ee; --gateway:#38bdf8; --control:#4f8ef7; --runtime:#a78bfa;
+    --integration:#fbbf24; --data:#fb923c; --cross:#8fa3bf;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{background:var(--bg); color:var(--txt); font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; overflow:hidden;}
+  /* ===== 顶栏 ===== */
+  header{position:fixed; top:0; left:0; right:0; height:58px; z-index:50; display:flex; align-items:center; gap:16px;
+    padding:0 20px; background:linear-gradient(180deg,rgba(13,22,40,.97),rgba(13,22,40,.9)); border-bottom:1px solid var(--line); backdrop-filter:blur(6px);}
+  header h1{font-size:17px; font-weight:700; letter-spacing:.5px; white-space:nowrap;}
+  header h1 em{font-style:normal; color:var(--control);}
+  header .sub{font-size:12px; color:var(--sub); white-space:nowrap;}
+  #search{margin-left:auto; width:230px; padding:6px 12px; font-size:12.5px; color:var(--txt);
+    background:var(--bg2); border:1px solid var(--line); border-radius:8px; outline:none;}
+  #search:focus{border-color:var(--control);}
+  .btns{display:flex; gap:6px;}
+  .btns button{padding:5px 11px; font-size:12px; color:var(--sub); background:var(--bg2);
+    border:1px solid var(--line); border-radius:8px; cursor:pointer;}
+  .btns button:hover{color:var(--txt); border-color:var(--control);}
+  /* ===== 画布 ===== */
+  #viewport{position:absolute; inset:58px 0 34px 0; overflow:hidden; cursor:grab;}
+  #viewport.dragging{cursor:grabbing;}
+  #canvas{position:absolute; transform-origin:0 0; padding:28px 0 60px 0; width:1580px;}
+  /* ===== 分层区块 ===== */
+  .layer{position:relative; display:flex; margin:0 auto 0 96px; width:1440px;}
+  .rail{position:absolute; left:-96px; top:0; bottom:0; width:78px; display:flex; align-items:center; justify-content:center;
+    border:1px solid var(--line); border-radius:12px; background:var(--bg2);}
+  .rail .vt{writing-mode:vertical-rl; letter-spacing:3px; font-size:12px; color:var(--sub); white-space:nowrap;}
+  .rail b{color:var(--txt); font-weight:600;}
+  .sec{flex:1; border:1.5px solid var(--line); border-radius:14px; padding:14px 16px 16px; background:rgba(15,26,46,.55);}
+  .sec>.cap{display:flex; align-items:baseline; gap:10px; margin-bottom:12px;}
+  .sec>.cap .t{font-size:14.5px; font-weight:700;}
+  .sec>.cap .e{font-size:11px; color:var(--dim); letter-spacing:.4px;}
+  .grid{display:grid; gap:10px;}
+  .g5{grid-template-columns:repeat(5,1fr);}
+  .g4{grid-template-columns:repeat(4,1fr);}
+  .g3{grid-template-columns:repeat(3,1fr);}
+  .g2{grid-template-columns:repeat(2,1fr);}
+  .plane-control{border-color:rgba(79,142,247,.45); box-shadow:0 0 40px rgba(79,142,247,.06) inset;}
+  .plane-runtime{border-color:rgba(167,139,250,.45); box-shadow:0 0 40px rgba(167,139,250,.06) inset;}
+  /* ===== 模块卡片 ===== */
+  .mod{position:relative; border:1px solid var(--line); border-radius:10px; padding:9px 11px 8px;
+    background:linear-gradient(180deg,#14213a,#101a2f); cursor:pointer; transition:transform .12s, border-color .12s, box-shadow .12s;}
+  .mod:hover{transform:translateY(-2px); border-color:var(--ac); box-shadow:0 6px 18px rgba(0,0,0,.45);}
+  .mod::before{content:""; position:absolute; left:0; top:10px; bottom:10px; width:3px; border-radius:2px; background:var(--ac);}
+  .mod .n{font-size:13.5px; font-weight:600; line-height:1.25;}
+  .mod .d{margin-top:3px; font-size:11px; color:var(--sub); line-height:1.45;}
+  .mod.wide{grid-column:span 1;}
+  .mod.core{border-color:var(--runtime); background:linear-gradient(180deg,#1b2140,#141a33);}
+  .mod.core .n::after{content:"核心"; margin-left:6px; font-size:10px; color:var(--runtime); border:1px solid var(--runtime); border-radius:4px; padding:0 4px; vertical-align:1px;}
+  .mod.dimmed{opacity:.18; pointer-events:none;}
+  .mod.hit{border-color:#facc15; box-shadow:0 0 0 1px #facc15, 0 6px 18px rgba(250,204,21,.25);}
+  /* 网关卡 */
+  .mod.gw{background:linear-gradient(90deg,#0e2a49,#10233f); border-color:rgba(56,189,248,.5);}
+  .mod.gw .d{columns:2; column-gap:18px;}
+  /* 横切条 */
+  .crossbar{display:flex; gap:10px;}
+  .crossbar .mod{flex:1; text-align:center; padding:8px 6px;}
+  .crossbar .mod::before{display:none;}
+  .crossbar .mod .d{margin-top:2px;}
+  /* ===== 连接器 ===== */
+  .conn{position:relative; height:52px; margin:0 96px; width:1440px;}
+  .conn .line{position:absolute; left:50%; top:6px; bottom:6px; width:2px; background:linear-gradient(180deg,var(--c1),var(--c2));}
+  .conn .lab{position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:3px 12px; font-size:11px;
+    color:var(--sub); background:var(--bg2); border:1px solid var(--line); border-radius:999px; white-space:nowrap;}
+  .conn .arr{position:absolute; left:50%; bottom:0; transform:translateX(-50%); width:0; height:0;
+    border-left:6px solid transparent; border-right:6px solid transparent; border-top:8px solid var(--c2);}
+  .conn.dbl .arr2{position:absolute; left:50%; top:0; transform:translateX(-50%); width:0; height:0;
+    border-left:6px solid transparent; border-right:6px solid transparent; border-bottom:8px solid var(--c1);}
+  .conn.dbl .line{top:8px; bottom:8px;}
+  /* ===== 详情面板 ===== */
+  #panel{position:fixed; top:58px; right:-420px; bottom:34px; width:400px; z-index:60;
+    background:rgba(13,22,40,.98); border-left:1px solid var(--line); transition:right .22s ease;
+    display:flex; flex-direction:column;}
+  #panel.open{right:0;}
+  #panel .ph{padding:16px 18px 12px; border-bottom:1px solid var(--line);}
+  #panel .badge{display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; margin-bottom:8px;
+    color:var(--ac); border:1px solid var(--ac); background:rgba(255,255,255,.03);}
+  #panel h2{font-size:17px;}
+  #panel .en{font-size:11.5px; color:var(--dim); margin-top:2px;}
+  #panel .pb{flex:1; overflow-y:auto; padding:14px 18px 20px;}
+  #panel h3{font-size:12px; color:var(--sub); letter-spacing:2px; margin:14px 0 8px; font-weight:600;}
+  #panel p{font-size:13px; line-height:1.75; color:var(--txt);}
+  #panel ul{list-style:none;}
+  #panel li{font-size:12.5px; line-height:1.65; color:var(--sub); padding:5px 0 5px 16px; position:relative; border-bottom:1px dashed rgba(30,47,77,.6);}
+  #panel li::before{content:"▸"; position:absolute; left:0; color:var(--ac);}
+  #panel li b{color:var(--txt); font-weight:600;}
+  #panel .docs a{display:block; font-size:12.5px; color:#7fb0ff; text-decoration:none; padding:6px 0; border-bottom:1px dashed rgba(30,47,77,.6);}
+  #panel .docs a:hover{text-decoration:underline;}
+  #panel .rel{margin-top:6px;}
+  #panel .rel span{display:inline-block; font-size:11.5px; color:var(--sub); border:1px solid var(--line); border-radius:6px; padding:3px 8px; margin:0 6px 6px 0; cursor:pointer;}
+  #panel .rel span:hover{color:var(--txt); border-color:var(--ac);}
+  #close{position:absolute; top:12px; right:14px; width:26px; height:26px; border-radius:8px; border:1px solid var(--line);
+    background:var(--bg2); color:var(--sub); cursor:pointer; font-size:13px;}
+  #close:hover{color:var(--txt); border-color:var(--control);}
+  /* ===== 底栏 ===== */
+  footer{position:fixed; left:0; right:0; bottom:0; height:34px; z-index:50; display:flex; align-items:center; gap:18px;
+    padding:0 20px; font-size:11.5px; color:var(--dim); background:rgba(13,22,40,.97); border-top:1px solid var(--line);}
+  footer .lg{display:flex; align-items:center; gap:5px;}
+  footer .dot{width:8px; height:8px; border-radius:3px;}
+  footer .tip{margin-left:auto;}
+  @media (max-width:1100px){ #panel{width:86vw;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>EAP · <em>企业级 Agent 智能体平台</em> · 架构总览</h1>
+  <span class="sub">三面七层：Control Plane 管什么 · Runtime Plane 怎么跑 · Data Plane 真访问</span>
+  <input id="search" type="text" placeholder="搜索模块（回车定位）…" autocomplete="off">
+  <div class="btns">
+    <button id="zIn" title="放大">＋</button>
+    <button id="zOut" title="缩小">－</button>
+    <button id="fit" title="适应窗口">适应</button>
+    <button id="reset" title="重置">重置</button>
+  </div>
+</header>
+
+<div id="viewport"><div id="canvas">
+
+  <!-- L0 接入层 -->
+  <div class="layer" data-plane="access">
+    <div class="rail"><span class="vt"><b>L0</b> · 接入层 Access</span></div>
+    <div class="sec">
+      <div class="cap"><span class="t">五种统一入口</span><span class="e">ACCESS</span></div>
+      <div class="grid g5">
+        <div class="mod" style="--ac:var(--access)" data-id="web-console"><div class="n">Web 控制台</div><div class="d">资产管理 · 会话回放 · 发布审批 · HITL 工作台</div></div>
+        <div class="mod" style="--ac:var(--access)" data-id="embed-widget"><div class="n">嵌入外链</div><div class="d">iframe + JS SDK，三行代码挂到任意系统</div></div>
+        <div class="mod" style="--ac:var(--access)" data-id="open-api"><div class="n">开放 API</div><div class="d">OpenAI 兼容 + Agent/Task/检索 API</div></div>
+        <div class="mod" style="--ac:var(--access)" data-id="a2a-endpoint"><div class="n">A2A 端点</div><div class="d">对外发布 Agent Card，接受外部委派</div></div>
+        <div class="mod" style="--ac:var(--access)" data-id="harness-access"><div class="n">本地 Harness</div><div class="d">员工桌面客户端入口</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--access);--c2:var(--gateway)"><div class="dbl"><div class="arr2"></div></div><div class="line"></div><div class="arr"></div><div class="lab">HTTPS / WSS · 三种凭证（用户 Token / API Key / Embed Token）</div></div>
+
+  <!-- L1 网关 -->
+  <div class="layer" data-plane="gateway">
+    <div class="rail"><span class="vt"><b>L1</b> · Gateway &amp; Identity</span></div>
+    <div class="sec">
+      <div class="grid g1" style="grid-template-columns:1fr;">
+        <div class="mod gw" style="--ac:var(--gateway)" data-id="gateway">
+          <div class="n">统一网关 · 认证与租户</div>
+          <div class="d">OAuth2/OIDC/SSO · API Key · 设备授权 · EmbedToken 校验 ｜ 租户识别与路由 ｜ 限流与配额 ｜ WAF 防护 ｜ 全量审计 ｜ trace_id 注入（全链路起点）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--gateway);--c2:var(--control)"><div class="line"></div><div class="arr"></div><div class="lab">管理配置（冷路径）· 执行流量（热路径）</div></div>
+
+  <!-- L2 Control Plane -->
+  <div class="layer" data-plane="control">
+    <div class="rail"><span class="vt"><b>L2</b> · <b>Control Plane</b> 管理面</span></div>
+    <div class="sec plane-control">
+      <div class="cap"><span class="t">十大中心 —— 管“有什么、怎么配、谁能用”</span><span class="e">CONTROL PLANE</span></div>
+      <div class="grid g5" style="margin-bottom:10px;">
+        <div class="mod" style="--ac:var(--control)" data-id="model-center"><div class="n">① 模型中心</div><div class="d">供应商适配 · 能力抽象 · 智能路由+Policy · 定制/专用模型注册 · vLLM 托管</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="knowledge-center"><div class="n">② 知识中心</div><div class="d">多 KB 实例+模板 · 三路索引 · 增量知识图谱 · Citation · 数据生命周期</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="agent-center"><div class="n">③ 智能体中心 + Registry</div><div class="d">工作流/注册/A2A 三类纳管 · 注册钩子生命周期 · 健康/灰度</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="tool-center"><div class="n">④ 工具与连接器中心</div><div class="d">Tool≠Connector · MCP Registry · ERP/CRM/OA/飞书/钉钉连接器</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="skill-center"><div class="n">⑤ 技能中心</div><div class="d">SKILL.md 渐进披露 · 权限声明+签名 · 审核 · 技能市场</div></div>
+      </div>
+      <div class="grid g5">
+        <div class="mod" style="--ac:var(--control)" data-id="prompt-center"><div class="n">⑥ Prompt 中心</div><div class="d">模板/变量/版本 · A-B 实验 · 发布回滚</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="eval-center"><div class="n">⑦ 评测中心</div><div class="d">数据集 · LLM 裁判 · 回归 · 发布门禁</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="policy-center"><div class="n">⑧ 策略中心</div><div class="d">RBAC/ABAC · 工具权限 · 数据分级 · 护栏</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="cost-center"><div class="n">⑨ 成本中心</div><div class="d">Token/GPU 计量 · 预算配额 · 多维账单</div></div>
+        <div class="mod" style="--ac:var(--control)" data-id="release-center"><div class="n">⑩ 制品与发布治理</div><div class="d">版本流水线 · 四环境晋升 · 组合版本快照</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--control);--c2:var(--runtime)"><div class="line"></div><div class="arr"></div><div class="lab">不可变制品快照下发 · 策略/预算约束 ▲ 用量/健康/评测回流</div></div>
+
+  <!-- L3 Runtime Plane -->
+  <div class="layer" data-plane="runtime">
+    <div class="rail"><span class="vt"><b>L3</b> · <b>Runtime Plane</b> 执行面</span></div>
+    <div class="sec plane-runtime">
+      <div class="cap"><span class="t">执行引擎群 —— 管“怎么执行”</span><span class="e">RUNTIME PLANE</span></div>
+      <div class="grid g4">
+        <div class="mod" style="--ac:var(--runtime)" data-id="context-engine"><div class="n">Context Engine</div><div class="d">13 类上下文源组装 · Context Budget · 压缩</div></div>
+        <div class="mod core" style="--ac:var(--runtime)" data-id="agent-runtime"><div class="n">Agent Runtime 内核</div><div class="d">Context Mgr + Execution Engine + State Mgr 三件套 · Loop · Checkpoint · HITL</div></div>
+        <div class="mod" style="--ac:var(--runtime)" data-id="workflow-engine"><div class="n">Workflow Engine</div><div class="d">画布/DSL 简单 Agent · 确定性可重放</div></div>
+        <div class="mod" style="--ac:var(--runtime)" data-id="task-engine"><div class="n">Task / Job Engine</div><div class="d">8 态状态机 · 队列 · Worker 池 · 断点续跑</div></div>
+      </div>
+      <div class="grid g3" style="margin-top:10px;">
+        <div class="mod" style="--ac:var(--runtime)" data-id="memory-service"><div class="n">Memory Service</div><div class="d">会话短期 · 长期画像 · 任务记忆 · 组织记忆</div></div>
+        <div class="mod" style="--ac:var(--runtime)" data-id="rag-runtime"><div class="n">RAG Runtime</div><div class="d">改写 → 路由 → 三路召回 → 融合 → 重排 → 压缩</div></div>
+        <div class="mod" style="--ac:var(--runtime)" data-id="multi-agent"><div class="n">Multi-Agent Runtime</div><div class="d">Supervisor / Handoff · A2A 跨系统协作 · 分 Agent 计量</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--runtime);--c2:var(--integration)"><div class="line"></div><div class="arr"></div><div class="lab">协议化访问：一切模型/工具/数据访问经 L4 端点</div></div>
+
+  <!-- L4 Integration -->
+  <div class="layer" data-plane="integration">
+    <div class="rail"><span class="vt"><b>L4</b> · Integration &amp; Protocol</span></div>
+    <div class="sec">
+      <div class="cap"><span class="t">集成与协议</span><span class="e">MCP = Agent↔工具/数据 · A2A = Agent↔Agent</span></div>
+      <div class="grid g4">
+        <div class="mod" style="--ac:var(--integration)" data-id="mcp"><div class="n">MCP 全栈</div><div class="d">Client / Server / Registry 三重身份 · 2025-06-18 规范</div></div>
+        <div class="mod" style="--ac:var(--integration)" data-id="a2a"><div class="n">A2A 1.0</div><div class="d">Agent Card · Task 生命周期 · 对外发布与外部纳管</div></div>
+        <div class="mod" style="--ac:var(--integration)" data-id="connector-runtime"><div class="n">连接器运行时</div><div class="d">ERP 下单/库存 · CRM · OA · 飞书/钉钉 · SQL/REST</div></div>
+        <div class="mod" style="--ac:var(--integration)" data-id="webhook"><div class="n">Webhook / 事件</div><div class="d">注册/审批/护栏/预算事件 → 飞书/钉钉/企微</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--integration);--c2:var(--data)"><div class="dbl"><div class="arr2"></div></div><div class="line"></div><div class="arr"></div><div class="lab">执行访问（出站经策略放行）· 数据返回（消毒+审计）</div></div>
+
+  <!-- L5 + L6 -->
+  <div class="layer" data-plane="data">
+    <div class="rail"><span class="vt"><b>L5+L6</b> · 本地运行时 &amp; 数据面</span></div>
+    <div class="sec" style="flex:0 0 470px; margin-right:10px; border-color:rgba(251,146,60,.35);">
+      <div class="cap"><span class="t">L5 本地 Harness</span><span class="e">LOCAL RUNTIME</span></div>
+      <div class="grid g1" style="grid-template-columns:1fr;">
+        <div class="mod" style="--ac:var(--data)" data-id="harness-local"><div class="n">Harness 本地运行时</div><div class="d">Tauri + Python sidecar ｜ 本地 Agent 循环 ｜ 技能运行时（签名校验）｜ Permission Manager + 四域沙箱 ｜ 插件市场 ｜ 离线降级 ｜ 遥测上报</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="local-tools"><div class="n">本地工具集</div><div class="d">Office 自动化（Word/Excel/PPT）· 文件系统 · 浏览器自动化 · 系统操作（白名单）</div></div>
+      </div>
+    </div>
+    <div class="sec" style="flex:1;">
+      <div class="cap"><span class="t">L6 数据与算力</span><span class="e">DATA &amp; COMPUTE</span></div>
+      <div class="grid g4">
+        <div class="mod" style="--ac:var(--data)" data-id="vllm"><div class="n">vLLM / GPU</div><div class="d">自托管推理 · multi-LoRA · 定制模型部署</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="milvus"><div class="n">Milvus / pgvector</div><div class="d">向量检索 · 租户 collection 隔离</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="graph-db"><div class="n">Neo4j / TuGraph</div><div class="d">知识图谱 · 多跳关系查询</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="postgres"><div class="n">PostgreSQL</div><div class="d">元数据/版本/RLS/Checkpoint</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="redis-mq"><div class="n">Redis + MQ</div><div class="d">会话缓存 · Streams 队列（→Kafka）</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="minio"><div class="n">MinIO</div><div class="d">原文件 · 任务产物 · 模型权重</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="biz-systems"><div class="n">业务系统</div><div class="d">ERP 下单/库存 · CRM · OA（连接器触达）</div></div>
+        <div class="mod" style="--ac:var(--data)" data-id="ext-models"><div class="n">外部模型 API</div><div class="d">OpenAI / DeepSeek / 通义（策略放行时）</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="conn" style="--c1:var(--cross);--c2:var(--cross)"><div class="line" style="display:none"></div></div>
+
+  <!-- 横切 -->
+  <div class="layer" data-plane="cross">
+    <div class="rail"><span class="vt">横切能力 Cross-Cutting</span></div>
+    <div class="sec" style="border-style:dashed;">
+      <div class="cap"><span class="t">横切体系（贯穿七层）</span><span class="e">CROSS-CUTTING</span></div>
+      <div class="crossbar">
+        <div class="mod" style="--ac:var(--cross)" data-id="security"><div class="n">安全六域</div><div class="d">认证·授权·数据·Agent·执行·治理</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="observability"><div class="n">观测</div><div class="d">OTel Trace · 指标告警 · 会话回放</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="evaluation"><div class="n">评测门禁</div><div class="d">回归 · LLM 裁判 · 在线抽样</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="cost"><div class="n">成本</div><div class="d">计量 · 预算 · 账单</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="governance"><div class="n">治理</div><div class="d">版本/环境/发布 · 审计合规</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="data-lifecycle"><div class="n">数据生命周期</div><div class="d">摄入→归档→删除→级联清理</div></div>
+        <div class="mod" style="--ac:var(--cross)" data-id="slo"><div class="n">SLO / DR</div><div class="d">99.9% · RTO 4h · RPO 15min</div></div>
+      </div>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- 详情面板 -->
+<aside id="panel" aria-hidden="true">
+  <button id="close" title="关闭 (Esc)">✕</button>
+  <div class="ph">
+    <span class="badge" id="pBadge"></span>
+    <h2 id="pTitle"></h2>
+    <div class="en" id="pEn"></div>
+  </div>
+  <div class="pb">
+    <h3>职责</h3><p id="pDesc"></p>
+    <h3>关键机制</h3><ul id="pPoints"></ul>
+    <h3>关联文档</h3><div class="docs" id="pDocs"></div>
+    <h3>相关模块（点击跳转）</h3><div class="rel" id="pRel"></div>
+  </div>
+</aside>
+
+<footer>
+  <span class="lg"><span class="dot" style="background:var(--access)"></span>接入</span>
+  <span class="lg"><span class="dot" style="background:var(--gateway)"></span>网关</span>
+  <span class="lg"><span class="dot" style="background:var(--control)"></span>控制面</span>
+  <span class="lg"><span class="dot" style="background:var(--runtime)"></span>运行面</span>
+  <span class="lg"><span class="dot" style="background:var(--integration)"></span>集成协议</span>
+  <span class="lg"><span class="dot" style="background:var(--data)"></span>数据面/本地</span>
+  <span class="lg"><span class="dot" style="background:var(--cross)"></span>横切</span>
+  <span class="tip">滚轮缩放 · 拖拽平移 · 点击模块查看详情 · Esc 关闭 —— EAP 架构设计 V2 · 2026-09</span>
+</footer>
+
+<script>
+/* ================= 模块数据 ================= */
+const M = {
+"web-console":{n:"Web 控制台",en:"Admin Console",p:"接入层",desc:"平台运营与治理的统一界面，覆盖六类资产的管理与全生命周期操作。",
+ pts:["智能体/知识库/模型/技能/Prompt/连接器的创建、配置、上下架","<b>会话回放</b>：Trace 树 + 每步上下文 + 引用 + 成本，排障直达具体步骤","发布审批与 Canary 控制台、HITL 人工审批工作台","评测中心操作台：数据集管理、跑批、门禁报告"],
+ docs:[["02-总体架构设计","#sec-4"],["06-安全与治理架构","#sec-4"]],rel:["agent-center","release-center","eval-center"]},
+"embed-widget":{n:"嵌入外链",en:"Embeddable Widget",p:"接入层",desc:"把任意智能体以 iframe + JS SDK（Web Component）方式挂到官网、门户、第三方系统——三行代码完成接入。",
+ pts:["<b>EmbedToken</b> 渠道令牌 → 短时会话令牌，绑定 agent+域名+租户，短时效可刷新","域名白名单（manifest.embeddable.domains）+ 频控 + 防爬","SSE 流式输出，答案带 <b>Citation</b>（文档+页码+chunk+KB版本，可点击定位）","透传外部用户身份（签名），会话级审计；典型场景：官网客服绑定 FAQ 知识库"],
+ docs:[["04-核心机制设计","#sec-6"],["07-API-SDK-Protocol规范","#sec-6"]],rel:["gateway","agent-center"]},
+"open-api":{n:"开放 API",en:"Open API",p:"接入层",desc:"服务端集成的标准入口：模型代理与智能体调用共用一套凭证与计费。",
+ pts:["<b>OpenAI 兼容端点</b> /v1/chat/completions、/v1/embeddings（模型中心路由生效）","Agent 调用：invocations / invocations:stream(SSE) / tasks（长任务）","任务 API：状态查询、取消、HITL 审批；检索 API：/kb/{id}/retrieve","幂等键（Idempotency-Key）+ 双层限流 + 统一错误码 EAP-xxxx"],
+ docs:[["07-API-SDK-Protocol规范","#sec-2"]],rel:["gateway","task-engine"]},
+"a2a-endpoint":{n:"A2A 端点",en:"A2A Endpoint",p:"接入层",desc:"按 A2A 1.0 规范对外暴露智能体，供集团兄弟系统与合作伙伴发现和调用。",
+ pts:["每个已发布 Agent 生成 <b>/.well-known/agent-card.json</b>（身份/技能/端点/鉴权）","A2A Task 生命周期：message/send、事件流（working→input-required→completed）","流式与异步任务均支持；跨系统传递 trace_id","反向能力：平台作为 A2A Client 纳管外部 Agent"],
+ docs:[["04-核心机制设计","#sec-5"]],rel:["a2a","agent-center"]},
+"harness-access":{n:"本地 Harness",en:"Desktop Harness",p:"接入层",desc:"安装在员工电脑的桌面客户端，是平台能力向本地的延伸入口。",
+ pts:["设备授权码 + 企业 SSO 绑定，设备可远程吊销","订阅云端：智能体目录 / 知识库缓存 / 技能包 / 策略","本地执行产生遥测与审计，批量加密上报（离线暂存）"],
+ docs:[["04-核心机制设计","#sec-7"],["06-安全与治理架构","#sec-5"]],rel:["harness-local","gateway"]},
+
+"gateway":{n:"统一网关 · 认证与租户",en:"Gateway & Identity",p:"L1 网关层",desc:"所有流量（控制台/API/外链/Harness）的唯一入口，完成认证、租户识别、限流、审计与追踪起点。",
+ pts:["三种凭证隔离：<b>用户 Token</b>（OIDC/SSO）、<b>Agent API Key</b>（服务间）、<b>Embed Token</b>（外链专用）","租户识别并注入上下文；RLS 依赖 tenant_id 由此锚定","限流双层：租户 QPS + Agent 并发；过载返回 Retry-After","全量审计日志 + trace_id 生成（全链路 Trace 的起点）"],
+ docs:[["06-安全与治理架构","#sec-1"],["07-API-SDK-Protocol规范","#sec-1"]],rel:["policy-center","web-console","observability"]},
+
+"model-center":{n:"① 模型中心",en:"Model Center",p:"L2 控制面",desc:"统一管理所有模型（外部供应商 API、本地 vLLM、定制微调模型、专用 CV 模型），按能力路由调用。",
+ pts:["<b>能力抽象 10 类</b>：chat/reasoning/embedding/rerank/vision/extraction/stt/tts/image_gen/moderation——Agent 按能力声明，不写死模型名","统一 OpenAI 兼容端点；降级链、重试、语义缓存、供应商配额池化","<b>Policy Engine</b>：数据边界（财务 KB 禁外部模型）、成本分级、区域驻留","<b>定制/专用模型注册</b>：元数据→评测门禁→vLLM multi-LoRA 部署→灰度→上架；专用模型一键生成 Tool/MCP 包装 + 置信度协同 + 数据回流"],
+ docs:[["04-核心机制设计","#sec-2"],["07-API-SDK-Protocol规范","#sec-4"]],rel:["vllm","eval-center","policy-center","ext-models"]},
+"knowledge-center":{n:"② 知识中心",en:"Knowledge Center",p:"L2 控制面",desc:"多知识库实例 + 知识图谱的统一管理：摄入、索引、检索、溯源、生命周期。",
+ pts:["<b>多 KB 实例</b>+模板（客服 FAQ 模板=问答对导入即用）；KB 绑定 Agent 或渠道","Ingestion：MinerU/DeepDoc 解析（版面/表格/OCR）→ 父子/语义/QA 分块","<b>三路索引</b>：向量 + 稀疏 BM25 + 图谱（LightRAG 式<b>增量</b>构建，免全量重建）","Citation 溯源（文档+页码+chunk+KB版本）；删除原文级联清理向量/图谱/缓存"],
+ docs:[["04-核心机制设计","#sec-1"],["05-领域模型与数据模型","#sec-4"]],rel:["rag-runtime","milvus","graph-db","model-center"]},
+"agent-center":{n:"③ 智能体中心 + Agent Registry",en:"Agent Center & Registry",p:"L2 控制面",desc:"三类智能体统一纳管：内置工作流 Agent、SDK 注册的手写 Agent、A2A 外部 Agent——同一目录、鉴权与计量。",
+ pts:["<b>注册钩子生命周期</b>：INSTALL→DISCOVER→VALIDATE→REGISTER→LOAD→START→HEALTHY→STOP→UNLOAD→UPGRADE→ROLLBACK","Manifest（K8s 风格）能力声明 = 权限边界；JSON Schema 自动校验","entry_points 自动发现（eap.agents 组）；外部服务走 A2A Agent Card 发现","健康检查 + 自动摘流；版本并行加载 → 灰度切流 → 一键回滚"],
+ docs:[["03-AgentRuntime与执行模型","#sec-7"],["07-API-SDK-Protocol规范","#sec-4"]],rel:["agent-runtime","a2a","embed-widget","release-center"]},
+"tool-center":{n:"④ 工具与连接器中心",en:"Tool & Connector Center",p:"L2 控制面",desc:"Tool（Agent 能做什么）与 Connector（连到哪个系统）分离治理；MCP Registry 统一纳管内外部工具服务。",
+ pts:["工具三种来源：OpenAPI 导入 / 函数注册（SDK）/ <b>MCP Server 导入</b>","<b>MCP Registry</b>：server.json 元数据、鉴权、配额、审计、版本","企业连接器：ERP（下单/库存）、CRM、OA、飞书/钉钉/企微、SQL、REST、S3、浏览器","专用模型注册后自动生成 Tool 包装（如 cv.goods_label_extract）"],
+ docs:[["04-核心机制设计","#sec-4"],["04-核心机制设计","#sec-5"]],rel:["mcp","connector-runtime","model-center"]},
+"skill-center":{n:"⑤ 技能中心",en:"Skill Center",p:"L2 控制面",desc:"自定义技能包的注册、治理与分发（R6）。技能=文件夹（SKILL.md+scripts+references+assets），云端与 Harness 同一格式。",
+ pts:["<b>SKILL.md + 三级渐进披露</b>：L1 名称→L2 正文→L3 资源，按需载入控制上下文","权限声明（文件/网络/工具白名单）+ 平台<b>签名</b>防篡改","治理链：上传→静态扫描→评测回归→审核→签名→上架<b>技能市场</b>","分发双通道：Agent manifest 引用（云端执行）/ Harness 订阅安装（本地执行）"],
+ docs:[["04-核心机制设计","#sec-3"],["06-安全与治理架构","#sec-5"]],rel:["harness-local","policy-center","agent-center"]},
+"prompt-center":{n:"⑥ Prompt 中心",en:"Prompt Center",p:"L2 控制面",desc:"把 Prompt 当独立资产管理：模板化、版本化、可实验、可回滚。",
+ pts:["模板 + 变量 + 版本；Agent 版本冻结引用 Prompt 版本","A/B 实验与效果对比（评测中心指标）","发布/回滚走统一制品流水线"],
+ docs:[["05-领域模型与数据模型","#sec-3"]],rel:["release-center","eval-center"]},
+"eval-center":{n:"⑦ 评测中心",en:"Evaluation Center",p:"L2 控制面",desc:"用数据说话的发布门禁：所有制品上线前必须通过评测回归。",
+ pts:["数据集：标准问答 + badcase 回归 + 越狱攻击样例","裁判三层：<b>LLM-as-Judge</b>（事实性/相关性）+ 规则裁判（格式/引用/权限）+ 人工抽检","门禁阈值示例：准确率≥90% · Grounding≥95% · 工具成功≥98% · 安全≥99%","在线评测：生产流量 1% 影子对照；用户反馈回流 badcase"],
+ docs:[["08-观测评测成本与SLO","#sec-3"]],rel:["release-center","model-center","cost"]},
+"policy-center":{n:"⑧ 策略中心",en:"Policy Center",p:"L2 控制面",desc:"权限与安全策略的统一决策点：RBAC/ABAC、工具权限、数据分级、模型路由边界、输入输出护栏。",
+ pts:["RBAC + ABAC + 资源 ACL + <b>工具级权限</b>（manifest 声明、逐调用校验）","数据分级（public/internal/confidential）→ <b>路由边界</b>（如财务 KB 禁外部模型）","输入护栏：提示注入检测；工具结果消毒；输出护栏：敏感外渗检测","策略版本化于 Git，命中即审计"],
+ docs:[["06-安全与治理架构","#sec-1"]],rel:["gateway","model-center","security"]},
+"cost-center":{n:"⑨ 成本中心",en:"Cost Center",p:"L2 控制面",desc:"回答“这个 Agent 一个月花多少钱”：全维度计量、预算管控与账单。",
+ pts:["计量源：span.usage → usage_record（token/调用/GPU 秒）","聚合维度：租户 → Agent → 用户 / 模型 / 知识库","预算与配额：月度预算、80%/95% 告警、超限动作（降级模型/拒绝）","成本数据反哺路由策略：自动向低成本满足质量的模型倾斜"],
+ docs:[["08-观测评测成本与SLO","#sec-4"]],rel:["observability","model-center","policy-center"]},
+"release-center":{n:"⑩ 制品与发布治理",en:"Artifact & Release Governance",p:"L2 控制面",desc:"六类制品（Agent/Prompt/Skill/Model/Tool/Workflow）统一版本流水线与环境晋升。",
+ pts:["流水线：Draft→Test→Review→Publish→<b>Canary 5%</b>→Prod→Rollback（异常自动回退）","<b>环境体系</b>：dev/test/staging/prod，staging 与 prod 同构（数据脱敏）","组合版本快照：Agent 版本冻结引用的各制品版本——回答“线上和测试为何不一样”","证据链：manifest diff + 评测报告 + 审批人，全程可追溯"],
+ docs:[["06-安全与治理架构","#sec-4"],["05-领域模型与数据模型","#sec-3"]],rel:["eval-center","agent-center","prompt-center"]},
+
+"context-engine":{n:"Context Engine",en:"Context Engineering",p:"L3 运行面",desc:"上下文是“预算内组装出来的，不是堆出来的”。每轮循环按 Budget 从 13 类来源装配 Prompt。",
+ pts:["13 类源：System/租户/Agent 指令/Skill/Tool Schema/RAG/图谱/会话记忆/长期记忆/任务状态/工具结果/护栏/预留","Budget 示例（128K）：System 5K · Skills 8K · Tools 10K · Memory 15K · <b>RAG 30K</b> · 会话 40K · 预留 17K","超限丢弃优先级：工具结果压缩 → 会话摘要化 → RAG 截断 → 换长上下文模型（策略允许时）"],
+ docs:[["03-AgentRuntime与执行模型","#sec-2"]],rel:["agent-runtime","memory-service","rag-runtime"]},
+"agent-runtime":{n:"Agent Runtime 内核",en:"Agent Runtime Kernel",p:"L3 运行面",desc:"执行面的心脏：三件套（Context Manager + Execution Engine + State Manager）驱动 Agent Loop。<b>LangGraph 只是实现组件，不是 Runtime 本身</b>，可替换。",
+ pts:["<b>Execution Engine</b>：Tool Calling、Skill、RAG、Handoff、子 Agent、流式、超时/重试/取消、并发、Token/步数双预算","<b>State Manager</b>：每步 Checkpoint 落 PG，崩溃/续跑凭 execution_id 恢复；HITL 挂起/恢复","每轮 LLM/工具/检索各产生独立 Span（token+成本入 span）","工具调用前强制策略校验；预算熔断优雅终止并输出待办"],
+ docs:[["03-AgentRuntime与执行模型","#sec-1"]],rel:["context-engine","task-engine","memory-service","policy-center"]},
+"workflow-engine":{n:"Workflow Engine",en:"Workflow Engine",p:"L3 运行面",desc:"简单智能体的画布/DSL 编排引擎：确定性路径、可重放、走制品发布流水线。",
+ pts:["节点：LLM / 工具 / 知识检索 / 条件分支 / 并行 / 循环 / 人工审批 / 子流程","DSL 版本化，执行轨迹可重放（排障与回归友好）","与 Agent Registry 同目录发布，一样可嵌入外链"],
+ docs:[["03-AgentRuntime与执行模型","#sec-6"]],rel:["agent-center","agent-runtime"]},
+"task-engine":{n:"Task / Job Engine",en:"Task & Job Engine",p:"L3 运行面",desc:"长任务模型：企业任务不是一次 Request/Response，可能运行几十分钟并跨人工环节。",
+ pts:["8 态状态机：PENDING/RUNNING/WAITING_TOOL/WAITING_HUMAN/PAUSED/FAILED/CANCELLED/COMPLETED","队列：MVP <b>Redis Streams + Arq</b>，演进位 Kafka/NATS；Agent/RAG/Tool Worker 独立扩容","优先级、cron 调度、重试策略、超时熔断、取消传播、断点续跑（Checkpoint 级）","典型链路：拉 1 万条订单→分析→生成 Excel→HITL 审批→发邮件"],
+ docs:[["03-AgentRuntime与执行模型","#sec-5"]],rel:["agent-runtime","redis-mq","webhook"]},
+"memory-service":{n:"Memory Service",en:"Memory Service",p:"L3 运行面",desc:"四层记忆体系，让智能体“记得住、忘得掉、可管理”。",
+ pts:["会话记忆：滑窗+摘要（Redis 热 / PG 冷）","长期记忆：用户画像/事实卡（可检索、可管理、可删除——合规）","任务记忆：计划与中间产物（checkpoint 表 + MinIO 大产物）","组织记忆：团队共享知识卡（知识中心特殊 KB 管生命周期）"],
+ docs:[["03-AgentRuntime与执行模型","#sec-4"]],rel:["context-engine","knowledge-center"]},
+"rag-runtime":{n:"RAG Runtime",en:"RAG Runtime",p:"L3 运行面",desc:"检索执行引擎：RAG V2 管道在请求热路径上的实现。",
+ pts:["管道：查询改写（HyDE/拆解）→ <b>查询路由</b>（语义/关键词/多跳图）→ 三路召回 → RRF 融合 → Rerank → 上下文压缩","<b>Vector 擅长</b>语义相似；<b>Graph 擅长</b>多跳关系（客户→订单→产品→供应商链）","输出强制带 Citation（文档+页码+chunk+KB版本）","Verifier 校验：无据可答时明确拒答而非编造"],
+ docs:[["04-核心机制设计","#sec-1"]],rel:["knowledge-center","context-engine"]},
+"multi-agent":{n:"Multi-Agent Runtime",en:"Multi-Agent Runtime",p:"L3 运行面",desc:"多智能体协作执行：主管分派、专家执行、结果汇总，跨系统走 A2A。",
+ pts:["<b>Supervisor</b> 模式：主管 Agent 分派专家（销售分析/库存/客服）并汇总","<b>Handoff</b> 模式：显式移交（上下文快照+任务说明）；A2A 场景移交外部 Agent","协作链全程同一 Trace；按 Agent 分摊计量计费"],
+ docs:[["03-AgentRuntime与执行模型","#sec-6"]],rel:["agent-runtime","a2a","task-engine"]},
+
+"mcp":{n:"MCP 全栈",en:"Model Context Protocol",p:"L4 集成协议",desc:"平台的三重 MCP 身份——工具与数据互操作的统一协议（MCP = Agent ↔ 工具/数据）。",
+ pts:["<b>Client</b>：Runtime 消费外部 MCP Server 工具（含置信度协同的专用模型工具）","<b>Server</b>：/mcp/platform 把工具、kb.search、agent.chat 暴露给 Claude/Cursor/Harness","<b>Registry</b>：server.json 纳管、鉴权、配额、审计、版本","规范基线 2025-06-18（Streamable HTTP+OAuth+结构化输出），跟踪 2026-07-28 RC"],
+ docs:[["04-核心机制设计","#sec-5"]],rel:["tool-center","harness-local","agent-runtime"]},
+"a2a":{n:"A2A 1.0",en:"Agent2Agent Protocol",p:"L4 集成协议",desc:"智能体互发现与互操作协议（A2A = Agent ↔ Agent），Linux 基金会 1.0.0 正式规范，150+ 组织参与。",
+ pts:["Agent Card：/.well-known/agent-card.json（身份/技能/端点/鉴权）","Task/Message 生命周期：流式与异步任务、input-required 状态（天然衔接 HITL）","对外：发布平台 Agent；对内：登记外部 Card 自动纳管注册"],
+ docs:[["04-核心机制设计","#sec-5"]],rel:["a2a-endpoint","agent-center"]},
+"connector-runtime":{n:"连接器运行时",en:"Connector Runtime",p:"L4 集成协议",desc:"连接企业系统的执行通道：连接器托管凭证、限流、重试与字段映射，Tool 只声明意图。",
+ pts:["内置：ERP（下单/库存）、CRM、OA、飞书/钉钉/企微、SQL（PG/MySQL）、REST、S3、浏览器","凭证加密外置（KMS）；写操作默认 HITL 审批","出网白名单 + NetworkPolicy 双重约束"],
+ docs:[["04-核心机制设计","#sec-4"]],rel:["tool-center","biz-systems","policy-center"]},
+"webhook":{n:"Webhook / 事件",en:"Events & Webhooks",p:"L4 集成协议",desc:"平台事件对外推送，打通企业 IM 与自动化流。",
+ pts:["事件：agent.registered / task.completed / task.waiting_human / guardrail.blocked / budget.exceeded / model.canary_failed","推送通道：Webhook / 飞书 / 钉钉 / 企微机器人","全部携带 tenant_id + trace_id"],
+ docs:[["07-API-SDK-Protocol规范","#sec-7"]],rel:["task-engine","observability"]},
+
+"harness-local":{n:"Harness 本地运行时",en:"Local Harness Runtime",p:"L5 本地运行时",desc:"全面型桌面客户端（R5）：不止办公自动化——订阅并使用云端智能体与知识库、自行安装技能包、逛插件市场。",
+ pts:["Tauri 2 + Python sidecar；本地轻量 Agent Loop（可离线跑本地小模型）","<b>订阅同步</b>：云端智能体目录 / 知识库本地缓存（加密）/ 技能包 / 策略","<b>技能运行时</b>：安装市场签名技能包（权限提示→安装→沙箱内执行）","<b>Permission Manager + 四域沙箱</b>：文件/网络/进程/浏览器白名单，敏感操作 HITL 弹窗","审计本地防篡改留存+上报；平台可远程禁用技能包/设备；离线降级"],
+ docs:[["04-核心机制设计","#sec-7"],["06-安全与治理架构","#sec-5"]],rel:["skill-center","local-tools","harness-access","mcp"]},
+"local-tools":{n:"本地工具集",en:"Local Tools",p:"L5 本地运行时",desc:"沙箱内受控的本地执行能力，让 Harness 真正干活。",
+ pts:["Office 自动化：python-docx / openpyxl / python-pptx（Word 报告、Excel 分析、PPT 生成）","文件系统：路径 glob 白名单（如 D:/Documents/**）","浏览器自动化：Playwright + 站点白名单 + 操作录屏审计","系统操作：进程/命令白名单，默认拒绝"],
+ docs:[["04-核心机制设计","#sec-7"],["09-技术选型与实施路线","#sec-1"]],rel:["harness-local","security"]},
+
+"vllm":{n:"vLLM / GPU",en:"Self-hosted Inference",p:"L6 数据面",desc:"自托管推理底座：定制模型与本地模型的统一承载。",
+ pts:["<b>multi-LoRA</b>：一个基座挂多个微调适配器，定制模型注册后分钟级上架","容量起点：2×A100-80G（7B–72B 量化），按首 token 时延与吞吐压测扩容","指标入 Prometheus：GPU 利用率、KV cache、队列深度"],
+ docs:[["09-技术选型与实施路线","#sec-1"],["08-观测评测成本与SLO","#sec-5"]],rel:["model-center","milvus"]},
+"milvus":{n:"Milvus / pgvector",en:"Vector Store",p:"L6 数据面",desc:"向量检索底座：M1 用 pgvector 起步，规模化切 Milvus。",
+ pts:["每租户独立 collection（t{tid}_{kb}）+ partition 二级分","混合检索：dense + sparse(BM25) + 标量过滤","容量参考：1 亿 768 维向量 ≈ 250GB 内存 ×1.5"],
+ docs:[["05-领域模型与数据模型","#sec-2"]],rel:["knowledge-center","rag-runtime"]},
+"graph-db":{n:"Neo4j / TuGraph",en:"Graph Store",p:"L6 数据面",desc:"知识图谱存储：多跳关系查询的承载。高合规商用场景选 TuGraph（Apache-2.0）。",
+ pts:["实体/边强制 label 前缀 t{tid}_（租户隔离）","LightRAG 式增量写入/回退（文档级实体关系）","典型查询：客户→订单→产品→生产企业→原材料→供应商 多跳"],
+ docs:[["04-核心机制设计","#sec-1"],["09-技术选型与实施路线","#sec-1"]],rel:["knowledge-center","rag-runtime"]},
+"postgres":{n:"PostgreSQL",en:"Metadata & State",p:"L6 数据面",desc:"平台元数据中心库：版本、目录、任务状态、RLS 租户隔离的锚点。",
+ pts:["全部业务表带 tenant_id 并启用 <b>RLS</b>","Agent/制品版本表 + artifacts_snapshot 组合版本","LangGraph Checkpoint 后端（State Manager 桥接）","流复制 + 每日快照；RPO 15min"],
+ docs:[["05-领域模型与数据模型","#sec-2"]],rel:["release-center","task-engine","agent-runtime"]},
+"redis-mq":{n:"Redis + MQ",en:"Cache & Queue",p:"L6 数据面",desc:"会话缓存与任务队列（Redis Streams），预留 Kafka 演进位。",
+ pts:["会话热数据、语义缓存（按 KB 失效）","Streams 消费组实现 Task 队列（Arq/Celery Worker）","key 前缀 t{tid}: 隔离"],
+ docs:[["03-AgentRuntime与执行模型","#sec-5"]],rel:["task-engine","memory-service"]},
+"minio":{n:"MinIO",en:"Object Storage",p:"L6 数据面",desc:"对象存储：原文、任务产物、模型权重、Trace 冷归档。",
+ pts:["租户前缀 tenant/{tid}/ + IAM 策略","文档删除进 30 天回收站后物理清除","Trace/日志冷归档（30 天热 + 长期归档）"],
+ docs:[["05-领域模型与数据模型","#sec-4"]],rel:["knowledge-center","task-engine"]},
+"biz-systems":{n:"业务系统",en:"Business Systems",p:"L6 数据面",desc:"企业内置智能体（下单、库存查询等）的真实执行端，经连接器受控访问。",
+ pts:["ERP：create_order / query_inventory（写操作 HITL）","CRM / OA / 飞书 / 钉钉：消息、审批、日程","访问经出网白名单 + NetworkPolicy + 全量审计"],
+ docs:[["04-核心机制设计","#sec-4"]],rel:["connector-runtime","policy-center"]},
+"ext-models":{n:"外部模型 API",en:"External Model APIs",p:"L6 数据面",desc:"外部供应商模型（不可信区），经模型中心统一接入，敏感数据被策略阻断。",
+ pts:["OpenAI / Claude / DeepSeek / 通义 / 智谱等，OpenAI 兼容接入","供应商密钥 KMS 托管、RPM/TPM 配额池化","<b>数据边界路由</b>：confidential 数据仅允许 local.vllm.*"],
+ docs:[["04-核心机制设计","#sec-2"]],rel:["model-center","policy-center"]},
+
+"security":{n:"安全六域",en:"Security",p:"横切",desc:"攻击面大于普通应用（Harness 高权限 + MCP 外部工具 + 外链公网暴露），按域设防。",
+ pts:["认证：OIDC/SSO/APIKey/EmbedToken/设备授权；授权：RBAC+ABAC+工具级权限","数据安全：租户隔离、PII 检测脱敏、加密、<b>数据边界路由</b>","Agent 安全：提示注入、工具注入、SSRF、过度代理、数据外渗","执行安全：技能签名、沙箱、命令白名单；治理：HITL 审批、全量审计"],
+ docs:[["06-安全与治理架构","#sec-1"]],rel:["policy-center","harness-local","gateway"]},
+"observability":{n:"观测",en:"Observability",p:"横切",desc:"链路追踪 + 服务监控一体：OTel GenAI 语义约定 + Langfuse 会话回放 + Prometheus 告警（R9）。",
+ pts:["Span 模型：gateway→agent.runtime→context/llm/rag/tool/skill/a2a/guardrail","错误与护栏拦截 100% 采样；会话回放=Trace 树+上下文快照+成本","指标域：网关/运行时/模型/知识/成本/Harness 六域；三级告警","Harness 本地遥测批量加密上报"],
+ docs:[["08-观测评测成本与SLO","#sec-1"],["08-观测评测成本与SLO","#sec-2"]],rel:["cost-center","gateway","task-engine"]},
+"evaluation":{n:"评测门禁",en:"Evaluation Gate",p:"横切",desc:"评测中心在发布链路上的硬门禁：不达标不上线，回归倒退即回退。",
+ pts:["离线：数据集回归（准确率/Grounding/工具成功/安全/时延/成本）","在线：生产 1% 影子流量对照 + 用户反馈回流 badcase","与模型数据飞轮共用 badcase 存储"],
+ docs:[["08-观测评测成本与SLO","#sec-3"]],rel:["eval-center","release-center"]},
+"cost":{n:"成本",en:"Cost Management",p:"横切",desc:"计量、预算、账单三位一体，让每一条链路的钱都可归因。",
+ pts:["usage_record：模型 token / 工具调用 / GPU 秒","预算熔断：80%/95% 告警，超限降级或拒绝","多维账单：租户/Agent/用户/模型/KB"],
+ docs:[["08-观测评测成本与SLO","#sec-4"]],rel:["cost-center","observability"]},
+"governance":{n:"治理",en:"Governance",p:"横切",desc:"版本、环境、发布、审计的治理闭环。",
+ pts:["Draft→Test→Review→Publish→Canary→Prod→Rollback","dev/test/staging/prod 四环境晋升","审计证据链：谁·何时·改了什么·评测结论·审批人"],
+ docs:[["06-安全与治理架构","#sec-4"]],rel:["release-center","security"]},
+"data-lifecycle":{n:"数据生命周期",en:"Data Lifecycle",p:"横切",desc:"Ingestion→Version→Index→Active→Archive→Delete→Purge，删除必须级联。",
+ pts:["删原文 → 级联删向量/图谱实体/缓存；历史答案保留指针标记“原文已删除”","MinIO 30 天回收站后物理清除；审计与账单按合规保留","备份：PG 流复制+快照；向量/图库定期快照；RTO 4h/RPO 15min"],
+ docs:[["05-领域模型与数据模型","#sec-4"]],rel:["knowledge-center","postgres","minio"]},
+"slo":{n:"SLO / DR",en:"SLO & Disaster Recovery",p:"横切",desc:"系统做到什么程度的承诺与容量依据。",
+ pts:["Production：API P95<500ms · 首 token<3s · 可用性 99.9% · 并发 1000+ · RAG 500 QPS","RTO≤4h / RPO≤15min；故障自动恢复（多副本+自愈+回滚）","容量依据：GPU/PG/Milvus/日志按 1000 并发会话×8K token 估算，季度压测修订"],
+ docs:[["08-观测评测成本与SLO","#sec-5"]],rel:["observability","vllm","release-center"]}
+};
+
+/* ================= 渲染交互 ================= */
+const canvas=document.getElementById('canvas'), vp=document.getElementById('viewport');
+const panel=document.getElementById('panel');
+let scale=1, tx=0, ty=0;
+
+function apply(){ canvas.style.transform=`translate(${tx}px,${ty}px) scale(${scale})`; }
+function fit(){
+  const w=1580+96, vw=vp.clientWidth, vh=vp.clientHeight;
+  scale=Math.min((vw-40)/w, 1.05); tx=(vw-(w*scale))/2+96*scale; ty=18; apply();
+}
+vp.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const r=vp.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const k=e.deltaY<0?1.12:1/1.12, ns=Math.min(1.8,Math.max(0.35,scale*k));
+  tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale); scale=ns; apply();
+},{passive:false});
+let drag=null;
+vp.addEventListener('pointerdown',e=>{ if(e.target.closest('.mod'))return; drag={x:e.clientX,y:e.clientY,tx,ty}; vp.classList.add('dragging'); });
+window.addEventListener('pointermove',e=>{ if(!drag)return; tx=drag.tx+e.clientX-drag.x; ty=drag.ty+e.clientY-drag.y; apply(); });
+window.addEventListener('pointerup',()=>{ drag=null; vp.classList.remove('dragging'); });
+document.getElementById('zIn').onclick=()=>{ scale=Math.min(1.8,scale*1.15); apply(); };
+document.getElementById('zOut').onclick=()=>{ scale=Math.max(0.35,scale/1.15); apply(); };
+document.getElementById('fit').onclick=fit;
+document.getElementById('reset').onclick=fit;
+
+/* 详情面板 */
+function openPanel(id){
+  const m=M[id]; if(!m)return;
+  document.getElementById('pBadge').textContent=m.p;
+  document.getElementById('pBadge').style.setProperty('--ac','#4f8ef7');
+  document.getElementById('pTitle').textContent=m.n;
+  document.getElementById('pEn').textContent=m.en;
+  document.getElementById('pDesc').innerHTML=m.desc;
+  document.getElementById('pPoints').innerHTML=m.pts.map(x=>`<li>${x}</li>`).join('');
+  document.getElementById('pDocs').innerHTML=m.docs.map(d=>`<a href="docs/${d[0]}.md" target="_blank" rel="noopener">docs/${d[0]}.md ${d[1]}</a>`).join('');
+  document.getElementById('pRel').innerHTML=(m.rel||[]).map(r=>M[r]?`<span data-go="${r}">${M[r].n}</span>`:'').join('');
+  panel.classList.add('open'); panel.setAttribute('aria-hidden','false');
+  panel.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>openPanel(el.dataset.go));
+  panel.querySelector('.pb').scrollTop=0;
+}
+function closePanel(){ panel.classList.remove('open'); panel.setAttribute('aria-hidden','true'); }
+document.getElementById('close').onclick=closePanel;
+window.addEventListener('keydown',e=>{ if(e.key==='Escape')closePanel(); });
+canvas.addEventListener('click',e=>{
+  const el=e.target.closest('.mod'); if(!el)return;
+  e.stopPropagation(); openPanel(el.dataset.id);
+  el.classList.add('hit'); setTimeout(()=>el.classList.remove('hit'),900);
+});
+
+/* 搜索 */
+const inp=document.getElementById('search');
+function doSearch(q){
+  q=q.trim().toLowerCase();
+  document.querySelectorAll('.mod').forEach(el=>{
+    const m=M[el.dataset.id]; if(!m)return;
+    const hit=!q || m.n.toLowerCase().includes(q) || m.en.toLowerCase().includes(q) || m.desc.toLowerCase().includes(q);
+    el.classList.toggle('dimmed', q && !hit);
+    el.classList.toggle('hit', q && hit);
+  });
+}
+inp.addEventListener('input',()=>doSearch(inp.value));
+inp.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){
+    const first=document.querySelector('.mod.hit');
+    if(first){ openPanel(first.dataset.id);
+      const r=first.getBoundingClientRect(), v=vp.getBoundingClientRect();
+      if(r.top<v.top+80||r.bottom>v.bottom-40||r.left<v.left||r.right>v.right){
+        tx+=v.width/2-(r.left+r.width/2); ty+=v.height/2-(r.top+r.height/2); apply(); }
+    }
+  }
+  if(e.key==='Escape'){ inp.value=''; doSearch(''); closePanel(); }
+});
+
+fit();
+</script>
+</body>
+</html>

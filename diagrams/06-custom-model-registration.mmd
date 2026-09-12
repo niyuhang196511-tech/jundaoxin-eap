@@ -1,0 +1,21 @@
+flowchart TB
+    A["外部微调产出<br/>LoRA / 全量模型（LLaMA-Factory / 云端SFT）"]
+    B["上传 MinIO 或登记挂载路径"]
+    C["注册元数据<br/>基座 · 版本 · 上下文长度 · io_schema · 评测报告"]
+    D{"评测门禁<br/>回归集 + LLM 裁判"}
+    E["部署：vLLM multi-LoRA / 独立端点"]
+    F["灰度 Canary 5% 流量"]
+    G["上架模型列表（路由器可见，可被 Agent 能力引用）"]
+    A --> B --> C --> D
+    D -->|不达标自动打回| C
+    D -->|达标| E --> F
+    F -->|指标异常| E
+    F -->|达标| G
+    subgraph SP["专用模型（CV识别/标签提取）附加通道"]
+        H["生成 Tool / MCP 包装<br/>如 cv.goods_label_extract"]
+        I["置信度协同编排<br/>score < 0.8 → LLM 复核 / 转人工"]
+        J["数据回流闭环<br/>低置信样本 + 人工纠错 → 训练数据集"]
+        H --> I --> J
+    end
+    C --> H
+    J -.->|新版本迭代| A

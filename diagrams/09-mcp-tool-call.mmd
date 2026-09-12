@@ -1,0 +1,14 @@
+sequenceDiagram
+    autonumber
+    participant A as 平台 Agent（Runtime）
+    participant MC as MCP Client
+    participant MR as MCP Registry
+    participant MS as 外部 MCP Server
+    A->>MR: 解析所需工具（如 cv.goods_label_extract）
+    MR-->>MC: server.json + 鉴权（配额/审计策略下发）
+    MC->>MS: initialize + tools/list
+    MS-->>MC: 工具清单（io_schema）
+    MC->>MS: tools/call（参数已过策略校验）
+    MS-->>MC: labels[] + score
+    MC-->>A: 结果（消毒 · 审计 span · 计量）
+    Note over A,MS: 反向身份：平台 /mcp/platform 作为 MCP Server<br/>把工具 / kb.search / agent.chat 暴露给 Claude / Cursor / Harness<br/>Registry 同时纳管内外部 MCP Server（server.json 标准）

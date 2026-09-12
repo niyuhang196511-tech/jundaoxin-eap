@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph CP["Control Plane（管什么）"]
+        REG["注册中心群<br/>Agent / Model / Knowledge /<br/>Skill / Tool / Prompt"]
+        GOV["治理中心群<br/>策略 · 评测 · 成本 · 发布"]
+    end
+    subgraph RP["Runtime Plane（怎么跑）"]
+        AR["Agent Runtime 内核"] ; CE["Context Engine"] ; TE["Task/Job Engine"] ; RR["RAG Runtime"] ; MAR["Multi-Agent Runtime"]
+    end
+    subgraph DP["Data Plane（真访问）"]
+        LLM["LLM / vLLM"] ; STORE["向量/图/对象存储"] ; BIZ["ERP / CRM / OA"] ; LOC["本地 Harness"]
+    end
+    REG -->|"不可变版本快照下发"| RP
+    GOV -->|"策略 / 预算 / 门禁约束"| RP
+    RP --> LLM
+    RP --> STORE
+    RP --> BIZ
+    LOC -.->|"订阅 · 遥测"| REG
+    RP -->|"usage / health / 评测回流"| GOV
