@@ -213,6 +213,40 @@ class EvalRunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MCPServerRecord(Base):
+    """MCP Registry：外部 MCP Server 纳管（docs/04 §5）。"""
+
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    url: Mapped[str] = mapped_column(String(256))
+    header_name: Mapped[str] = mapped_column(String(64), default="Authorization")
+    api_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    tools: Mapped[list] = mapped_column(JSON, default=list)  # 上次验证时发现的工具名
+    status: Mapped[str] = mapped_column(String(16), default="registered")  # registered|verified|unreachable
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MemoryRecord(Base):
+    """记忆体系（docs/03 §4）：会话历史 / 长期记忆 / 摘要，可检索、可遗忘。"""
+
+    __tablename__ = "memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    scope: Mapped[str] = mapped_column(String(16), index=True)  # session | user
+    kind: Mapped[str] = mapped_column(String(16), default="fact")  # message | fact | preference | summary
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    agent: Mapped[str] = mapped_column(String(64), default="")
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list] = mapped_column(JSON, default=list)
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EmbedChannel(Base):
     """嵌入外链渠道（docs/04 §6）：EmbedToken 绑定 agent + 域名白名单。
 

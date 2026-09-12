@@ -8,8 +8,12 @@ __pycache__/
 *.db
 *.db-journal
 .env
+# 运行日志
+server.log
 # 前端
 node_modules/
+# 构建产物（部署时 npm run build 生成）
+eap/src/eap/static/console/
 # 工具状态目录
 .mimosa/
 .zcode/

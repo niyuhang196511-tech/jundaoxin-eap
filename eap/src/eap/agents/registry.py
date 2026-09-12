@@ -99,7 +99,9 @@ class AgentRegistry:
             pass
 
         # ② 配置模块发现（内置示例 + EAP_AGENT_MODULES；env 覆盖不挤掉内置）
-        builtin = ["eap.agents.builtin.faq_agent", "eap.agents.builtin.order_agent"]
+        builtin = ["eap.agents.builtin.faq_agent",
+                   "eap.agents.builtin.order_agent",
+                   "eap.agents.builtin.supervisor_agent"]
         modules = dict.fromkeys([*builtin, *settings.agent_modules])
         for mod in modules:
             try:

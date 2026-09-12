@@ -38,12 +38,28 @@ class FaqAgent(AgentApp):
                 knowledge_context=retriever.render(hits),
                 max_chars=self.ctx.settings.max_context_chars,
             )
-            completion = await self.ctx.chat(
-                db,
-                messages=[{"role": "user", "content": request.input}],
-                system=system,
-            )
+            # 会话记忆：有 session_id 时加载最近对话，实现多轮上下文
+            history = (self.ctx.memory.history(db, request.session_id, limit=6)
+                       if request.session_id else [])
+            if request.user_id:
+                recalled = self.ctx.memory.recall(db, request.input, user_id=request.user_id, top_k=2)
+                if recalled:
+                    system += "\n\n【用户长期记忆】\n" + "\n".join(
+                        f"- {m['content']}" for m in recalled)
+
+            messages = [*history, {"role": "user", "content": request.input}]
+            completion = await self.ctx.chat(db, messages=messages, system=system)
             result, record = completion.result, completion.record
+
+            if request.session_id:
+                self.ctx.memory.log_message(db, session_id=request.session_id,
+                                            role="user", content=request.input,
+                                            agent=MANIFEST.name)
+                self.ctx.memory.log_message(db, session_id=request.session_id,
+                                            role="assistant", content=result.content or "",
+                                            agent=MANIFEST.name)
+                db.commit()
+
             return InvokeResult(
                 content=result.content or "",
                 citations=[h["citation"] for h in hits],

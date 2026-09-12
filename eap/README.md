@@ -76,6 +76,21 @@ curl -s -X POST localhost:8300/api/v1/embed/session \
 curl -s -H "$KEY" localhost:8300/api/v1/models
 curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/models \
   -d '{"name":"my-lora","capabilities":["chat"],"provider":"openai_compat","base_url":"http://gpu-host:8000/v1","api_key":"x","remote_model":"my-lora","priority":5}'
+
+# 多智能体：support-supervisor 按领域把问题委派给 faq/order 子智能体（深度护栏 3 层）
+curl -s -H "$KEY" localhost:8300/api/v1/agents/support-supervisor/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input":"帮我查一下订单 1001 的状态，顺便告诉我退货政策"}'
+
+# 记忆：写入 → 召回 → 遗忘
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/memory \
+  -d '{"scope":"user","user_id":"u-1","content":"客户偏好周一下单，走顺丰","kind":"preference"}'
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/memory/recall \
+  -d '{"scope":"user","user_id":"u-1","query":"物流偏好","top_k":3}'
+
+# MCP Registry：纳管外部 MCP Server（校验可达后启用，其工具注入平台工具池）
+curl -s -X POST -H "$KEY" -H "Content-Type: application/json" localhost:8300/api/v1/mcp/servers \
+  -d '{"name":"company-tools","url":"https://mcp.corp.cn","header_name":"Authorization","api_key":"sk-x"}'
 ```
 
 ## 手写智能体接入（注册钩子）
@@ -105,12 +120,14 @@ class MyAgent(AgentApp):
 |---|---|---|
 | 模型中心 | 能力路由、降级链、mock/OpenAI 兼容、定制模型注册 API | Policy Engine、评测门禁接入路由、vLLM multi-LoRA 托管 |
 | 知识中心 | 多 KB、分块、hash/openai 嵌入、BM25+向量+RRF、Citation、级联删除 | 图谱路（LightRAG）、Reranker、Milvus |
-| Agent Runtime | Context 预算、Agent Loop、工具协议、HITL 审批门控 + 挂起/恢复 | 子 Agent、多智能体运行时 |
+| Agent Runtime | Context 预算、Agent Loop、工具协议、HITL 审批门控 + 挂起/恢复 | 人工审批 UI、持久化 Checkpoint |
+| **多智能体** | **Supervisor 委派（agent.\* 工具化）+ 深度护栏 + 内置 supervisor-agent** | Handoff 策略编排 UI、跨租户 A2A 委派 |
+| **Memory** | **会话/长期记忆读写、向量+词面召回、遗忘 API（/api/v1/memory）** | 摘要压缩、组织记忆联动知识中心 |
 | **Workflow Engine** | **DSL（llm/tool/retrieve/branch 节点 + 条件跳转）→ 创建即注册为智能体** | 画布前端、并行节点、子流程 |
 | **Prompt Center** | **模板/变量自动提取/渲染/API**，工作流与智能体引用 | 版本流水线、A/B 实验 |
 | **评测中心** | **数据集 + 规则裁判 + 通过率门禁**（发布门禁语义就位） | LLM-as-Judge、人工抽检、在线影子流量 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑 | Redis Streams、定时调度 |
 | Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入 | SKILL.md 打包/签名、技能市场 |
-| MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具） | MCP Registry、OAuth、长连接复用 |
+| MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |
 | 注册 SDK | @register_agent、manifest 校验、entry_points 发现、健康检查 | 生命周期全钩子、热加载、灰度 |
-| 接入 | OpenAI 兼容（含 SSE）、Agent 调用、KB API、嵌入外链（EmbedToken+JS Widget） | 控制台、A2A、OIDC/SSO |
+| 接入 | OpenAI 兼容（含 SSE）、Agent 调用、KB API、嵌入外链（EmbedToken+JS Widget）、**A2A 1.0（Agent Card + Task）**、**React 控制台（总览/模型/知识/智能体/任务/资产/评测）** | OIDC/SSO、多租户计费 |

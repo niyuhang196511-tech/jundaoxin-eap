@@ -125,6 +125,7 @@ class AgentManifest(BaseModel):
     knowledge: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    sub_agents: list[str] = Field(default_factory=list)  # 多智能体：可委派的下级智能体
     permissions: list[str] = Field(default_factory=list)
     embeddable: bool = False
     domains: list[str] = Field(default_factory=list)
@@ -142,6 +143,8 @@ class AgentManifest(BaseModel):
 class InvokeRequest(BaseModel):
     input: str = Field(min_length=1)
     stream: bool = False
+    session_id: str | None = None  # 会话记忆键（多轮上下文，docs/03 §4）
+    user_id: str | None = None  # 长期记忆归属
 
 
 class InvokeResult(BaseModel):

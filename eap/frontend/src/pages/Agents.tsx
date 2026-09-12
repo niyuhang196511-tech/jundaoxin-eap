@@ -36,12 +36,14 @@ export default function AgentsPage() {
   const [val, setVal] = useState('')
   const [stream, setStream] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
 
   const load = async () => setAgents(await api<Agent[]>('GET', '/api/v1/agents'))
   useEffect(() => { load() }, [])
 
   const pick = (a: Agent) => {
     setCur(a)
+    setSessionId(crypto.randomUUID())
     setMsgs([{ role: 'ai', content: `你好，我是 ${a.name}，请问有什么可以帮你？` }])
   }
 
@@ -62,9 +64,10 @@ export default function AgentsPage() {
           if (ev === 'step') finish(d.step, [], [])
           else if (ev === 'result') finish(d.output, d.citations || [], d.steps || [])
           else if (ev === 'error') finish('错误：' + d.message, [], [])
-        })
+        }, sessionId ?? undefined)
       } else {
-        const d = await api<any>('POST', `/api/v1/agents/${cur.name}/invocations`, { input: text })
+        const d = await api<any>('POST', `/api/v1/agents/${cur.name}/invocations`,
+          sessionId ? { input: text, session_id: sessionId } : { input: text })
         finish(d.output, d.citations, d.steps)
       }
     } catch (e: any) {

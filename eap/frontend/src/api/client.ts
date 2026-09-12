@@ -24,11 +24,12 @@ export async function sseInvoke(
   agent: string,
   input: string,
   onEvent: (event: string, data: any) => void,
+  sessionId?: string,
 ): Promise<void> {
   const r = await fetch(`/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
     method: 'POST',
     headers: H,
-    body: JSON.stringify({ input, stream: true }),
+    body: JSON.stringify(sessionId ? { input, stream: true, session_id: sessionId } : { input, stream: true }),
   })
   if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`)
   const reader = r.body.getReader()

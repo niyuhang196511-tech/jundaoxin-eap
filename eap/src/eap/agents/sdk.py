@@ -103,6 +103,13 @@ class PlatformContext:
             ).all()
             return "\n\n".join(f"【技能：{s.name}】\n{s.instructions}" for s in skills)
 
+    @property
+    def memory(self):
+        """Memory Service（docs/03 §4）：history / recall / remember / forget。"""
+        from ..runtime.memory import memory_service
+
+        return memory_service
+
     def prompt(self, name: str, variables: dict[str, str]) -> str:
         """Prompt 中心渲染：模板 + 变量 → 文本（缺失变量报错，docs/05 §3）。"""
         from sqlalchemy import select
