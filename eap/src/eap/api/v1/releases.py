@@ -34,6 +34,8 @@ class ReleaseCreate(BaseModel):
 class EvalGateRequest(BaseModel):
     dataset: str
     min_pass_rate: float = Field(default=0.8, ge=0.0, le=1.0)
+    judge: str = Field(default="rule", pattern=r"^(rule|llm)$",
+                       description="rule=关键词命中；llm=LLM-as-Judge")
 
 
 def _view(r: AgentReleaseRecord) -> dict:
@@ -96,7 +98,7 @@ async def run_gate(release_id: str, body: EvalGateRequest, db: Session = fastapi
     if record.state not in ("draft", "review"):
         raise fastapi.HTTPException(status_code=409,
                                     detail=f"EAP-6002 状态 {record.state} 不允许执行门禁评测")
-    result = await execute_evaluation(db, record.agent, body.dataset, body.min_pass_rate)
+    result = await execute_evaluation(db, record.agent, body.dataset, body.min_pass_rate, body.judge)
     record.eval_run_id = result["run_id"]
     record.eval_verdict = result["verdict"]
     db.commit()

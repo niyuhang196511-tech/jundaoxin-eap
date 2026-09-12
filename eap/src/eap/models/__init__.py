@@ -280,7 +280,10 @@ class EvalDatasetRecord(Base):
 
 
 class EvalRunRecord(Base):
-    """评测运行：逐用例结果 + 通过率 + 门禁结论（docs/08 §3）。"""
+    """评测运行：逐用例结果 + 通过率 + 门禁结论（docs/08 §3）。
+
+    judge=rule：expected_any 关键词命中；judge=llm：LLM-as-Judge 按评分标准裁判。
+    """
 
     __tablename__ = "eval_runs"
 
@@ -289,6 +292,7 @@ class EvalRunRecord(Base):
     dataset: Mapped[str] = mapped_column(String(64), index=True)
     verdict: Mapped[str] = mapped_column(String(8), default="PENDING")  # PASS | FAIL | PENDING
     min_pass_rate: Mapped[float] = mapped_column(default=0.8)
+    judge: Mapped[str] = mapped_column(String(8), default="rule")  # rule | llm
     scores: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

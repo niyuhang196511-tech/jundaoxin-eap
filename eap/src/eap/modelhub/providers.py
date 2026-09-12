@@ -58,6 +58,13 @@ class MockProvider:
         has_tool_result = any(m.get("role") == "tool" for m in messages)
         last_user = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
 
+        # LLM 裁判分支（EAP-JUDGE 标记由评测中心 judge prompt 携带，真实模型视为普通上下文）：
+        # 离线确定性裁判——用例输入含「期望不通过」则 FAIL，否则 PASS（docs/08 §3 离线测试约定）
+        if any("EAP-JUDGE" in str(m.get("content") or "") for m in messages):
+            passed = "期望不通过" not in last_user
+            verdict = json.dumps({"passed": passed, "reason": "mock 裁判（离线确定性）"}, ensure_ascii=False)
+            return self._result(record, verdict, [], messages, t0)
+
         if tools and not has_tool_result:
             fn = tools[0]["function"]
             args = json.dumps({"query": last_user[:60].replace('"', "'")}, ensure_ascii=False)
