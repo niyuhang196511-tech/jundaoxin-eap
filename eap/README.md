@@ -202,7 +202,7 @@ class MyAgent(AgentApp):
 | 模块 | 已实现 | 待实现（见 docs/09 路线） |
 |---|---|---|
 | 模型中心 | 能力路由、降级链、mock/OpenAI 兼容、定制模型注册 API、**Policy Engine（租户模型/供应商白名单 + prompt 上限，网关强制执行，EAP-7101）** | 评测门禁接入路由、vLLM multi-LoRA 托管 |
-| 知识中心 | 多 KB、分块、hash/openai 嵌入、**三路检索：BM25+向量+图谱（实体共现图，多跳扩展召回，/kb/{name}/graph 概览）+ RRF + 两阶段 Reranker（lexical/llm 可选，失败自动回退，retrieve.rerank 参数）、Citation、级联删除（含图谱/向量库）、向量路可切 Milvus（EAP_MILVUS_URI，不可达自动回退本地余弦）** | 真实实体抽取（LLM） |
+| 知识中心 | 多 KB、分块、hash/openai 嵌入、**三路检索：BM25+向量+图谱（实体共现图 / LLM 结构化抽取可切，多跳扩展召回，/kb/{name}/graph 概览）+ RRF + 两阶段 Reranker（lexical/llm 可选，失败自动回退，retrieve.rerank 参数）、Citation、级联删除（含图谱/向量库）、向量路可切 Milvus（EAP_MILVUS_URI，不可达自动回退本地余弦）** | Reranker 接真实模型 |
 | Agent Runtime | Context 预算、Agent Loop、工具协议、HITL 审批门控 + 挂起/恢复 | 人工审批 UI、持久化 Checkpoint |
 | **多智能体** | **Supervisor 委派（agent.\* 工具化）+ 深度护栏 + 内置 supervisor-agent** | Handoff 策略编排 UI、跨租户 A2A 委派 |
 | **Memory** | **会话/长期记忆读写、向量+词面召回、遗忘 API（/api/v1/memory）** | 摘要压缩、组织记忆联动知识中心 |

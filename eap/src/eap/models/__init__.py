@@ -311,6 +311,7 @@ class GraphEdgeRecord(Base):
     src: Mapped[str] = mapped_column(String(64), index=True)
     dst: Mapped[str] = mapped_column(String(64), index=True)
     weight: Mapped[int] = mapped_column(Integer, default=1)
+    relation: Mapped[str] = mapped_column(String(64), default="")  # LLM 抽取的关系标签；共现边为空
     chunk_id: Mapped[int] = mapped_column(Integer, index=True)
     doc_id: Mapped[int] = mapped_column(Integer, index=True)
 

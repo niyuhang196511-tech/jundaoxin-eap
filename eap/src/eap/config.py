@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # 向量路生产形态（docs/04 §1）：配置 Milvus 后向量检索走 Milvus（不可达自动回退本地余弦）
     milvus_uri: str | None = None
 
+    # 图谱实体抽取（docs/04 §1）：lexical=词元共现（离线）；llm=模型结构化抽取（失败回退共现）
+    graph_extraction: str = "lexical"
+
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True
 

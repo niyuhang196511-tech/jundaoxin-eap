@@ -8,11 +8,15 @@
 
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import GraphEdgeRecord, GraphNodeRecord
 from .tokenize import tokenize
+
+import os  # 调试日志用（临时），收口时移除
 
 # 单字噪声大：只收长度 >=2 的词元（Han 双字组与 ASCII 词已由 tokenize 保证）
 _MIN_ENTITY_LEN = 2
@@ -33,17 +37,59 @@ def extract_entities(content: str) -> list[str]:
 
 
 def index_chunk_graph(db: Session, kb_id: int, chunk_id: int, doc_id: int, content: str) -> int:
-    """chunk 实体/共现边入图（幂等：先清该 chunk 旧边）。返回新建边数。"""
+    """chunk 实体/关系入图（幂等：先清该 chunk 旧边）。返回新建边数。
+
+    EAP_GRAPH_EXTRACTION=llm 时先尝试模型结构化抽取（实体 + 带标签关系），
+    任何失败回退词元共现（确定性，离线可用）。
+    """
     for e in db.scalars(select(GraphEdgeRecord).where(GraphEdgeRecord.chunk_id == chunk_id)).all():
         db.delete(e)
+
+    triples: list[tuple[str, str, str]] = []  # (src, dst, relation)
+    from ..config import get_settings
+
+    _mode = get_settings().graph_extraction
+    import tempfile as _tf
+
+    _log = os.path.join(_tf.gettempdir(), "eap-graph-debug.log")
+    with open(_log, "a", encoding="utf-8") as fh:
+        fh.write(f"mode={_mode} chunk={chunk_id} env={os.environ.get('EAP_GRAPH_EXTRACTION')}\n")
+
+    if _mode == "llm":
+        try:
+            data = _llm_extract(db, content)  # 同步函数，内部自带 asyncio.run
+            entities = [str(e).strip() for e in data.get("entities", [])
+                        if isinstance(e, str) and len(e.strip()) >= 2][:_MAX_ENTITIES_PER_CHUNK]
+            known = set(entities)
+            for rel in data.get("relations", []):
+                if (isinstance(rel, list) and len(rel) >= 2
+                        and rel[0] in known and rel[1] in known and rel[0] != rel[1]):
+                    label = str(rel[2])[:64] if len(rel) >= 3 and rel[2] else "related"
+                    triples.append((rel[0], rel[1], label))
+            if not triples:
+                raise ValueError("模型未抽取到关系")
+            for ent in entities:
+                _ensure_node(db, kb_id, ent)
+            created = 0
+            for src, dst, label in triples:
+                db.add(GraphEdgeRecord(kb_id=kb_id, src=src, dst=dst, weight=1,
+                                       relation=label, chunk_id=chunk_id, doc_id=doc_id))
+                created += 1
+            db.flush()
+            return created
+        except Exception as e:
+            import tempfile as _tempfile
+            import os as _os
+
+            with open(_os.path.join(_tempfile.gettempdir(), "eap-graph-debug.log"),
+                      "a", encoding="utf-8") as fh:
+                fh.write(f"LLM extract failed: {type(e).__name__}: {str(e)[:200]}\n")
+
     entities = extract_entities(content)
     if len(entities) < 2:
         return 0
     for ent in entities:
-        node = db.scalar(select(GraphNodeRecord).where(
-            GraphNodeRecord.kb_id == kb_id, GraphNodeRecord.entity == ent))
-        if node is None:
-            db.add(GraphNodeRecord(kb_id=kb_id, entity=ent))
+        _ensure_node(db, kb_id, ent)
     created = 0
     for i, src in enumerate(entities):
         for dst in entities[i + 1:]:
@@ -52,6 +98,37 @@ def index_chunk_graph(db: Session, kb_id: int, chunk_id: int, doc_id: int, conte
             created += 1
     db.flush()
     return created
+
+
+def _ensure_node(db: Session, kb_id: int, entity: str) -> None:
+    node = db.scalar(select(GraphNodeRecord).where(
+        GraphNodeRecord.kb_id == kb_id, GraphNodeRecord.entity == entity))
+    if node is None:
+        db.add(GraphNodeRecord(kb_id=kb_id, entity=entity))
+
+
+def _llm_extract(db: Session, content: str) -> dict:
+    """LLM 结构化抽取：{"entities": [...], "relations": [[src, dst, label?]]}。"""
+    import asyncio
+
+    from ..modelhub.router import hub
+
+    async def _call():
+        completion = await hub.complete(db, [{"role": "user", "content":
+            "EAP-GRAPH 从以下文本抽取实体与关系。实体为名词性概念，关系形如 [主体, 客体, 关系标签]。\n"
+            "只输出一个 JSON 对象，禁止其他文字：\n"
+            '{"entities": ["实体1", "实体2"], "relations": [["实体1", "实体2", "关系"]]}\n\n'
+            f"【文本】\n{content[:1500]}"}], capability="chat")
+        return completion.result.content or ""
+
+    raw = asyncio.run(_call())
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("抽取输出无 JSON 对象")
+    data = json.loads(raw[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("抽取输出非对象")
+    return data
 
 
 def delete_graph_for_doc(db: Session, kb_id: int, doc_id: int) -> int:
@@ -122,4 +199,5 @@ def graph_overview(db: Session, kb_id: int, limit: int = 50) -> dict:
     edges = db.scalars(select(GraphEdgeRecord).where(
         GraphEdgeRecord.kb_id == kb_id).order_by(GraphEdgeRecord.weight.desc())).all()[:limit]
     return {"nodes": nodes, "edges": [
-        {"src": e.src, "dst": e.dst, "weight": e.weight, "chunk_id": e.chunk_id} for e in edges]}
+        {"src": e.src, "dst": e.dst, "weight": e.weight, "relation": e.relation,
+         "chunk_id": e.chunk_id} for e in edges]}

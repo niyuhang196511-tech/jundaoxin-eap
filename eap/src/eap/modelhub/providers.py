@@ -65,6 +65,18 @@ class MockProvider:
             verdict = json.dumps({"passed": passed, "reason": "mock 裁判（离线确定性）"}, ensure_ascii=False)
             return self._result(record, verdict, [], messages, t0)
 
+        # 图谱抽取分支（EAP-GRAPH 标记由 knowledge/graph.py 抽取 prompt 携带）：
+        # 离线确定性抽取——实体取【文本】标记之后的 ASCII 词、相邻建关系
+        # （真实模型按语义抽取）
+        if any("EAP-GRAPH" in str(m.get("content") or "") for m in messages):
+            import re as _re
+
+            tail = last_user.split("【文本】")[-1]
+            words = list(dict.fromkeys(_re.findall(r"[a-zA-Z0-9]{2,}", tail)))[:4]
+            graph = {"entities": words,
+                     "relations": [[words[i], words[i + 1], "co"] for i in range(len(words) - 1)]}
+            return self._result(record, json.dumps(graph, ensure_ascii=False), [], messages, t0)
+
         if tools and not has_tool_result:
             fn = tools[0]["function"]
             args = json.dumps({"query": last_user[:60].replace('"', "'")}, ensure_ascii=False)
