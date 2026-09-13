@@ -13,6 +13,13 @@ uv run python -m eap    # 启动平台（默认 http://0.0.0.0:8300）
 ```
 
 默认完全离线可运行（mock 模型 + hash 嵌入 + SQLite + 种子数据）。
+
+**一键导览**（进程内走通 12 个模块：模型/知识/智能体/多智能体/Workflow/记忆/发布治理+灰度/成本/策略/连接器+HITL/技能包/Prompt A/B，无需启动服务）：
+
+```bash
+uv run python scripts/demo.py
+```
+
 接入真实供应商：
 
 ```bash
