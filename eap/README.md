@@ -215,6 +215,6 @@ class MyAgent(AgentApp):
 | **企业 IM** | **飞书/钉钉/企业微信渠道：群机器人 Webhook 推送 + 回调接入智能体（飞书 challenge/钉钉加签/企业微信 SHA1+AES 解密），回复自动推回群（/api/v1/im）** | 卡片消息、应用级 API（发消息/通讯录）、事件重试队列 |
 | Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑、**可插拔队列后端：单实例 asyncio 队列 / 多副本 Redis Streams（消费组+XACK+崩溃恢复 XAUTOCLAIM，EAP_REDIS_URL 一键切换）** | 定时调度、优先级队列 |
 | Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入、**技能包打包/Ed25519 签名/验签导入（默认停用待审）/公钥分发（技能市场地基）** | 技能市场分发、scripts/assets 附件包 |
-| MCP | Server（/mcp，官方 SDK 2.x）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | OAuth、长连接复用 |
+| MCP | Server（/mcp，官方 SDK 2.x，**API Key 门禁 EAP-3001，EAP_MCP_AUTH 可关**）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | MCP OAuth（可复用 OIDC 客户端）、长连接复用 |
 | 注册 SDK | @register_agent、manifest 校验、entry_points 发现、健康检查、**生命周期全钩子（on_register/on_start/on_stop/health_check）+ stop/start/unregister API + 热加载（同模块重注册=替换，reload 从源码恢复）** | 灰度（发布治理 Canary 已覆盖智能体维度） |
 | 接入 | OpenAI 兼容（含 SSE）、Agent 调用、KB API、嵌入外链（EmbedToken+JS Widget）、**A2A 1.0（Agent Card + Task）**、**React 控制台（总览/模型/知识/智能体/任务/资产/评测）**、**OIDC/SSO（授权码流程+JWKS 验签，换发租户 API Key）** | 多租户计费 |

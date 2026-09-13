@@ -1,7 +1,7 @@
 """MCP Server：把平台能力（知识库检索、智能体对话）暴露为 MCP 工具（docs/04 §5）。
 
 - 端点：POST /mcp（Streamable HTTP，stateless 模式——每个请求独立，免会话管理）
-- 客户端：Claude / Cursor / Harness 等任何 MCP Host 均可直接接入
+- 客户端：Claude / Cursor / Harness 等任何 MCP Host 均可直接接入（需平台 API Key）
 - 每个平台实例独立创建 MCPServer（会话管理器绑定各自事件循环，不可跨实例复用）
 - 反向身份（平台作为 MCP Client 消费外部 Server）见 runtime/mcp_client.py
 """
@@ -11,6 +11,45 @@ from __future__ import annotations
 import json
 
 from mcp.server.mcpserver import MCPServer
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+
+class MCPAuthMiddleware(BaseHTTPMiddleware):
+    """MCP 端点 API Key 门禁（docs/04 §5 安全收口，仅拦 /mcp 前缀）。
+
+    Bearer 凭证复用平台 API Key 体系（与 REST 同源校验）；MCP 是服务间协议，
+    不接受嵌入会话令牌。EAP_MCP_AUTH=0 可关闭（仅限内网可信部署）。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if not request.url.path.startswith("/mcp"):
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not self._check_key(token):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                {"detail": "EAP-3001 MCP 端点需要有效的 API Key（Authorization: Bearer <api-key>）"},
+                status_code=401,
+                headers={"www-authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+    @staticmethod
+    def _check_key(token: str) -> bool:
+        if not token:
+            return False
+        from sqlalchemy import select
+
+        from .db import SessionLocal
+        from .models import ApiKey
+
+        with SessionLocal() as db:
+            row = db.scalar(select(ApiKey).where(ApiKey.key == token,
+                                                 ApiKey.enabled == True))  # noqa: E712
+            return row is not None
 
 
 def create_mcp_server() -> tuple[MCPServer, object]:

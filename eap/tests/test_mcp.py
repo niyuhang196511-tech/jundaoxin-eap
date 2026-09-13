@@ -54,13 +54,48 @@ def live_server():
 
 
 def test_mcp_endpoint_raw_jsonrpc(live_server):
-    """原始 JSON-RPC：tools/list（Streamable HTTP stateless）。"""
+    """原始 JSON-RPC：tools/list（Streamable HTTP stateless）。需平台 API Key。"""
     r = httpx.post("http://127.0.0.1:8931/mcp",
                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-                   headers={"Accept": "application/json, text/event-stream"}, timeout=10)
+                   headers={"Accept": "application/json, text/event-stream",
+                            "Authorization": "Bearer dev-key-1"}, timeout=10)
     assert r.status_code == 200
     text = r.text
     assert "kb_search" in text and "agent_chat" in text
+
+
+def test_mcp_endpoint_requires_api_key(live_server):
+    """安全收口：无 key / 错 key → 401（EAP-3001），不泄漏工具清单。"""
+    base = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    accept = {"Accept": "application/json, text/event-stream"}
+    r = httpx.post("http://127.0.0.1:8931/mcp", json=base, headers=accept, timeout=10)
+    assert r.status_code == 401 and "EAP-3001" in r.text
+    assert "kb_search" not in r.text
+    r = httpx.post("http://127.0.0.1:8931/mcp", json=base,
+                   headers={**accept, "Authorization": "Bearer wrong-key"}, timeout=10)
+    assert r.status_code == 401
+
+
+def test_mcp_auth_disabled_flag():
+    """EAP_MCP_AUTH=0：内网可信环境关闭门禁（独立 app 验证构建期开关）。"""
+    import os
+
+    from eap.config import get_settings
+
+    os.environ["EAP_MCP_AUTH"] = "0"
+    get_settings.cache_clear()
+    try:
+        from eap.main import create_app
+        from fastapi.testclient import TestClient
+
+        # base_url 带端口：MCP 库的 Host 白名单是 127.0.0.1:*（裸 host 会被 421）
+        with TestClient(create_app(), base_url="http://127.0.0.1:8300") as c:
+            r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                       headers={"Accept": "application/json, text/event-stream"})
+            assert r.status_code == 200 and "kb_search" in r.text
+    finally:
+        os.environ.pop("EAP_MCP_AUTH", None)
+        get_settings.cache_clear()
 
 
 def test_mcp_official_client_end_to_end(live_server):
@@ -69,16 +104,21 @@ def test_mcp_official_client_end_to_end(live_server):
     from mcp.client.streamable_http import streamable_http_client
 
     async def run():
-        async with streamable_http_client("http://127.0.0.1:8931/mcp") as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                listing = await session.list_tools()
-                names = [t.name for t in listing.tools]
-                assert {"kb_search", "agent_chat", "list_capabilities"} <= set(names)
-                result = await session.call_tool(
-                    "kb_search", {"kb": "website-faq", "query": "如何创建知识库", "top_k": 2})
-                text = "\n".join(getattr(c, "text", "") for c in result.content)
-                return names, text
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(
+                headers={"Authorization": "Bearer dev-key-1"}) as http:
+            async with streamable_http_client(
+                    "http://127.0.0.1:8931/mcp", http_client=http) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listing = await session.list_tools()
+                    names = [t.name for t in listing.tools]
+                    assert {"kb_search", "agent_chat", "list_capabilities"} <= set(names)
+                    result = await session.call_tool(
+                        "kb_search", {"kb": "website-faq", "query": "如何创建知识库", "top_k": 2})
+                    text = "\n".join(getattr(c, "text", "") for c in result.content)
+                    return names, text
 
     names, text = asyncio.run(run())
     assert "kb_search" in names

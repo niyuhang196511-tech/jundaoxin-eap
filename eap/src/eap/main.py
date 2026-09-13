@@ -32,6 +32,7 @@ from .api.v1 import skills as api_skills
 from .api.v1 import tasks as api_tasks
 from .api.v1 import workflows as api_workflows
 from .db import init_db
+from .config import get_settings
 from .mcp_server import create_mcp_server
 from .observability.middleware import TraceMiddleware
 from .runtime.tasks import create_task_engine
@@ -103,11 +104,14 @@ def create_app() -> FastAPI:
             status_code=503,
         )
 
-    # MCP Server：平台能力以标准 MCP 工具暴露（Claude/Cursor/Harness 直连）
+    # MCP Server：平台能力以标准 MCP 工具暴露（Claude/Cursor/Harness 直连，需 API Key）
     mcp, mcp_app = create_mcp_server()
     app.state.mcp = mcp
     app.router.routes.extend(mcp_app.routes)
+    if get_settings().mcp_auth:
+        from .mcp_server import MCPAuthMiddleware
 
+        app.add_middleware(MCPAuthMiddleware)
     # Task/Job 引擎（每实例独立）
     app.state.task_engine = create_task_engine()
 
