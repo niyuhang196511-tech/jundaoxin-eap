@@ -2,7 +2,7 @@ import { Component, useState } from 'react'
 import { Card, Layout, Menu, Typography } from 'antd'
 import {
   ApiOutlined, AppstoreOutlined, AuditOutlined, BookOutlined, ExperimentOutlined,
-  NotificationOutlined, RobotOutlined, ThunderboltOutlined,
+  NodeIndexOutlined, NotificationOutlined, RobotOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import Agents from './pages/Agents'
 import Knowledge from './pages/Knowledge'
@@ -13,6 +13,7 @@ import Evals from './pages/Evals'
 import Governance from './pages/Governance'
 import Integrations from './pages/Integrations'
 import Overview from './pages/Overview'
+import WorkflowCanvas from './pages/WorkflowCanvas'
 
 const { Sider, Content, Header } = Layout
 
@@ -26,6 +27,7 @@ const PAGES: Record<string, React.ReactNode> = {
   evals: <Evals />,
   gov: <Governance />,
   conn: <Integrations />,
+  canvas: <WorkflowCanvas />,
 }
 
 const MENU = [
@@ -38,6 +40,7 @@ const MENU = [
   { key: 'evals', icon: <ExperimentOutlined />, label: '评测' },
   { key: 'gov', icon: <AuditOutlined />, label: '治理 · 发布 · 成本' },
   { key: 'conn', icon: <ApiOutlined />, label: '连接器 · 企业 IM' },
+  { key: 'canvas', icon: <NodeIndexOutlined />, label: 'Workflow 画布' },
 ]
 
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { err: Error | null }> {

@@ -36,6 +36,15 @@ async def create_workflow(body: WorkflowSpec, db: Session = fastapi.Depends(get_
             "invoke": f"/api/v1/agents/{record.name}/invocations"}
 
 
+@router.get("/{name}/dsl")
+def get_workflow_dsl(name: str, db: Session = fastapi.Depends(get_db)):
+    """DSL 全文（画布编辑器数据源）。"""
+    record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+    if record is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 工作流 {name} 不存在")
+    return record.dsl or {}
+
+
 @router.post("/reload")
 async def reload_workflows():
     """从 DB 重新加载启用的 DSL 工作流（幂等注册）。"""
