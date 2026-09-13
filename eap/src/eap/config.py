@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     oidc_client_secret: str | None = None
     oidc_redirect_uri: str = "http://localhost:8300/api/v1/auth/oidc/callback"
 
+    # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
+    redis_url: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

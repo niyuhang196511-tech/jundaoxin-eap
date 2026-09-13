@@ -1,6 +1,6 @@
-# EAP 单机部署：PostgreSQL + 平台（docs/09 §部署拓扑的单机版）
+# EAP 单机部署：PostgreSQL + Redis + 平台（docs/09 §部署拓扑的单机版）
 # 启动：cd eap && docker compose up -d --build
-# 数据持久化：postgres-data 卷；平台无状态，副本横向扩容时换 Redis Streams 任务队列
+# 数据持久化：postgres-data 卷 + Redis AOF；平台无状态，多副本共享 Redis 任务队列
 #
 # 生产前检查清单：
 #   1. 复制 .env.example 为 .env，更换 EAP_DEV_API_KEY / EAP_SESSION_SECRET
@@ -23,13 +23,29 @@ services:
       timeout: 3s
       retries: 12
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "63790:6379"                # 供宿主机跑 Redis 队列集成测试（63790 避开常见占用）；生产可去掉
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   eap:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       EAP_DB_URL: postgresql+psycopg://eap:eap@postgres:5432/eap
+      EAP_REDIS_URL: redis://redis:6379/0
       # 以下变量可由同目录 .env 覆盖（docker compose 自动读取）：
       # EAP_DEV_API_KEY、EAP_SESSION_SECRET、EAP_OPENAI_*、EAP_EMBEDDING_PROVIDER ...
     env_file:
@@ -41,3 +57,4 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:

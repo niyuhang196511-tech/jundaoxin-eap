@@ -32,10 +32,94 @@ class TaskSnapshot:
     approvals: dict
 
 
-class TaskEngine:
+# ---------- 队列后端（docs/03 §5：单实例 asyncio 队列 / 多副本 Redis Streams，接口一致） ----------
+
+class AsyncioQueueBackend:
+    """单实例开发版后端：进程内 asyncio.Queue（不持久、不跨实例）。"""
+
     def __init__(self) -> None:
-        self.handlers: dict[str, Handler] = {}
         self._queue: asyncio.Queue | None = None
+
+    async def start(self) -> None:
+        self._queue = asyncio.Queue()
+
+    async def stop(self) -> None:
+        self._queue = None
+
+    async def enqueue(self, task_id: str) -> None:
+        if self._queue is not None:
+            self._queue.put_nowait(task_id)
+
+    async def get(self) -> tuple[str, str]:
+        """返回 (task_id, receipt)；asyncio 后端 receipt 即 task_id。"""
+        task_id = await self._queue.get()
+        return task_id, task_id
+
+    async def ack(self, receipt: str) -> None:
+        if self._queue is not None:
+            self._queue.task_done()
+
+
+class RedisStreamBackend:
+    """多副本后端（docs/03 §5）：Redis Streams + 消费组。
+
+    - 提交 XADD；消费 XREADGROUP（block 轮询）；完成 XACK
+    - 启动时 XAUTOCLAIM 接管空闲 >60s 的 pending 条目——前一实例崩溃遗留的任务自动重投
+    - 消费者名含随机后缀：每个副本独立身份
+    """
+
+    STREAM = "eap:tasks"
+    GROUP = "eap-workers"
+
+    def __init__(self, url: str) -> None:
+        import redis.asyncio as aioredis
+
+        self._r = aioredis.from_url(url, decode_responses=True)
+        self._consumer = f"worker-{uuid.uuid4().hex[:8]}"
+
+    async def start(self) -> None:
+        try:
+            await self._r.xgroup_create(self.STREAM, self.GROUP, id="0", mkstream=True)
+        except Exception as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+        # 崩溃恢复：接管其他实例遗留的 pending（空闲超过 60 秒）
+        try:
+            claimed = await self._r.xautoclaim(self.STREAM, self.GROUP, self._consumer,
+                                               min_idle_time=60_000, count=20)
+            messages = claimed[1] if isinstance(claimed, (tuple, list)) else []
+            for entry in messages:
+                msg_id, fields = (entry[0], entry[1]) if isinstance(entry, tuple) else (entry, {})
+                if fields.get("task_id"):
+                    await self._r.xadd(self.STREAM, {"task_id": fields["task_id"]})
+                    await self._r.xack(self.STREAM, self.GROUP, msg_id)
+        except Exception:
+            pass  # 恢复失败不阻塞启动（Redis 兼容实现差异）
+
+    async def stop(self) -> None:
+        await self._r.aclose()
+
+    async def enqueue(self, task_id: str) -> None:
+        await self._r.xadd(self.STREAM, {"task_id": task_id})
+
+    async def get(self) -> tuple[str, str]:
+        while True:
+            resp = await self._r.xreadgroup(self.GROUP, self._consumer,
+                                            {self.STREAM: ">"}, count=1, block=60_000)
+            for _stream, messages in resp or []:
+                for msg_id, fields in messages:
+                    task_id = fields.get("task_id")
+                    if task_id:
+                        return task_id, msg_id
+
+    async def ack(self, receipt: str) -> None:
+        await self._r.xack(self.STREAM, self.GROUP, receipt)
+
+
+class TaskEngine:
+    def __init__(self, queue_backend=None) -> None:
+        self.handlers: dict[str, Handler] = {}
+        self._backend = queue_backend
         self._workers: list[asyncio.Task] = []
         self._running: dict[str, asyncio.Task] = {}
         self._cancel_requested: set[str] = set()
@@ -46,7 +130,16 @@ class TaskEngine:
     # ---------- 生命周期 ----------
 
     async def start(self, workers: int = 2) -> None:
-        self._queue = asyncio.Queue()
+        if self._backend is None:
+            from ..config import get_settings
+
+            settings = get_settings()
+            if settings.redis_url:
+                self._backend = RedisStreamBackend(settings.redis_url)
+            else:
+                self._backend = AsyncioQueueBackend()
+        await self._backend.start()
+        print(f"[tasks] 引擎启动：{type(self._backend).__name__} × {workers} workers")
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(workers)]
 
     async def stop(self) -> None:
@@ -54,7 +147,8 @@ class TaskEngine:
             w.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers = []
-        self._queue = None
+        if self._backend is not None:
+            await self._backend.stop()
 
     # ---------- 提交 / 查询 ----------
 
@@ -63,12 +157,11 @@ class TaskEngine:
         record = TaskRecord(id=task_id, type=task_type, state="PENDING", payload=payload)
         db.add(record)
         db.commit()
-        self.enqueue(task_id)
+        await self.enqueue(task_id)
         return task_id
 
-    def enqueue(self, task_id: str) -> None:
-        if self._queue is not None:
-            self._queue.put_nowait(task_id)
+    async def enqueue(self, task_id: str) -> None:
+        await self._backend.enqueue(task_id)
 
     async def cancel(self, task_id: str) -> str:
         with SessionLocal() as db:
@@ -103,14 +196,21 @@ class TaskEngine:
             task.result = result
             task.state = "PENDING"
             db.commit()
-        self.enqueue(task_id)
+        await self.enqueue(task_id)
         return "PENDING"
 
     # ---------- 执行 ----------
 
     async def _worker(self, i: int) -> None:
         while True:
-            task_id = await self._queue.get()
+            try:
+                task_id, receipt = await self._backend.get()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # Redis 抖动等瞬态错误：不杀 worker，记录后重试
+                print(f"[tasks] worker{i} 取任务失败: {e}")
+                await asyncio.sleep(1)
+                continue
             try:
                 await self._run_one(task_id)
             except asyncio.CancelledError:
@@ -118,7 +218,10 @@ class TaskEngine:
             except Exception as e:  # 处理器之外的意外错误
                 self._mark(task_id, "FAILED", {"error": str(e)})
             finally:
-                self._queue.task_done()
+                try:
+                    await self._backend.ack(receipt)
+                except Exception as e:
+                    print(f"[tasks] worker{i} ack 失败: {e}")
 
     async def _run_one(self, task_id: str) -> None:
         with SessionLocal() as db:
@@ -205,9 +308,9 @@ class TaskEngine:
                 "steps": result.steps, "usage": result.usage}
 
 
-def create_task_engine() -> TaskEngine:
-    """每个平台实例独立引擎（队列/Worker 绑定各自事件循环，不可跨实例复用）。"""
-    engine = TaskEngine()
+def create_task_engine(queue_backend=None) -> TaskEngine:
+    """每个平台实例独立引擎（Worker 绑定各自事件循环）；队列后端可选 Redis Streams。"""
+    engine = TaskEngine(queue_backend)
     engine.register_handler("agent.invoke", engine._h_agent_invoke)
     engine.register_handler("agent.hitl", engine._h_agent_hitl)
     return engine

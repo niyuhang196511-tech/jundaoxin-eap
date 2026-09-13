@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 # 生产数据库驱动：EAP_DB_URL=postgresql+psycopg://... 时需要（docs/05 §5）
 postgres = ["psycopg[binary]>=3.1"]
+# 多副本任务队列：EAP_REDIS_URL 配置时需要（docs/03 §5 Redis Streams）
+redis = ["redis>=5.0"]
 
 [dependency-groups]
 dev = [

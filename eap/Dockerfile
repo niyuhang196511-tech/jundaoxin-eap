@@ -19,11 +19,11 @@ WORKDIR /app
 # 两段 sync：先装依赖层（源码不变即命中缓存），拷入源码后再安装 eap 包本身
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --extra postgres --no-dev
+RUN uv sync --frozen --extra postgres --extra redis --no-dev
 
 # 源码与前端产物
 COPY src/ ./src/
-RUN uv sync --frozen --extra postgres --no-dev
+RUN uv sync --frozen --extra postgres --extra redis --no-dev
 COPY --from=frontend /app/src/eap/static/console ./src/eap/static/console
 
 # 非 root 运行
