@@ -37,6 +37,13 @@ def list_agents():
     ]
 
 
+@router.post("/reload")
+async def reload_agents():
+    """热加载：重导入配置模块（同模块重注册 = 替换）→ 全部重新启动。"""
+    count = await registry.reload_modules()
+    return {"reloaded_modules": count, "agents": registry.names()}
+
+
 @router.get("/{name}/card")
 def agent_card(name: str):
     """A2A 风格 Agent Card（正式 A2A 1.0 端点在 M3，docs/04 §5）。"""
@@ -50,6 +57,38 @@ def agent_card(name: str):
         "provider": {"organization": "EAP", "url": ""},
         "endpoint": f"/api/v1/agents/{name}/invocations",
     }
+
+
+@router.post("/{name}/stop")
+async def stop_agent(name: str):
+    """STOP：调用 on_stop 钩子；停用后调用返回 503。"""
+    try:
+        await registry.stop_agent(name)
+    except KeyError as e:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    return {"name": name, "status": "stopped"}
+
+
+@router.post("/{name}/start")
+async def start_agent(name: str):
+    """START：重新实例化 + 健康检查（stop 后恢复 / unhealthy 重拉）。"""
+    try:
+        registry.get(name)
+    except KeyError as e:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    await registry.start_agent(name)
+    agent = registry.get(name)
+    return {"name": name, "status": agent.status, "health": agent.health}
+
+
+@router.delete("/{name}")
+async def unregister_agent(name: str):
+    """注销：移出注册表并删除纳管记录（热加载 reload 可从源码恢复）。"""
+    try:
+        await registry.unregister(name)
+    except KeyError as e:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    return {"name": name, "status": "unregistered"}
 
 
 @router.post("/{name}/invocations")

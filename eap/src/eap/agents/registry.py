@@ -29,7 +29,7 @@ class RegisteredAgent:
     source: str
     module: str
     instance: AgentApp | None = None
-    status: str = "registered"  # registered | started | unhealthy
+    status: str = "registered"  # registered | started | stopped | unhealthy
     health: dict = field(default_factory=dict)
 
 
@@ -46,10 +46,21 @@ class AgentRegistry:
         if existing is not None:
             if existing.manifest.version == manifest.version and existing.cls is cls:
                 return  # 重复 import 幂等
+            if existing.module and existing.module == module:
+                self._replace(existing, cls, manifest, source)  # 热加载：同模块重注册 = 替换
+                return
             raise ValueError(f"智能体 {manifest.name} 已注册（v{existing.manifest.version}），"
                              f"请升级版本号或更名：冲突 v{manifest.version} from {module}")
         self._agents[manifest.name] = RegisteredAgent(
             cls=cls, manifest=manifest, source=source, module=module,
+            status="registered", health={},
+        )
+
+    def _replace(self, existing: RegisteredAgent, cls: type[AgentApp],
+                 manifest: AgentManifest, source: str) -> None:
+        """热加载替换：换上新类，状态回到待启动（调用方须已 stop，见 reload_modules）。"""
+        self._agents[manifest.name] = RegisteredAgent(
+            cls=cls, manifest=manifest, source=source, module=existing.module,
             status="registered", health={},
         )
 
@@ -81,6 +92,54 @@ class AgentRegistry:
             agent.status = "unhealthy"
             agent.health = {"ok": False, "error": str(e)}
         self._persist(agent)
+
+    async def stop_agent(self, name: str) -> None:
+        """STOP：调用 on_stop 钩子，实例保留（start 可再拉起），拒绝后续调用。"""
+        agent = self._agents[name]
+        if agent.instance is not None and agent.status == "started":
+            try:
+                await agent.instance.on_stop()
+            except Exception as e:
+                agent.health = {"ok": False, "stop_error": str(e)}
+        agent.status = "stopped"
+        agent.health = {"ok": False, "reason": "stopped by operator"}
+        self._persist(agent)
+
+    async def unregister(self, name: str) -> None:
+        """注销：停实例 + 移出注册表 + 删除 DB 纳管记录。"""
+        if self._agents[name].status == "started":
+            await self.stop_agent(name)
+        del self._agents[name]
+        with SessionLocal() as db:
+            record = db.scalar(select(AgentRecord).where(AgentRecord.name == name))
+            if record is not None:
+                db.delete(record)
+                db.commit()
+
+    async def reload_modules(self) -> int:
+        """热加载：先停全部运行中实例（触发 on_stop 钩子），importlib.reload 配置模块
+        （同模块重注册 = 替换），再统一重新启动。返回重载的模块数。"""
+        settings = get_settings()
+        builtin = ["eap.agents.builtin.faq_agent",
+                   "eap.agents.builtin.order_agent",
+                   "eap.agents.builtin.supervisor_agent"]
+        modules = list(dict.fromkeys([*builtin, *settings.agent_modules]))
+        for name in self._agents:
+            if self._agents[name].status == "started":
+                await self.stop_agent(name)
+        reloaded = 0
+        for mod in modules:
+            try:
+                if mod in importlib.sys.modules:
+                    importlib.reload(importlib.sys.modules[mod])
+                else:
+                    importlib.import_module(mod)
+                reloaded += 1
+            except Exception as e:
+                print(f"[registry] 热加载模块 {mod} 失败: {e}")
+        for name in self._agents:
+            await self.start_agent(name)
+        return reloaded
 
     async def bootstrap(self) -> None:
         """启动引导：发现 → import（触发注册钩子）→ 逐个启动。"""
@@ -134,6 +193,8 @@ class AgentRegistry:
         agent = self.get(name)
         if agent.status == "unhealthy":
             raise RuntimeError(f"智能体 {name} 健康检查未通过：{agent.health}")
+        if agent.status == "stopped":
+            raise RuntimeError(f"智能体 {name} 已停用（stop），请先 start")
         assert agent.instance is not None
         # Canary 灰度（docs/06 §2）：命中则注入 overrides.model，响应标记 canary
         canary_info = None
