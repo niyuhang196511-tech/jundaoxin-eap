@@ -72,7 +72,7 @@ def ingest_faq(name: str, body: FAQIngest, db: Session = fastapi.Depends(get_db)
 @router.post("/{name}/retrieve")
 def retrieve(name: str, body: RetrieveRequest, db: Session = fastapi.Depends(get_db)):
     kb = _get_kb(db, name)
-    hits = kb_svc.retrieve(db, kb, body.query, top_k=body.top_k)
+    hits = kb_svc.retrieve(db, kb, body.query, top_k=body.top_k, rerank=body.rerank)
     return RetrieveResponse(
         kb=kb.name,
         hits=[RetrieveHit(

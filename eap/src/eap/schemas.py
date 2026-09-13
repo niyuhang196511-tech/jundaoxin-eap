@@ -56,6 +56,8 @@ class FAQIngest(BaseModel):
 class RetrieveRequest(BaseModel):
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=20)
+    rerank: str | None = Field(default=None, pattern=r"^(lexical|llm)$",
+                               description="两阶段重排：lexical=词面覆盖度；llm=模型重排（失败回退 lexical）")
 
 
 class Citation(BaseModel):

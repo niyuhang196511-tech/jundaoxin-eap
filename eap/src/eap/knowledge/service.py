@@ -66,9 +66,12 @@ def ingest_faq(db: Session, kb: KB, items: list[dict]) -> int:
     return count
 
 
-def retrieve(db: Session, kb: KB, query: str, top_k: int = 5) -> list[dict]:
-    """三路混合检索：BM25（稀疏）+ 向量（稠密，Milvus 或本地余弦）+ 图谱（多跳扩展）
-    → RRF 融合 → Citation（docs/04 §1.3）。"""
+def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None = None) -> list[dict]:
+    """三路混合检索 + 可选两阶段重排（docs/04 §1.3）：
+
+    BM25（稀疏）+ 向量（稠密，Milvus 或本地余弦）+ 图谱（多跳扩展）
+    → RRF 融合（召回池 = top_k×3 至少 10 条）→ rerank="lexical"/"llm" 头部精排 → top_k。
+    """
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
     store = get_vector_store(settings)
@@ -92,7 +95,17 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5) -> list[dict]:
 
     fused = rrf_combine([top_n(bm25, len(chunks)), top_n(vec_scores, len(chunks)),
                          top_n(graph_scores, len(chunks))])
-    ordered = sorted(fused.items(), key=lambda kv: -kv[1])[:top_k]
+    pool_n = max(top_k * 3, 10)
+    fused_top = sorted(fused.items(), key=lambda kv: -kv[1])[:pool_n]
+
+    if rerank and len(fused_top) > 1:
+        from .rerank import rerank_candidates
+
+        candidates = [(idx, chunks[idx].content) for idx, _ in fused_top]
+        order = rerank_candidates(db, query, candidates, rerank)
+        ordered = [(candidates[i][0], fused_top[i][1]) for i in order][:top_k]
+    else:
+        ordered = fused_top[:top_k]
 
     doc_titles = {
         d.id: d.title
