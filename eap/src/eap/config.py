@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # 技能包签名密钥（32 字节 hex，Ed25519 seed）：技能市场分发链的信任根（docs/04 §3）
     skill_signing_key: str | None = None  # 未配置用开发默认密钥，生产必换
 
+    # OIDC/SSO（docs/06 §1）：配置 issuer+client_id 即启用；tenant 映射见 docs/05 §5
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = None
+    oidc_redirect_uri: str = "http://localhost:8300/api/v1/auth/oidc/callback"
+
 
 @lru_cache
 def get_settings() -> Settings:

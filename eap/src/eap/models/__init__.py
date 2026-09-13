@@ -27,6 +27,19 @@ class Tenant(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class UserRecord(Base):
+    """平台用户（docs/06 §1，M3 OIDC/SSO）：OIDC sub 唯一定位，登录换发租户 API Key。"""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sub: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(256), default="")
+    name: Mapped[str] = mapped_column(String(128), default="")
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ApiKey(Base):
     """凭证体系 M1 子集：服务间 API Key（用户 Token/EmbedToken 见 docs/07 §1）。"""
 

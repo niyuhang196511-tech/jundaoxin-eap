@@ -15,6 +15,7 @@ from .agents.registry import registry
 from .api.v1 import a2a as api_a2a
 from .api.v1 import agents as api_agents
 from .api.v1 import budgets as api_budgets
+from .api.v1 import auth as api_auth
 from .api.v1 import chat as api_chat
 from .api.v1 import connectors as api_connectors
 from .api.v1 import embed as api_embed
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)
     app.include_router(api_budgets.router)
+    app.include_router(api_auth.router)
     app.include_router(api_a2a.router)
     app.include_router(api_a2a.wellknown)
     app.include_router(api_kb.router)
