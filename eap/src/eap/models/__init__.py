@@ -252,6 +252,36 @@ class WorkflowRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class GraphNodeRecord(Base):
+    """知识图谱节点（docs/04 §1 三路索引之图谱路，M3 离线 MVP）：
+
+    实体 = 词元级（Han 双字组 / ASCII 词，去停用词）；真实实体抽取接 LLM 后替换。
+    """
+
+    __tablename__ = "graph_nodes"
+    __table_args__ = (UniqueConstraint("kb_id", "entity", name="uq_gnode_kb_entity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kb_id: Mapped[int] = mapped_column(Integer, index=True)
+    entity: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class GraphEdgeRecord(Base):
+    """知识图谱边：实体在 chunk 内共现（weight=共现次数），召回时按边找回 chunk。"""
+
+    __tablename__ = "graph_edges"
+    __table_args__ = (UniqueConstraint("kb_id", "src", "dst", "chunk_id",
+                                       name="uq_gedge_pair_chunk"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kb_id: Mapped[int] = mapped_column(Integer, index=True)
+    src: Mapped[str] = mapped_column(String(64), index=True)
+    dst: Mapped[str] = mapped_column(String(64), index=True)
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    chunk_id: Mapped[int] = mapped_column(Integer, index=True)
+    doc_id: Mapped[int] = mapped_column(Integer, index=True)
+
+
 class PromptRecord(Base):
     """Prompt 中心（docs/05 §3）：Prompt 是独立资产——模板/变量/版本。
 

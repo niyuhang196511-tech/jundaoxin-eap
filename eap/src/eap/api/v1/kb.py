@@ -82,6 +82,15 @@ def retrieve(name: str, body: RetrieveRequest, db: Session = fastapi.Depends(get
     )
 
 
+@router.get("/{name}/graph")
+def graph_overview(name: str, db: Session = fastapi.Depends(get_db)):
+    """图谱概览：实体节点 + 高权重共现边（三路索引之图谱路观测）。"""
+    kb = _get_kb(db, name)
+    from ...knowledge.graph import graph_overview as overview
+
+    return {"kb": kb.name, **overview(db, kb.id)}
+
+
 @router.delete("/{name}/documents/{doc_id}")
 def delete_document(name: str, doc_id: int, db: Session = fastapi.Depends(get_db)):
     kb = _get_kb(db, name)
