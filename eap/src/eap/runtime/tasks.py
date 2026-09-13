@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
@@ -121,6 +122,7 @@ class TaskEngine:
         self.handlers: dict[str, Handler] = {}
         self._backend = queue_backend
         self._workers: list[asyncio.Task] = []
+        self._scheduler: asyncio.Task | None = None
         self._running: dict[str, asyncio.Task] = {}
         self._cancel_requested: set[str] = set()
 
@@ -141,12 +143,18 @@ class TaskEngine:
         await self._backend.start()
         print(f"[tasks] 引擎启动：{type(self._backend).__name__} × {workers} workers")
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(workers)]
+        self._scheduler = asyncio.create_task(self._schedule_loop())
 
     async def stop(self) -> None:
         for w in self._workers:
             w.cancel()
+        if self._scheduler is not None:
+            self._scheduler.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
+        if self._scheduler is not None:
+            await asyncio.gather(self._scheduler, return_exceptions=True)
         self._workers = []
+        self._scheduler = None
         if self._backend is not None:
             await self._backend.stop()
 
@@ -198,6 +206,31 @@ class TaskEngine:
             db.commit()
         await self.enqueue(task_id)
         return "PENDING"
+
+    # ---------- 定时调度（docs/03 §5）：到期即 submit，走统一队列/HITL/取消链路 ----------
+
+    async def _schedule_loop(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from ..models import TaskScheduleRecord
+
+        while True:
+            try:
+                now = datetime.now(timezone.utc)
+                with SessionLocal() as db:
+                    due = db.scalars(select(TaskScheduleRecord).where(
+                        TaskScheduleRecord.enabled == True,  # noqa: E712
+                        TaskScheduleRecord.next_run_at <= now)).all()
+                    for s in due:
+                        await self.submit(db, s.task_type, dict(s.payload or {}))
+                        s.last_run_at = now
+                        s.next_run_at = now + timedelta(seconds=s.interval_seconds)
+                    db.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[tasks] 调度循环异常: {e}")
+            await asyncio.sleep(1)
 
     # ---------- 执行 ----------
 

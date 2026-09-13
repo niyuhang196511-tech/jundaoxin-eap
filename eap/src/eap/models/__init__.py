@@ -265,6 +265,26 @@ class WorkflowRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class TaskScheduleRecord(Base):
+    """定时调度（docs/03 §5，M3）：按固定间隔周期性提交任务（DB 持久化，重启不丢）。
+
+    MVP 用固定间隔（interval_seconds）；cron 表达式接入时复用同一执行链路。
+    """
+
+    __tablename__ = "task_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    task_type: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class GraphNodeRecord(Base):
     """知识图谱节点（docs/04 §1 三路索引之图谱路，M3 离线 MVP）：
 
