@@ -28,7 +28,7 @@ def _get_kb(db: Session, name: str) -> KB:
 @router.get("")
 def list_kbs(db: Session = fastapi.Depends(get_db)):
     return [
-        {"name": kb.name, "title": kb.title, "template": kb.template,
+        {"id": kb.id, "name": kb.name, "title": kb.title, "template": kb.template,
          "embedding_provider": kb.embedding_provider}
         for kb in db.scalars(select(KB)).all()
     ]

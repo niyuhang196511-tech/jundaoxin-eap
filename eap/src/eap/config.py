@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
     redis_url: str | None = None
 
+    # 向量路生产形态（docs/04 §1）：配置 Milvus 后向量检索走 Milvus（不可达自动回退本地余弦）
+    milvus_uri: str | None = None
+
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True
 

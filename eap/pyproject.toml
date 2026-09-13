@@ -20,6 +20,8 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1"]
 # 多副本任务队列：EAP_REDIS_URL 配置时需要（docs/03 §5 Redis Streams）
 redis = ["redis>=5.0"]
+# 向量路生产形态：EAP_MILVUS_URI 配置时需要（docs/04 §1 Milvus）
+milvus = ["pymilvus>=2.4"]
 
 [dependency-groups]
 dev = [

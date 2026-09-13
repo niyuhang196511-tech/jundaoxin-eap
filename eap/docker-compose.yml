@@ -29,12 +29,52 @@ services:
     volumes:
       - redis-data:/data
     ports:
-      - "63790:6379"                # 供宿主机跑 Redis 队列集成测试（63790 避开常见占用）；生产可去掉
+      - "63790:6379"                 # 供宿主机跑 Redis 队列集成测试（63790 避开常见占用）；生产可去掉
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 12
+
+  # ---- Milvus standalone（三路索引之向量路生产形态；EAP_MILVUS_URI 配置后启用）----
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd-data:/etcd
+
+  minio:
+    image: quay.io/minio/minio:latest   # docker.io/minio/minio 在当前网络受限，用 quay 镜像源
+    environment:
+      MINIO_ACCESS_KEY: minioadmin   # * 生产必须更换
+      MINIO_SECRET_KEY: minioadmin   # * 生产必须更换
+    command: minio server /minio_data
+    volumes:
+      - minio-data:/minio_data
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"                # 供宿主机跑向量路集成测试
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   eap:
     build: .
@@ -58,3 +98,6 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  etcd-data:
+  minio-data:
+  milvus-data:

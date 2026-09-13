@@ -14,6 +14,8 @@ import pytest
 
 from .conftest import AUTH
 
+pytest.importorskip("redis", reason="redis 包未安装（uv sync --extra redis）")
+
 REDIS_URL = os.environ.get("EAP_TEST_REDIS_URL", "redis://localhost:63790/5")
 
 

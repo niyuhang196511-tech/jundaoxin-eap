@@ -12,12 +12,14 @@ from .embedding import cosine, get_embedder
 from .graph import delete_graph_for_doc, graph_recall, index_chunk_graph
 from .retrieval import bm25_scores, rrf_combine, top_n
 from .tokenize import tokenize
+from .vector_store import get_vector_store
 
 
 def ingest_text(db: Session, kb: KB, title: str, text: str, source: str = "", meta: dict | None = None) -> Document:
-    """文档摄入：分块 → 嵌入 → 图谱索引 → 入库（docs/04 §1.2 三路索引）。"""
+    """文档摄入：分块 → 嵌入（本地+向量库上行）→ 图谱索引 → 入库（docs/04 §1.2 三路索引）。"""
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
+    store = get_vector_store(settings)
     doc = Document(kb_id=kb.id, title=title, source=source, meta=meta or {})
     db.add(doc)
     db.flush()
@@ -33,6 +35,7 @@ def ingest_text(db: Session, kb: KB, title: str, text: str, source: str = "", me
     db.flush()
     for c in db.scalars(select(Chunk).where(Chunk.doc_id == doc.id)).all():
         index_chunk_graph(db, kb.id, c.id, doc.id, c.content)
+        store.upsert(kb.id, c.id, c.embedding or [])
     db.commit()
     return doc
 
@@ -41,6 +44,7 @@ def ingest_faq(db: Session, kb: KB, items: list[dict]) -> int:
     """FAQ 问答对整条成块，检索命中即答（客服模板，docs/04 §1.1）。"""
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
+    store = get_vector_store(settings)
     count = 0
     for item in items:
         q, a = item["question"], item["answer"]
@@ -56,15 +60,18 @@ def ingest_faq(db: Session, kb: KB, items: list[dict]) -> int:
         db.add(chunk)
         db.flush()
         index_chunk_graph(db, kb.id, chunk.id, doc.id, content)
+        store.upsert(kb.id, chunk.id, chunk.embedding or [])
         count += 1
     db.commit()
     return count
 
 
 def retrieve(db: Session, kb: KB, query: str, top_k: int = 5) -> list[dict]:
-    """三路混合检索：BM25（稀疏）+ 向量（稠密）+ 图谱（多跳扩展）→ RRF 融合 → Citation（docs/04 §1.3）。"""
+    """三路混合检索：BM25（稀疏）+ 向量（稠密，Milvus 或本地余弦）+ 图谱（多跳扩展）
+    → RRF 融合 → Citation（docs/04 §1.3）。"""
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
+    store = get_vector_store(settings)
     chunks = db.scalars(select(Chunk).where(Chunk.kb_id == kb.id)).all()
     if not chunks:
         return []
@@ -72,7 +79,7 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5) -> list[dict]:
     docs_tokens = [tokenize(c.content) for c in chunks]
     bm25 = bm25_scores(tokenize(query), docs_tokens)
     q_vec = embedder.embed(query)
-    vec_scores = [cosine(q_vec, c.embedding or []) for c in chunks]
+    vec_scores = store.scores_for(chunks, q_vec)
 
     # 图谱路：chunk_id → score 映射到 chunk 索引（多跳扩展召回弱文本匹配的关联块）
     graph_chunk = graph_recall(db, kb.id, query)
@@ -108,11 +115,13 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5) -> list[dict]:
 
 
 def delete_document(db: Session, kb: KB, doc_id: int) -> int:
-    """级联删除（docs/05 §4）：原文 → Chunk（向量随行）→ 图谱边与孤立节点。"""
+    """级联删除（docs/05 §4）：原文 → Chunk（向量随行）→ 图谱边与孤立节点 → 向量库。"""
     doc = db.get(Document, doc_id)
     if doc is None or doc.kb_id != kb.id:
         return 0
     delete_graph_for_doc(db, kb.id, doc_id)
+    chunk_ids = [c.id for c in db.scalars(select(Chunk).where(Chunk.doc_id == doc_id)).all()]
+    get_vector_store(get_settings()).delete(chunk_ids)
     n = 0
     for c in db.scalars(select(Chunk).where(Chunk.doc_id == doc_id)).all():
         db.delete(c)
