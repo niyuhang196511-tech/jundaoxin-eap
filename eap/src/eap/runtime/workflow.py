@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..agents.app import AgentApp
 from ..schemas import AgentManifest, InvokeRequest, InvokeResult
@@ -29,7 +31,7 @@ class Condition(BaseModel):
 
 class Step(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,40}$")
-    type: Literal["llm", "tool", "retrieve", "branch"]
+    type: Literal["llm", "tool", "retrieve", "branch", "parallel", "subflow"]
     when: Condition | None = None  # 条件不满足则跳过本步骤
 
     # llm
@@ -53,6 +55,37 @@ class Step(BaseModel):
     right: str | None = None
     then_id: str | None = None
     else_id: str | None = None
+
+    # parallel：分支并发各跑线性子序列；分支内仅 llm/tool/retrieve（保确定性重放）
+    branches: list["ParallelBranch"] = Field(default_factory=list)
+    join_with: str = "\n\n"  # 分支输出拼接符（列表另存 "$<id>.items"）
+
+    # subflow：调用另一个已注册工作流（深度护栏防环）
+    workflow: str | None = None
+    input_var: str = "input"
+
+
+class ParallelBranch(BaseModel):
+    """并行分支：一个线性子序列（llm/tool/retrieve），与其他分支并发执行。"""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,40}$")
+    steps: list[Step] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _inner_types(self) -> "ParallelBranch":
+        for s in self.steps:
+            if s.type not in _PARALLEL_INNER_TYPES:
+                raise ValueError(
+                    f"parallel 分支 {self.id} 不允许步骤类型 {s.type}（仅 llm/tool/retrieve）")
+        return self
+
+
+# 并发分支内允许的步骤类型（分支里再嵌 branch/parallel/subflow 会破坏确定性重放）
+_PARALLEL_INNER_TYPES = frozenset({"llm", "tool", "retrieve"})
+
+# subflow 深度护栏：A→B→A 循环引用时截断（docs/03 §6 与多智能体委派护栏同构）
+_subflow_depth: contextvars.ContextVar[int] = contextvars.ContextVar("eap_subflow_depth", default=0)
+_MAX_SUBFLOW_DEPTH = 3
 
 
 class WorkflowSpec(BaseModel):
@@ -151,61 +184,126 @@ async def execute_workflow(spec: WorkflowSpec, ctx, db, invoke_input: str) -> di
             index = steps_by_id[target]
             continue
 
-        if step.type == "retrieve":
-            kb_name = resolve(step.kb, variables)
-            query = str(resolve(step.query_var_alt or step.query_var, variables))
-            retriever = ctx.retriever(kb_name)
-            hits = retriever.search(db, query, top_k=step.top_k)
-            variables[step.id] = render_hits(hits)
-            citations.extend(h["citation"] for h in hits)
-            trace.append(f"{step.id}(retrieve): {len(hits)} hits from {kb_name}")
+        if step.type == "parallel":
+            if not step.branches:
+                raise ValueError(f"parallel 步骤 {step.id} 缺少 branches")
+            results = await asyncio.gather(
+                *(_run_linear_branch(b, ctx, db, variables) for b in step.branches))
+            outputs, items = [], []
+            for branch, (out, branch_citations, branch_trace) in zip(step.branches, results):
+                items.append({"branch": branch.id, "output": out})
+                citations.extend(branch_citations)
+                trace.extend(f"{step.id}/{line}" for line in branch_trace)
+                outputs.append(out)
+            variables[step.id] = step.join_with.join(outputs)
+            variables[f"{step.id}.items"] = items
+            trace.append(f"{step.id}(parallel): {len(results)} branches joined")
             continue
 
-        if step.type == "tool":
-            tool = resolve_tool(resolve(step.tool_name, variables))
-            args = {k: resolve(v, variables) for k, v in step.tool_args.items()}
-            out = await tool.handler(json.dumps(args, ensure_ascii=False))
+        if step.type == "subflow":
+            target = resolve(step.workflow, variables)
+            if not target:
+                raise ValueError(f"subflow 步骤 {step.id} 缺少 workflow 名称")
+            depth = _subflow_depth.get()
+            if depth >= _MAX_SUBFLOW_DEPTH:
+                trace.append(f"{step.id}(subflow): 深度达上限 {depth}，跳过（防环）")
+                continue
+            from ..agents.registry import registry
+            from ..schemas import InvokeRequest as _Req
+
+            token = _subflow_depth.set(depth + 1)
+            try:
+                sub_input = str(resolve(step.input_var, variables))
+                resp = await registry.invoke(db, str(target), _Req(input=sub_input))
+            except KeyError as e:
+                raise ValueError(f"subflow 目标工作流 {target} 未注册") from e
+            finally:
+                _subflow_depth.reset(token)
+            variables[step.id] = resp.output
+            citations.extend(c.model_dump() for c in resp.citations)
+            trace.append(f"{step.id}(subflow → {target}): {len(resp.output)} chars")
+            continue
+
+        if step.type in ("retrieve", "tool", "llm"):
+            out, step_citations, line = await _run_simple_step(step, ctx, db, variables, invoke_input)
             variables[step.id] = out
-            trace.append(f"{step.id}(tool): {tool.name}")
-            continue
-
-        if step.type == "llm":
-            knowledge_context = ""
-            if step.knowledge:
-                query = str(resolve(step.query_var, variables))
-                parts, hits_all = [], []
-                for kb_name in step.knowledge:
-                    hits = ctx.retriever(kb_name).search(db, query, top_k=3)
-                    hits_all.extend(hits)
-                    parts.append(render_hits(hits))
-                knowledge_context = "\n\n".join(parts)
-                citations.extend(h["citation"] for h in hits_all)
-
-            if step.prompt_name:
-                system = ctx.prompt(step.prompt_name,
-                                    {k: str(resolve(v, variables))
-                                     for k, v in step.prompt_vars.items()} | {"input": invoke_input})
-            else:
-                system = build_system(
-                    role=step.system or "你是企业智能助手。",
-                    knowledge_context=knowledge_context,
-                    max_chars=ctx.settings.max_context_chars,
-                )
-            completion = await ctx.chat(
-                db,
-                messages=[{"role": "user", "content": invoke_input}],
-                system=system,
-                prefer=None if step.model == "auto" else step.model,
-            )
-            result, record = completion.result, completion.record
-            output = result.content or ""
-            variables[step.id] = output
-            trace.append(f"{step.id}(llm via {record.name}): {len(output)} chars")
+            citations.extend(step_citations)
+            trace.append(line)
+            output = out  # 最后一个线性步骤的输出即工作流输出
             continue
 
         raise ValueError(f"未知步骤类型: {step.type}")
 
     return {"output": output, "citations": citations, "steps": trace}
+
+
+async def _run_simple_step(step: Step, ctx, db, variables: dict, invoke_input: str) -> tuple[str, list[dict], str]:
+    """线性单步（llm/tool/retrieve）：并行分支与主循环共用。"""
+    from .context import build_system, render_hits
+
+    if step.type == "retrieve":
+        kb_name = resolve(step.kb, variables)
+        query = str(resolve(step.query_var_alt or step.query_var, variables))
+        hits = ctx.retriever(kb_name).search(db, query, top_k=step.top_k)
+        citations = [h["citation"] for h in hits]
+        return render_hits(hits), citations, f"{step.id}(retrieve): {len(hits)} hits from {kb_name}"
+
+    if step.type == "tool":
+        tool = resolve_tool(resolve(step.tool_name, variables))
+        args = {k: resolve(v, variables) for k, v in step.tool_args.items()}
+        out = await tool.handler(json.dumps(args, ensure_ascii=False))
+        return out, [], f"{step.id}(tool): {tool.name}"
+
+    # llm
+    knowledge_context = ""
+    citations: list[dict] = []
+    if step.knowledge:
+        query = str(resolve(step.query_var, variables))
+        parts, hits_all = [], []
+        for kb_name in step.knowledge:
+            hits = ctx.retriever(kb_name).search(db, query, top_k=3)
+            hits_all.extend(hits)
+            parts.append(render_hits(hits))
+        knowledge_context = "\n\n".join(parts)
+        citations.extend(h["citation"] for h in hits_all)
+
+    if step.prompt_name:
+        system = ctx.prompt(step.prompt_name,
+                            {k: str(resolve(v, variables))
+                             for k, v in step.prompt_vars.items()} | {"input": invoke_input})
+    else:
+        system = build_system(
+            role=step.system or "你是企业智能助手。",
+            knowledge_context=knowledge_context,
+            max_chars=ctx.settings.max_context_chars,
+        )
+    completion = await ctx.chat(
+        db,
+        messages=[{"role": "user", "content": invoke_input}],
+        system=system,
+        prefer=None if step.model == "auto" else step.model,
+    )
+    result, record = completion.result, completion.record
+    output = result.content or ""
+    return output, citations, f"{step.id}(llm via {record.name}): {len(output)} chars"
+
+
+async def _run_linear_branch(branch: "ParallelBranch", ctx, db, variables: dict) -> tuple[str, list[dict], list[str]]:
+    """并行分支内线性执行（仅 llm/tool/retrieve）；分支变量独立（不回写主上下文）。"""
+    local_vars = dict(variables)
+    citations: list[dict] = []
+    trace: list[str] = []
+    output = ""
+    for step in branch.steps:
+        if step.type not in _PARALLEL_INNER_TYPES:
+            raise ValueError(
+                f"parallel 分支 {branch.id} 不允许步骤类型 {step.type}（仅 llm/tool/retrieve）")
+        output, step_citations, line = await _run_simple_step(step, ctx, db, local_vars,
+                                                              str(variables.get("input", "")))
+        local_vars[step.id] = output
+        citations.extend(step_citations)
+        trace.append(f"{branch.id}:{line}")
+    return output, citations, trace
 
 
 # ---------- 动态注册为智能体 ----------
@@ -216,7 +314,11 @@ def create_workflow_agent_class(spec: WorkflowSpec) -> type:
     class WorkflowAgent(AgentApp):
         async def on_invoke(self, request: InvokeRequest) -> InvokeResult:
             with self.ctx.db() as db:
-                result = await execute_workflow(spec, self.ctx, db, request.input)
+                try:
+                    result = await execute_workflow(spec, self.ctx, db, request.input)
+                except ValueError as e:
+                    # DSL 错误（subflow 目标缺失等）→ RuntimeError → 端点统一映射 503 EAP-4005
+                    raise RuntimeError(f"EAP-4005 {e}") from e
                 return InvokeResult(
                     content=result["output"],
                     citations=result["citations"],
