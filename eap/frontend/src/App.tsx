@@ -2,7 +2,7 @@ import { Component, useState } from 'react'
 import { Card, Layout, Menu, Typography } from 'antd'
 import {
   ApiOutlined, AppstoreOutlined, AuditOutlined, BookOutlined, ExperimentOutlined,
-  NodeIndexOutlined, NotificationOutlined, RobotOutlined, ThunderboltOutlined,
+  MoonOutlined, NodeIndexOutlined, NotificationOutlined, RobotOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import Agents from './pages/Agents'
 import Knowledge from './pages/Knowledge'
@@ -59,37 +59,51 @@ class ErrorBoundary extends Component<{ children: React.ReactNode }, { err: Erro
   }
 }
 
-export default function App() {
+export default function App({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => void }) {
   const [tab, setTab] = useState('overview')
+  const current = MENU.find(m => m.key === tab)
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider width={228} style={{ borderRight: '1px solid #e9edf3' }}>
+      <Sider width={228} style={{ borderRight: dark ? '1px solid #222633' : '1px solid rgba(255,255,255,0.06)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 16px 14px' }}>
           <div style={{
             width: 34, height: 34, borderRadius: 9, flexShrink: 0,
-            background: 'linear-gradient(135deg,#1d6ef2,#7c3aed)',
+            background: 'linear-gradient(135deg,#4f63f5,#9b6ef5)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: '#fff', fontWeight: 700, fontSize: 14,
           }}>EA</div>
           <div>
-            <Typography.Text strong style={{ fontSize: 14, display: 'block', lineHeight: 1.2 }}>EAP 控制台</Typography.Text>
-            <Typography.Text type="secondary" style={{ fontSize: 11 }}>企业级 Agent 平台</Typography.Text>
+            <Typography.Text strong style={{ fontSize: 14, display: 'block', lineHeight: 1.2, color: '#fff' }}>EAP 控制台</Typography.Text>
+            <Typography.Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>企业级 Agent 平台</Typography.Text>
           </div>
         </div>
         <Menu
           mode="inline"
+          theme="dark"
           selectedKeys={[tab]}
           onClick={e => setTab(e.key)}
           items={MENU.map(m => ({ key: m.key, icon: m.icon, label: m.label }))}
-          style={{ borderInlineEnd: 'none', paddingInline: 6 }}
+          style={{ borderInlineEnd: 'none', paddingInline: 6, background: 'transparent' }}
         />
-        <div style={{ position: 'absolute', bottom: 14, left: 16, fontSize: 11, color: '#93a4bd' }}>
-          M2 · dev-key-1 · localhost
+        <div style={{ position: 'absolute', bottom: 14, left: 16, right: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
+          v0.3.2 · dev-key-1 · localhost
         </div>
       </Sider>
-        <Content style={{ padding: 20, overflow: 'auto', height: '100vh' }}>
+      <Layout>
+        <div style={{
+          height: 52, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 20px', borderBottom: dark ? '1px solid #222633' : '1px solid #e9edf3',
+          background: dark ? '#14161d' : '#ffffff',
+        }}>
+          <Typography.Text strong style={{ fontSize: 14 }}>{current?.label ?? tab}</Typography.Text>
+          <a onClick={onToggleTheme} style={{ fontSize: 15, cursor: 'pointer' }} title="切换亮暗主题">
+            {dark ? '☀️' : '🌙'}
+          </a>
+        </div>
+        <Content style={{ padding: 20, overflow: 'auto', height: 'calc(100vh - 52px)' }}>
           <ErrorBoundary>{PAGES[tab]}</ErrorBoundary>
         </Content>
+      </Layout>
     </Layout>
   )
 }

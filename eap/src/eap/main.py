@@ -93,6 +93,10 @@ def create_app() -> FastAPI:
     # 嵌入外链静态资源：/sdk/eap-widget.js、/demo（演示页）；/console（React 控制台构建产物）
     static_dir = Path(__file__).parent / "static"
     app.mount("/sdk", StaticFiles(directory=static_dir), name="sdk")
+    if (static_dir / "console").exists():
+        # 控制台静态资源（/assets/*）——index.html 由下方 /console 路由返回
+        app.mount("/assets", StaticFiles(directory=static_dir / "console" / "assets"),
+                  name="console-assets")
 
     @app.get("/console")
     def console():
