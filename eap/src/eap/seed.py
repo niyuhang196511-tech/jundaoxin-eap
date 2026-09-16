@@ -20,8 +20,12 @@ def run(engine) -> None:  # noqa: C901
             db.add(tenant)
             db.flush()
 
-        if db.scalar(select(ApiKey).where(ApiKey.key == s.dev_api_key)) is None:
-            db.add(ApiKey(key=s.dev_api_key, tenant_id=tenant.id, note="开发默认密钥"))
+        from .security_keys import key_hash
+
+        if db.scalar(select(ApiKey).where(ApiKey.key_hash == key_hash(s.dev_api_key))) is None:
+            # M7：认证依据为 key_hash；dev key 例外保留明文列以便开发识别（生产铸造不落明文）
+            db.add(ApiKey(key=s.dev_api_key, key_hash=key_hash(s.dev_api_key),
+                          tenant_id=tenant.id, note="开发默认密钥"))
 
         # 开发用嵌入外链渠道（demo.html 直接可用；生产经 API 创建并只存 token 哈希）
         from .models import EmbedChannel

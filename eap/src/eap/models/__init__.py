@@ -41,12 +41,16 @@ class UserRecord(Base):
 
 
 class ApiKey(Base):
-    """凭证体系 M1 子集：服务间 API Key（用户 Token/EmbedToken 见 docs/07 §1）。"""
+    """凭证体系 M1 子集：服务间 API Key（用户 Token/EmbedToken 见 docs/07 §1）。
+
+    M7 起 key_hash = sha256(key) 为认证依据；key 明文列仅为兼容期迁移保留（新铸造不落明文）。
+    """
 
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    key: Mapped[str | None] = mapped_column(String(128), unique=True, index=True, nullable=True)
+    key_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     note: Mapped[str] = mapped_column(String(128), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

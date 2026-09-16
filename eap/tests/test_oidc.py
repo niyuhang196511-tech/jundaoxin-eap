@@ -105,11 +105,14 @@ def test_oidc_callback_mints_api_key(client, fake_idp):
     # 换发的 key 真能调用平台（租户 1 的 API Key）
     r2 = client.get("/api/v1/models", headers={"Authorization": f"Bearer {body['api_key']}"})
     assert r2.status_code == 200
-    # 二次登录复用同一把 key（sub 定位用户）
+    # 二次登录复用同一把 key（sub 定位用户）：M7 哈希存储后明文不可还原 → 复用返回 None，
+    # 但原 key 仍然有效（服务端凭 key_hash 认证）
     FAKE_TOKENS["exchange"] = _make_id_token(_good_claims())
     body2 = client.get("/api/v1/auth/oidc/callback", params={"code": "auth-code-2"},
                        headers=HEADERS).json()
-    assert body2["api_key"] == body["api_key"]
+    assert body2["api_key"] is None
+    r3 = client.get("/api/v1/models", headers={"Authorization": f"Bearer {body['api_key']}"})
+    assert r3.status_code == 200
 
 
 def test_oidc_rejects_bad_tokens(client, fake_idp):

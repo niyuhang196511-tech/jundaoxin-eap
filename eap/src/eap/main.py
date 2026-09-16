@@ -69,10 +69,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.add_middleware(TraceMiddleware)
-    origins = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()] or ["*"]
-    app.add_middleware(
-        CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
-    )
+    origins = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()]
+    if origins:  # 默认空 = 仅同源（不挂 CORS）；跨域部署显式配置 EAP_CORS_ORIGINS
+        app.add_middleware(
+            CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
+        )
     app.include_router(api_chat.router)
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)

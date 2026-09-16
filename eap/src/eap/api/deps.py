@@ -58,8 +58,14 @@ def resolve_tenant(
         request.state.tenant_id = tenant.id
         return tenant
 
-    # ② API Key
-    record = db.scalar(select(ApiKey).where(ApiKey.key == token, ApiKey.enabled == True))  # noqa: E712
+    # ② API Key：优先 key_hash（M7 哈希存储）；兼容期回退明文列（存量未迁移凭证）
+    from ..security_keys import key_hash
+
+    record = db.scalar(select(ApiKey).where(ApiKey.key_hash == key_hash(token),
+                                            ApiKey.enabled == True))  # noqa: E712
+    if record is None:
+        record = db.scalar(select(ApiKey).where(ApiKey.key == token,
+                                                ApiKey.enabled == True))  # noqa: E712
     if record:
         tenant = db.get(Tenant, record.tenant_id)
         if tenant:

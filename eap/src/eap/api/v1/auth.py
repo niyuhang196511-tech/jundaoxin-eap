@@ -53,12 +53,18 @@ def oidc_callback(code: str, db: Session = fastapi.Depends(get_db)):
     # API Key：按 sub 复用，丢失/停用则重新签发
     note = f"oidc:{sub}"
     key = db.scalar(select(ApiKey).where(ApiKey.note == note, ApiKey.enabled == True))  # noqa: E712
+    plain = key.key if key is not None else None  # 复用场景无法还原明文（哈希存储）→ 仅新签发可见
     if key is None:
         import secrets as _secrets
 
-        key = ApiKey(key=f"eap_u_{_secrets.token_urlsafe(24)}", tenant_id=user.tenant_id, note=note)
+        from ...security_keys import key_hash
+        plain = f"eap_u_{_secrets.token_urlsafe(24)}"
+        key = ApiKey(key_hash=key_hash(plain), tenant_id=user.tenant_id, note=note)
         db.add(key)
+        db.flush()
+        # 复用 dev 双列语义：非 dev key 不落明文（key 列置空，认证走 key_hash）
+        key.key = None
     db.commit()
-    return {"api_key": key.key, "user": {"sub": user.sub, "email": user.email,
-                                         "name": user.name, "tenant_id": user.tenant_id},
+    return {"api_key": plain, "user": {"sub": user.sub, "email": user.email,
+                                       "name": user.name, "tenant_id": user.tenant_id},
             "issuer": get_settings().oidc_issuer}

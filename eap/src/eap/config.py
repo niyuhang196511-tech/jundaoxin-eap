@@ -10,13 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EAP_", env_file=".env", extra="ignore")
 
-    # 服务
-    host: str = "192.168.0.7"
+    # 服务：默认仅绑定回环（生产经反代暴露；多网卡用 EAP_HOST 显式指定）
+    host: str = "127.0.0.1"
     port: int = 8300
     db_url: str = "sqlite:///./eap.db"
 
-    # CORS 白名单（逗号分隔 origin）：控制台前端独立部署时填其来源；"*" 全放行（仅开发）
-    cors_origins: str = "*"
+    # CORS 白名单（逗号分隔 origin）：默认空 = 仅同源；"*" 全放行（仅开发）
+    cors_origins: str = ""
 
     # 开发租户与密钥（生产走 OIDC/SSO，见 docs/06）
     dev_api_key: str = "dev-key-1"
