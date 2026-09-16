@@ -31,6 +31,11 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
     headers: headers(),
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+  if (r.status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    // 凭证缺失/失效 → 登录页（M6）
+    window.location.href = '/login'
+    throw new Error('登录已失效，请重新登录')
+  }
   const d = await r.json().catch(() => ({}))
   if (!r.ok) {
     const detail = (d as any).detail

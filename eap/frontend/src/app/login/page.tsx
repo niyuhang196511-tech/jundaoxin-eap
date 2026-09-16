@@ -35,12 +35,13 @@ export default function LoginPage() {
   const devLogin = async () => {
     setLoading(true)
     setError('')
+    // 先存候选凭证再验证（api() 从存储读取）；失败即清除
+    setToken(token.trim())
     try {
-      // 验证凭证有效性
       await api('GET', '/api/v1/conversations', undefined)
-      setToken(token.trim())
       router.replace('/agents')
     } catch {
+      setToken('')
       setError('凭证无效或后端不可达')
     } finally {
       setLoading(false)
