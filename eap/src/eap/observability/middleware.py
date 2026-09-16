@@ -16,16 +16,45 @@ logger = logging.getLogger("eap.access")
 
 
 class TraceMiddleware(BaseHTTPMiddleware):
-    """全链路 trace_id：入口生成/透传，响应头返回；同步累加进程内 metrics（/metrics 暴露）。"""
+    """全链路 trace_id：入口生成/透传，响应头返回；metrics 计数 + OTel span（可选启用）。
+
+    trace_id 兼容：上游带 X-Request-ID 时作为 OTel span 属性透传；OTel 生成的新 trace_id
+    回填到 X-Trace-ID 响应头（两边可互相检索）。
+    """
 
     async def dispatch(self, request: Request, call_next):
+        from . import tracing
         from .metrics import incr
 
         trace_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         request.state.trace_id = trace_id
         request.state.t0 = time.monotonic()
-        response = await call_next(request)
-        response.headers["X-Trace-ID"] = trace_id
+
+        span_cm = None
+        span = None
+        if tracing.enabled():
+            from opentelemetry.trace import SpanKind
+
+            span_cm = tracing.tracer().start_as_current_span(
+                f"{request.method} {request.url.path}", kind=SpanKind.SERVER)
+            span = span_cm.__enter__()
+            if span is not None:
+                span.set_attribute("http.method", request.method)
+                span.set_attribute("http.route", request.url.path)
+                span.set_attribute("eap.trace_id", trace_id)
+
+        response = None
+        try:
+            response = await call_next(request)
+            response.headers["X-Trace-ID"] = trace_id
+            if span is not None:
+                span.set_attribute("http.status_code", response.status_code)
+        except Exception as e:
+            if span is not None:
+                span.record_exception(e)
+                span.set_attribute("http.status_code", 500)
+                span_cm.__exit__(type(e), e, e.__traceback__)
+            raise
         try:
             route = request.scope.get("route")
             path_tpl = getattr(route, "path", request.url.path)
@@ -37,6 +66,8 @@ class TraceMiddleware(BaseHTTPMiddleware):
                         response.status_code, trace_id[:8])
         except Exception:
             pass  # 观测不阻断主流程
+        if span_cm is not None:
+            span_cm.__exit__(None, None, None)
         return response
 
 

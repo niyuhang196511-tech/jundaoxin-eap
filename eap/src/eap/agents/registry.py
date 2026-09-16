@@ -213,14 +213,26 @@ class AgentRegistry:
             pass  # 灰度失败不阻断主流程
         try:
             from ..observability.metrics import incr
+            from ..observability.tracing import enabled as otel_enabled, tracer
 
-            result: InvokeResult = await agent.instance.on_invoke(request)
+            span_cm = tracer().start_as_current_span(
+                f"agent.invoke {name}") if otel_enabled() else None
+            if span_cm is not None:
+                span = span_cm.__enter__()
+                if span is not None:
+                    span.set_attribute("eap.agent", name)
+                    span.set_attribute("eap.trace_id", trace_id or "")
+            try:
+                result: InvokeResult = await agent.instance.on_invoke(request)
+            except Exception as e:
+                if span_cm is not None and span is not None:
+                    span.record_exception(e)
+                    span_cm.__exit__(type(e), e, e.__traceback__)
+                _incr("eap_agent_invocations_total", {"agent": name, "status": "error"})
+                raise
             incr("eap_agent_invocations_total", {"agent": name, "status": "ok"})
-        except Exception:
-            from ..observability.metrics import incr as _incr
-
-            _incr("eap_agent_invocations_total", {"agent": name, "status": "error"})
-            raise
+            if span_cm is not None:
+                span_cm.__exit__(None, None, None)
         finally:
             if token is not None:
                 from ..runtime.canary import reset_override

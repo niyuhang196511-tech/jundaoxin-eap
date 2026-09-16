@@ -324,6 +324,26 @@ class TaskEngine:
                     print(f"[tasks] worker{i} ack 失败: {e}")
 
     async def _run_one(self, task_id: str) -> None:
+        from ..observability.tracing import enabled as otel_enabled, tracer
+
+        span_cm = None
+        if otel_enabled():
+            span_cm = tracer().start_as_current_span(f"task.run {task_id}")
+            span_cm.__enter__()
+        try:
+            await self._run_one_inner(task_id)
+        except Exception as e:
+            if span_cm is not None:
+                span = tracer().get_current_span()
+                if span is not None:
+                    span.record_exception(e)
+                span_cm.__exit__(type(e), e, e.__traceback__)
+            raise
+        else:
+            if span_cm is not None:
+                span_cm.__exit__(None, None, None)
+
+    async def _run_one_inner(self, task_id: str) -> None:
         with SessionLocal() as db:
             task = db.get(TaskRecord, task_id)
             if task is None or task.state not in ("PENDING",):

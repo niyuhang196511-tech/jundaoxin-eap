@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0",
     "mcp>=2.2.0",
     "cryptography>=42.0",
+    "alembic>=1.20.0",
 ]
 
 [project.optional-dependencies]
@@ -22,8 +23,10 @@ postgres = ["psycopg[binary]>=3.3.5"]
 redis = ["redis>=8.1.0"]
 # 向量路生产形态：EAP_MILVUS_URI 配置时需要（docs/04 §1 Milvus）
 milvus = ["pymilvus>=3.0.1"]
-migrations = [
-    "alembic>=1.20.0",
+# 可观测性：OTel tracing 导出（EAP_OTEL_ENDPOINT 配置时启用）
+otel = [
+    "opentelemetry-exporter-otlp>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
 ]
 
 [dependency-groups]

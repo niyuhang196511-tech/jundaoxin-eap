@@ -41,6 +41,9 @@ from .runtime.tasks import create_task_engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .observability import tracing
+
+    tracing.setup()  # OTel（EAP_OTEL_ENDPOINT 配置时启用）
     init_db()
     await registry.bootstrap()
     from . import workflows as workflows_svc
