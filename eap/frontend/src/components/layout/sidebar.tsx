@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
-  Blocks, BookOpen, Bot, ClipboardCheck, FlaskConical, Network, Plug, ShieldCheck, Workflow,
+  Blocks, BookOpen, Bot, ClipboardCheck, FlaskConical, Network, Plug, Puzzle, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 
@@ -15,6 +15,7 @@ const GROUPS: { label: string; items: { href: string; label: string; icon: React
       { href: '/agents', label: '智能体', icon: <Bot className="size-4" /> },
       { href: '/canvas', label: 'Workflow 画布', icon: <Workflow className="size-4" /> },
       { href: '/assets', label: '技能 · Prompt', icon: <Blocks className="size-4" /> },
+      { href: '/extensions', label: '扩展中心', icon: <Puzzle className="size-4" /> },
     ],
   },
   {

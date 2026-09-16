@@ -12,6 +12,7 @@ const TITLES: Record<string, string> = {
   models: '模型中心',
   tasks: '任务 · 审批',
   assets: '技能 · Prompt',
+  extensions: '扩展中心',
   evals: '评测',
   gov: '治理 · 成本',
   conn: '连接器 · IM',
