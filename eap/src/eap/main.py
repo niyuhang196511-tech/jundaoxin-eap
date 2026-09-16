@@ -17,6 +17,7 @@ from .api.v1 import budgets as api_budgets
 from .api.v1 import auth as api_auth
 from .api.v1 import chat as api_chat
 from .api.v1 import connectors as api_connectors
+from .api.v1 import conversations as api_conversations
 from .api.v1 import embed as api_embed
 from .api.v1 import im as api_im
 from .api.v1 import evals as api_evals
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(api_a2a.wellknown)
     app.include_router(api_kb.router)
     app.include_router(api_memory.router)
+    app.include_router(api_conversations.router)
     app.include_router(api_mcp_registry.router)
     app.include_router(api_models.router)
     app.include_router(api_embed.router)

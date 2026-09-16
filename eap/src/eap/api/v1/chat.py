@@ -88,17 +88,44 @@ async def chat_completions(
             "x_trace_id": trace_id,
         }
 
-    # SSE：M1 以整段结果分片下发（线上协议正确，真实 token 级流式 M2 接入）
-    async def sse():
-        content = result.content or ""
-        piece = max(1, len(content) // 8)
-        for i in range(0, max(len(content), 1), piece):
-            chunk = {
+    # SSE：真实 token 级流式（providers.stream_complete）；带工具时走整段再分片
+    if body.tools:
+        async def sse_fallback():
+            content = result.content or ""
+            piece = max(1, len(content) // 8)
+            for i in range(0, max(len(content), 1), piece):
+                chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk", "created": _now_ts(),
+                    "model": record.name,
+                    "choices": [{"index": 0, "delta": {"content": content[i:i + piece]}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            done = {
                 "id": completion_id, "object": "chat.completion.chunk", "created": _now_ts(),
                 "model": record.name,
-                "choices": [{"index": 0, "delta": {"content": content[i:i + piece]}, "finish_reason": None}],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(done, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
+
+        return StreamingResponse(sse_fallback(), media_type="text/event-stream")
+
+    async def sse():
+        try:
+            async for text in hub.stream(db, messages, prefer=prefer, temperature=body.temperature):
+                chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk", "created": _now_ts(),
+                    "model": record.name,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except policy.PolicyDenied as e:
+            err = {"error": {"message": str(e)}}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            return
+        except ProviderError as e:
+            err = {"error": {"message": f"EAP-4001 {e}"}}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            return
         done = {
             "id": completion_id, "object": "chat.completion.chunk", "created": _now_ts(),
             "model": record.name,

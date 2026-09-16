@@ -1,14 +1,16 @@
-"""供应商适配器：统一 LLMResult。
+"""供应商适配器：统一 LLMResult + token 级流式（docs/04 §2.1）。
 
-M1 简化：SSE 在 API 层以「整段结果分片」下发（线上协议正确），
-真实 token 级流式（httpx stream）在 M2 接入 —— 见 docs/09 路线。
+流式：stream_complete 逐 token 产出文本增量；无工具场景直接流式，
+带工具调用时仍走整段 complete（工具调用增量组装无收益）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -43,6 +45,7 @@ class ProviderError(Exception):
 
 class Provider(Protocol):
     async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float) -> LLMResult: ...
+    def stream_complete(self, *, record, messages: list[dict], temperature: float) -> AsyncIterator[str]: ...
 
 
 class MockProvider:
@@ -93,6 +96,29 @@ class MockProvider:
                 "配置 EAP_OPENAI_BASE_URL / EAP_OPENAI_API_KEY 后，模型中心将优先路由到真实供应商。"
             )
         return self._result(record, content, [], messages, t0)
+
+    async def stream_complete(self, *, record, messages: list[dict], temperature: float) -> AsyncIterator[str]:
+        """离线确定性流式：按词切分（每词一帧，10ms 间隔），语义与 complete 一致。"""
+        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        last_user = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
+        if has_tool_result:
+            tool_msg = next(m for m in reversed(messages) if m.get("role") == "tool")
+            snippet = (tool_msg.get("content") or "")[:300]
+            content = f"[mock-llm] 根据工具返回：{snippet}……以上为离线 mock 汇总回答。"
+        else:
+            content = (
+                f"[mock-llm] 收到：{last_user}。这是离线确定性回复。"
+                "配置 EAP_OPENAI_BASE_URL / EAP_OPENAI_API_KEY 后，模型中心将优先路由到真实供应商。"
+            )
+        piece = ""
+        for ch in content:
+            piece += ch
+            if ch in (" ", "，", "。", "；", "\n") or len(piece) >= 6:
+                yield piece
+                piece = ""
+                await asyncio.sleep(0.01)
+        if piece:
+            yield piece
 
     @staticmethod
     def _result(record, content, tool_calls, messages, t0) -> LLMResult:
@@ -147,6 +173,39 @@ class OpenAICompatProvider:
             model=record.name,
             latency_ms=int((time.monotonic() - t0) * 1000),
         )
+
+    async def stream_complete(self, *, record, messages: list[dict], temperature: float) -> AsyncIterator[str]:
+        """真 token 级流式：httpx stream + SSE delta.content 逐段产出。"""
+        payload: dict[str, Any] = {
+            "model": record.remote_model or record.name,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        try:
+            async with self._client.stream(
+                "POST",
+                f"{record.base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {record.api_key}"},
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        yield text
+        except (httpx.HTTPError, httpx.StreamError) as e:
+            raise ProviderError(f"{record.name}: {e}") from e
 
 
 def get_provider(provider_name: str) -> Provider:

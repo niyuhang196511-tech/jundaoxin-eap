@@ -5,6 +5,7 @@ Policy Engine 的 M1 钩子位：route_policies() 可按租户/数据分级扩�
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -62,6 +63,51 @@ class ModelHub:
                 result = await provider.complete(record=record, messages=messages, tools=tools, temperature=temperature)
                 return Completion(result=result, record=record)
             except ProviderError as e:
+                errors.append(str(e))
+        raise ProviderError("所有模型均失败（降级链耗尽）: " + " | ".join(errors))
+
+    async def stream(
+        self,
+        db: Session,
+        messages: list[dict],
+        *,
+        capability: str = "chat",
+        prefer: str | None = None,
+        temperature: float = 0.7,
+    ) -> AsyncIterator[str]:
+        """token 级流式（无工具场景）：沿降级链找首个可用供应商，逐 token 产出。
+
+        计量在流结束后按累计字符估算（与 complete 的 tokens_out 口径一致）。
+        """
+        if prefer is None:
+            from ..runtime.canary import current_model_override
+
+            prefer = current_model_override()
+        from ..runtime.policy import check_prompt, enforce_chain
+
+        check_prompt(db, messages)
+        chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
+        if not chain:
+            raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
+        errors: list[str] = []
+        for record in chain:
+            provider = get_provider(record.provider)
+            emitted = 0
+            try:
+                async for text in provider.stream_complete(
+                        record=record, messages=messages, temperature=temperature):
+                    emitted += len(text)
+                    yield text
+                if emitted:
+                    from ..observability.middleware import record_usage
+
+                    record_usage("", 0, kind="chat", model=record.name,
+                                 tokens_in=sum(max(1, len(str(m.get("content", "")))) // 4 for m in messages),
+                                 tokens_out=max(1, emitted // 4), latency_ms=0)
+                    return
+            except ProviderError as e:
+                if emitted:
+                    return  # 已产出部分内容：中断重试会造成重复输出，就此收尾
                 errors.append(str(e))
         raise ProviderError("所有模型均失败（降级链耗尽）: " + " | ".join(errors))
 
