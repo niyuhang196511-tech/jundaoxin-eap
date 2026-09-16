@@ -73,3 +73,23 @@ def test_conversations_list_messages_delete(client: TestClient):
     assert resp.json()["deleted"] >= 2
     msgs_after = client.get(f"/api/v1/conversations/{session_id}/messages", headers=AUTH).json()
     assert msgs_after == []
+
+
+def test_agent_sse_emits_token_frames(client: TestClient):
+    """agent 流式端点应产出多个 token 帧（faq-agent 已重写 on_invoke_stream）。"""
+    events: list[str] = []
+    with client.stream("POST", "/api/v1/agents/faq-agent/invocations", headers=AUTH,
+                       json={"input": "token 流式验证", "stream": True}) as resp:
+        assert resp.status_code == 200
+        import json as _json
+
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                events.append(line[6:].strip())
+            elif line.startswith("data:") and events and events[-1] == "token":
+                payload = _json.loads(line[5:])
+                assert payload.get("content")
+    assert events.count("token") > 3, f"token 帧过少: {events}"
+    assert "result" in events
+    # token 帧在 result 之前
+    assert events.index("result") == len(events) - 1

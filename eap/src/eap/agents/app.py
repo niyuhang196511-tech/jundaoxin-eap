@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import ClassVar
 
 from ..schemas import InvokeRequest, InvokeResult
@@ -36,6 +37,19 @@ class AgentApp:
 
     async def on_invoke(self, request: InvokeRequest) -> InvokeResult:
         raise NotImplementedError(f"{type(self).__name__} 未实现 on_invoke")
+
+    async def on_invoke_stream(self, request: InvokeRequest) -> AsyncIterator[tuple[str, dict]]:
+        """流式调用（SSE token 打字机）：产出 (event, data) 序列。
+
+        event: "token" {"content": str} | "result" InvokeResult.dump。
+        默认实现回退为整段调用：先 result 前产出一个 token 帧（前端协议统一）。
+        需要 token 级流式的智能体应重写本方法（参考 FaqAgent）。
+        """
+        result = await self.on_invoke(request)
+        content = result.content or ""
+        if content:
+            yield "token", {"content": content}
+        yield "result", result.model_dump()
 
     async def on_invoke_task(self, request: InvokeRequest, gate=None, resume: dict | None = None) -> InvokeResult:
         """任务引擎执行入口（Task/Job + HITL）。

@@ -71,6 +71,7 @@ class ModelHub:
         db: Session,
         messages: list[dict],
         *,
+        system: str = "",
         capability: str = "chat",
         prefer: str | None = None,
         temperature: float = 0.7,
@@ -85,6 +86,8 @@ class ModelHub:
             prefer = current_model_override()
         from ..runtime.policy import check_prompt, enforce_chain
 
+        if system:
+            messages = [{"role": "system", "content": system}, *messages]
         check_prompt(db, messages)
         chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
         if not chain:

@@ -136,7 +136,7 @@ async def invoke(
 
 
 async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Request, db):
-    """SSE 事件流：步骤事件 + 最终结果（Invocation 级）。"""
+    """SSE 事件流：token 打字机 + 步骤事件 + 最终结果（Invocation 级）。"""
     import time as _time
     import uuid as _uuid
 
@@ -148,13 +148,23 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
 
     yield send("start", {"agent": name, "trace_id": trace_id})
     token = policy.set_tenant(getattr(request.state, "tenant_id", None))
+    tokens_out = 0
     try:
-        resp = await registry.invoke(db, name, body, trace_id=trace_id)
-        for step in resp.steps:
-            yield send("step", {"step": step})
-        yield send("result", resp.model_dump())
+        registered = registry.get(name)  # 未注册 → KeyError → 404
+        agent = registered.instance
+        if agent is not None and hasattr(agent, "on_invoke_stream"):
+            async for event, data in agent.on_invoke_stream(body):
+                if event == "token":
+                    tokens_out += len(data.get("content", ""))
+                yield send(event, data)
+        else:
+            resp = await registry.invoke(db, name, body, trace_id=trace_id)
+            for step in resp.steps:
+                yield send("step", {"step": step})
+            yield send("result", resp.model_dump())
+            tokens_out = resp.usage.get("tokens_out", 0)
         record_usage(trace_id, getattr(request.state, "tenant_id", 0), kind="agent", model=name,
-                     tokens_in=resp.usage.get("tokens_in", 0), tokens_out=resp.usage.get("tokens_out", 0),
+                     tokens_in=0, tokens_out=max(1, tokens_out // 4),
                      latency_ms=int((_time.monotonic() - t0) * 1000))
     except Exception as e:
         yield send("error", {"message": str(e)})
