@@ -39,20 +39,10 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
   return d as T
 }
 
-/** 智能体调用 SSE 流式：onEvent(event, data) 逐帧回调（start/step/result/error） */
-export async function sseInvoke(
-  agent: string,
-  input: string,
-  onEvent: (event: string, data: any) => void,
-  sessionId?: string,
-): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
-    method: 'POST',
-    headers: headers(),
-    body: JSON.stringify(sessionId ? { input, stream: true, session_id: sessionId } : { input, stream: true }),
-  })
-  if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`)
-  const reader = r.body.getReader()
+/** SSE 帧解析：逐帧回调 (event, data)，支持 AbortSignal 中断 */
+async function consumeSse(resp: Response, onEvent: (event: string, data: any) => void) {
+  if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`)
+  const reader = resp.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   for (;;) {
@@ -77,4 +67,48 @@ export async function sseInvoke(
       }
     }
   }
+}
+
+/** 智能体调用 SSE 流式：onEvent(event, data) 逐帧回调（start/step/result/error） */
+export async function sseInvoke(
+  agent: string,
+  input: string,
+  onEvent: (event: string, data: any) => void,
+  sessionId?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(sessionId ? { input, stream: true, session_id: sessionId } : { input, stream: true }),
+    signal,
+  })
+  await consumeSse(r, onEvent)
+}
+
+/* ---------- 会话（对话调试历史） ---------- */
+
+export interface Conversation {
+  session_id: string
+  agent: string
+  messages: number
+  last_message: string
+  updated_at: string
+}
+
+export interface ConversationMessage {
+  id: number
+  role: string
+  content: string
+  agent: string
+  created_at: string
+}
+
+export const conversationsApi = {
+  list: (agent?: string) =>
+    api<Conversation[]>('GET', `/api/v1/conversations${agent ? `?agent=${encodeURIComponent(agent)}` : ''}`),
+  messages: (sessionId: string) =>
+    api<ConversationMessage[]>('GET', `/api/v1/conversations/${encodeURIComponent(sessionId)}/messages`),
+  remove: (sessionId: string) =>
+    api<{ deleted: number }>('DELETE', `/api/v1/conversations/${encodeURIComponent(sessionId)}`),
 }

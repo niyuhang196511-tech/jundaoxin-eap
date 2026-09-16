@@ -7,8 +7,7 @@ import { ThemeToggle, TokenBox } from '@/components/layout/topbar'
 import { cn } from '@/lib/cn'
 
 const TITLES: Record<string, string> = {
-  overview: '总览',
-  agents: '智能体',
+  agents: '智能体 · 对话调试',
   kb: '知识库',
   models: '模型中心',
   tasks: '任务 · 审批',
@@ -41,7 +40,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { err: Error | nu
 
 export default function ConsoleLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname()
-  const key = pathname.replace(/^\//, '').split('/')[0] || 'overview'
+  const key = pathname.replace(/^\//, '').split('/')[0] || 'agents'
 
   return (
     <div className="min-h-screen">

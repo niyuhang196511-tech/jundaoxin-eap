@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
-  Blocks, BookOpen, Boxes, Bot, ClipboardCheck, FlaskConical, Network, Plug, ShieldCheck, Workflow,
+  Blocks, BookOpen, Bot, ClipboardCheck, FlaskConical, Network, Plug, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 
@@ -24,7 +24,6 @@ const GROUPS: { label: string; items: { href: string; label: string; icon: React
   {
     label: '运营',
     items: [
-      { href: '/overview', label: '总览', icon: <Boxes className="size-4" /> },
       { href: '/tasks', label: '任务 · 审批', icon: <ClipboardCheck className="size-4" /> },
       { href: '/evals', label: '评测', icon: <FlaskConical className="size-4" /> },
       { href: '/gov', label: '治理 · 成本', icon: <ShieldCheck className="size-4" /> },
@@ -39,7 +38,7 @@ export function Sidebar() {
   return (
     <aside className="fixed inset-y-0 left-0 z-40 flex w-56 flex-col bg-sidebar">
       {/* Logo 区 */}
-      <Link href="/overview" className="flex items-center gap-2.5 px-4 pt-5 pb-4">
+      <Link href="/agents" className="flex items-center gap-2.5 px-4 pt-5 pb-4">
         <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-violet-500 text-[13px] font-bold text-white">
           EA
         </div>
