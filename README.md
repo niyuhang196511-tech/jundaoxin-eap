@@ -4,16 +4,17 @@
 
 ## 代码工程（可运行）
 
-[eap/](eap/) —— **M1 核心已实现并通过全量测试（18/18）**：模型中心（能力路由+降级链）、知识中心（混合检索+Citation）、Agent Runtime（Loop+工具调用）、注册钩子 SDK、OpenAI 兼容 API（含 SSE）。默认离线可跑（mock 模型 + hash 嵌入 + SQLite）。
+[eap/](eap/) —— **v0.4.0：全量测试 130+ 通过**。模型中心（能力路由+降级链+真流式）、知识中心（三路混合检索+Citation+可插拔 RAG 组件）、Agent Runtime（Loop+HITL+任务恢复）、**Workflow 图编排（拖拽画布 + 图执行引擎 + 运行历史）**、扩展开发体系（**手写 Agent/工具/RAG 组件/MCP Server**，插件目录热载 + 脚手架）、多租户（OIDC/SSO + 外部 JWT 资源服务器 + 可选 PostgreSQL RLS）、可观测性（结构化日志 + /metrics + OTel tracing）、运维（Alembic 迁移、API Key 哈希、秘密加密、备份恢复 runbook）。控制台为 Next.js 16 + Tailwind 4 全新前端（Dify 风格画布/对话/扩展中心）。
 
 ```bash
 cd eap
 uv sync                 # uv + Python 3.12
-uv run pytest           # 18 个测试
+uv run pytest           # 全量测试（离线可跑：mock 模型 + hash 嵌入 + SQLite）
 uv run python -m eap    # 启动 → http://localhost:8300/docs
+cd frontend && pnpm install && pnpm dev   # 控制台 → http://localhost:3000
 ```
 
-详见 [eap/README.md](eap/README.md)。
+生产部署：[docs/11-production-runbook.md](docs/11-production-runbook.md)。详见 [eap/README.md](eap/README.md)。
 
 ## 设计文档
 

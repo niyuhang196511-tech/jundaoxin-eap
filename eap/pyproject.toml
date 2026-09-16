@@ -1,6 +1,6 @@
 [project]
 name = "eap"
-version = "0.3.2"
+version = "0.4.0"
 description = "EAP 企业级 Agent 智能体平台 — M1+M2+M3：模型中心 / 知识中心 / Agent Runtime / 发布治理 / 成本 / 策略 / 连接器 / 企业 IM / 技能包 / 评测（规则+LLM 裁判）/ Prompt 流水线与 A/B"
 requires-python = ">=3.12"
 dependencies = [

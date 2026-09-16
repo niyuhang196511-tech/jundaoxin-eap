@@ -80,7 +80,7 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="px-4 pt-3 pb-4 text-[11px] text-white/35">v0.3.2 · 独立部署</div>
+      <div className="px-4 pt-3 pb-4 text-[11px] text-white/35">v0.4.0 · 独立部署</div>
     </aside>
   )
 }
