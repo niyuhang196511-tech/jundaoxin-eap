@@ -1,92 +1,141 @@
-"use client"
+'use client'
 
-import { useEffect, useState } from 'react'
-import { Button, Input, InputNumber, Table, Tabs, Tag, message } from 'antd'
+import { useCallback, useEffect, useState } from 'react'
+import { Plus, RefreshCw } from 'lucide-react'
+import {
+  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
+  type BadgeTone,
+} from '@/components/ui'
 import { api } from '@/lib/api'
 
-/* ---------- 发布治理 ---------- */
 type Release = {
-  id: string; agent: string; version: string; state: string
-  eval_verdict: string | null; canary_percent: number; notes: string
+  id: string
+  agent: string
+  version: string
+  state: string
+  eval_verdict: string | null
+  canary_percent: number
+  notes: string
+}
+type BudgetDetail = {
+  tenant_id: number
+  monthly_token_budget: number
+  enabled: boolean
+  blocked: boolean
+  usage: { month: string; calls: number; tokens_total: number; by_kind: Record<string, { calls: number; tokens_in: number; tokens_out: number }> }
+}
+type Policy = { name: string; tenant_id: number; kind: string; config: Record<string, unknown>; enabled: boolean; priority: number }
+
+const STATE_TONE: Record<string, BadgeTone> = {
+  draft: 'gray', review: 'blue', canary: 'amber',
+  prod: 'green', rolled_back: 'red', retired: 'gray',
 }
 
-function stateTag(state: string) {
-  const color: Record<string, string> = {
-    draft: 'default', review: 'gold', canary: 'orange',
-    prod: 'green', rolled_back: 'red', retired: 'default',
-  }
-  return <Tag color={color[state] ?? 'default'}>{state}</Tag>
+/** 治理中心：发布治理（评测门禁 → 灰度 → 提升/回滚）/ 成本预算 / 策略 */
+export default function GovernancePage() {
+  return (
+    <div>
+      <PageHeader title="治理 · 成本" description="发布治理链（评测门禁 → canary 灰度 → promote/rollback）/ 成本预算熔断 / 租户策略" />
+      <TabBar items={[
+        { key: 'releases', label: '发布治理', content: <ReleasesTab /> },
+        { key: 'budgets', label: '成本预算', content: <BudgetsTab /> },
+        { key: 'policies', label: '策略', content: <PoliciesTab /> },
+      ]} />
+    </div>
+  )
 }
 
 function ReleasesTab() {
   const [list, setList] = useState<Release[]>([])
   const [agents, setAgents] = useState<string[]>([])
   const [agent, setAgent] = useState('faq-agent')
-  const [version, setVersion] = useState('')
-  const [canaryPct, setCanaryPct] = useState(20)
+  const [version, setVersion] = useState('1.0.0')
   const [dataset, setDataset] = useState('faq-smoke')
+  const [canaryPct, setCanaryPct] = useState(20)
+  const [busy, setBusy] = useState(false)
 
-  const load = async () => setList(await api<Release[]>('GET', '/api/v1/releases'))
-  useEffect(() => {
-    load()
-    api<{ name: string }[]>('GET', '/api/v1/agents').then(a => setAgents(a.map(x => x.name)))
+  const load = useCallback(async () => {
+    try {
+      setList(await api<Release[]>('GET', '/api/v1/releases'))
+      api<{ name: string }[]>('GET', '/api/v1/agents').then(a => setAgents(a.map(x => x.name))).catch(() => {})
+    } catch (e) {
+      toast.error(`加载发布单失败：${(e as Error).message}`)
+    }
   }, [])
+  useEffect(() => { load() }, [load])
 
-  const act = async (fn: () => Promise<unknown>) => {
-    try { await fn(); load() } catch (e) { message.error(String((e as Error).message)) }
+  const act = async (fn: () => Promise<unknown>, okMsg: string) => {
+    setBusy(true)
+    try {
+      await fn()
+      toast.success(okMsg)
+      load()
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
   }
-  const promote = (id: string) => act(() => api('POST', `/api/v1/releases/${id}/promote`))
-  const gate = (id: string) => act(() =>
-    api('POST', `/api/v1/releases/${id}/eval`, { dataset, min_pass_rate: 0.8 }))
-  const canary = (id: string) => act(() =>
-    api('POST', `/api/v1/releases/${id}/canary`, { percent: canaryPct, overrides: { model: 'mock-llm' } }))
-  const rollback = (id: string) => act(() => api('POST', `/api/v1/releases/${id}/rollback`))
 
   return (
-    <>
-      <Table<Release> rowKey="id" size="small" pagination={false} dataSource={list}
-        columns={[
-          { title: '智能体', dataIndex: 'agent' },
-          { title: '版本', dataIndex: 'version', render: v => <b>{v}</b> },
-          { title: '状态', dataIndex: 'state', render: stateTag },
-          { title: '门禁', dataIndex: 'eval_verdict', render: v => v ? <Tag color={v === 'PASS' ? 'green' : 'red'}>{v}</Tag> : '-' },
-          { title: '灰度', dataIndex: 'canary_percent', render: v => v ? `${v}%` : '-' },
-          { title: '操作', render: (_, r) => (
-            <span>
-              <Button size="small" type="link" disabled={!['draft', 'review', 'canary'].includes(r.state)}
-                onClick={() => promote(r.id)}>提升</Button>
-              <Button size="small" type="link" disabled={!['draft', 'review'].includes(r.state)}
-                onClick={() => gate(r.id)}>门禁评测</Button>
-              {r.state === 'review' && (
-                <Button size="small" type="link" onClick={() => canary(r.id)}>进灰度 {canaryPct}%</Button>)}
-              <Button size="small" type="link" danger
-                disabled={!['prod', 'canary'].includes(r.state)}
-                onClick={() => rollback(r.id)}>回滚</Button>
-            </span>) },
-        ]} />
-      <div style={{ marginTop: 12 }}>
-        <span style={{ fontSize: 12, color: '#888' }}>新版本：</span>
-        <Input value={agent} onChange={e => setAgent(e.target.value)} style={{ width: 160, marginRight: 8 }}
-          placeholder="agent" />
-        <Input value={version} onChange={e => setVersion(e.target.value)} style={{ width: 120, marginRight: 8 }}
-          placeholder="x.y.z" />
-        <InputNumber min={0} max={100} value={canaryPct} onChange={v => setCanaryPct(v ?? 20)}
-          style={{ width: 70, marginRight: 8 }} />
-        <Input value={dataset} onChange={e => setDataset(e.target.value)} style={{ width: 140, marginRight: 8 }}
-          placeholder="门禁数据集" />
-        <Button type="primary" onClick={() => act(async () => {
-          await api('POST', '/api/v1/releases', { agent: agent.trim(), version: version.trim() })
-          setVersion('')
-        })}>登记发布草案</Button>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-[--radius-card] border border-line bg-surface p-3">
+        <Select className="!w-44" value={agent} onChange={e => setAgent(e.target.value)}>
+          {(agents.length ? agents : ['faq-agent']).map(a => <option key={a} value={a}>{a}</option>)}
+        </Select>
+        <Input className="!w-32" value={version} placeholder="版本" onChange={e => setVersion(e.target.value)} />
+        <Input className="!w-36" value={dataset} placeholder="门禁数据集" onChange={e => setDataset(e.target.value)} />
+        <Button variant="primary" loading={busy}
+          onClick={() => act(async () => {
+            await api('POST', '/api/v1/releases', { agent: agent.trim(), version: version.trim(), eval_dataset: dataset })
+            setVersion('')
+          }, '发布草案已登记（需过评测门禁）')}>
+          <Plus className="size-3.5" />登记发布草案
+        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-xs text-ink-3">灰度比例</span>
+          <Input className="!w-20" type="number" min={0} max={100} value={canaryPct}
+            onChange={e => setCanaryPct(parseInt(e.target.value) || 0)} />
+        </div>
+        <Button variant="secondary" size="sm" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>
       </div>
-    </>
-  )
-}
 
-/* ---------- 成本中心 ---------- */
-type BudgetDetail = {
-  tenant_id: number; monthly_token_budget: number; enabled: boolean; blocked: boolean
-  usage: { month: string; calls: number; tokens_total: number; by_kind: Record<string, { calls: number; tokens_in: number; tokens_out: number }> }
+      <div className="rounded-[--radius-card] border border-line bg-surface">
+        <Table<Release>
+          rowKey={r => r.id}
+          data={list}
+          columns={[
+            { key: 'agent', title: '智能体', render: r => <span className="font-medium">{r.agent}</span> },
+            { key: 'version', title: '版本' },
+            { key: 'state', title: '状态', render: r => <Badge tone={STATE_TONE[r.state] ?? 'gray'}>{r.state}</Badge> },
+            { key: 'eval_verdict', title: '评测门禁', render: r => r.eval_verdict
+              ? <Badge tone={r.eval_verdict === 'PASS' ? 'green' : 'red'}>{r.eval_verdict}</Badge> : <span className="text-ink-3">-</span> },
+            { key: 'canary_percent', title: '灰度', render: r => r.canary_percent ? `${r.canary_percent}%` : '-' },
+            { key: 'actions', title: '操作', render: r => (
+              <div className="flex flex-wrap gap-1.5">
+                {['draft', 'review', 'canary'].includes(r.state) && (
+                  <Button size="xs" variant="primary" onClick={() => act(() => api('POST', `/api/v1/releases/${r.id}/promote`), '已提升')}>
+                    提升
+                  </Button>
+                )}
+                {['draft', 'review', 'prod'].includes(r.state) && (
+                  <Button size="xs" variant="secondary" onClick={() => act(() => api('POST', `/api/v1/releases/${r.id}/canary`, { percent: canaryPct, overrides: { model: 'mock-llm' } }), `已进入 ${canaryPct}% 灰度`)}>
+                    进灰度
+                  </Button>
+                )}
+                {['prod', 'canary'].includes(r.state) && (
+                  <Button size="xs" variant="danger" onClick={() => act(() => api('POST', `/api/v1/releases/${r.id}/rollback`), '已回滚')}>
+                    回滚
+                  </Button>
+                )}
+              </div>
+            ) },
+          ]}
+          empty="暂无发布单：登记草案 → 跑评测过门禁 → 灰度 → 全量"
+        />
+      </div>
+    </div>
+  )
 }
 
 function BudgetsTab() {
@@ -94,95 +143,159 @@ function BudgetsTab() {
   const [tenant, setTenant] = useState(1)
   const [budget, setBudget] = useState(1000000)
 
-  const load = async (t: number) => setDetail(await api<BudgetDetail>(`GET`, `/api/v1/budgets/${t}`))
-  useEffect(() => { load(tenant) }, [])
+  const load = useCallback(async (t: number) => {
+    try {
+      setDetail(await api<BudgetDetail>('GET', `/api/v1/budgets/${t}`))
+    } catch (e) {
+      toast.error(`加载预算失败：${(e as Error).message}`)
+    }
+  }, [])
+  useEffect(() => { load(tenant) }, [tenant, load])
+
+  const save = async () => {
+    try {
+      await api('PUT', '/api/v1/budgets', { tenant_id: tenant, monthly_token_budget: budget })
+      toast.success('预算已更新')
+      load(tenant)
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`)
+    }
+  }
 
   return (
-    <>
-      <div style={{ marginBottom: 12 }}>
-        <InputNumber min={1} value={tenant} onChange={v => { const t = v ?? 1; setTenant(t); load(t) }} style={{ width: 90, marginRight: 8 }} />
-        <InputNumber min={0} step={100000} value={budget} onChange={v => setBudget(v ?? 0)} style={{ width: 130, marginRight: 8 }} />
-        <Button type="primary" onClick={async () => {
-          await api('PUT', '/api/v1/budgets', { tenant_id: tenant, monthly_token_budget: budget })
-          load(tenant)
-        }}>设置月度 token 预算</Button>
-        {detail?.blocked && <Tag color="red" style={{ marginLeft: 8 }}>已熔断（超限调用返回 429）</Tag>}
+    <div className="grid grid-cols-[360px_1fr] items-start gap-4">
+      <div className="space-y-3 rounded-[--radius-card] border border-line bg-surface p-4">
+        <div>
+          <Label>租户 ID</Label>
+          <Input type="number" value={tenant} onChange={e => setTenant(parseInt(e.target.value) || 1)} />
+        </div>
+        <div>
+          <Label>月度 token 预算</Label>
+          <Input type="number" value={budget} onChange={e => setBudget(parseInt(e.target.value) || 0)} />
+        </div>
+        <Button variant="primary" className="w-full" onClick={save}>保存预算</Button>
+        {detail?.blocked && <Badge tone="red">已熔断：预算超限，调用返回 429</Badge>}
       </div>
-      {detail && (
-        <>
-          <p style={{ margin: '4px 0 8px', fontSize: 13 }}>
-            租户 {detail.tenant_id} · {detail.usage.month} · 预算 {detail.monthly_token_budget || '不限'}
-            {' '}· 已用 <b>{detail.usage.tokens_total}</b> tokens · {detail.usage.calls} 次调用
-          </p>
-          <Table size="small" pagination={false} rowKey={k => k}
-            dataSource={Object.keys(detail.usage.by_kind)}
-            columns={[
-              { title: '调用类别', render: k => <b>{k}</b> },
-              { title: '次数', render: k => detail.usage.by_kind[k].calls },
-              { title: 'tokens_in', render: k => detail.usage.by_kind[k].tokens_in },
-              { title: 'tokens_out', render: k => detail.usage.by_kind[k].tokens_out },
-            ]} />
-        </>
-      )}
-    </>
+      <div className="rounded-[--radius-card] border border-line bg-surface p-4">
+        {detail ? (
+          <>
+            <div className="mb-3 flex items-center gap-2">
+              <Badge tone="brand">租户 {detail.tenant_id}</Badge>
+              <span className="text-sm text-ink">本月 {detail.usage?.tokens_total ?? 0} tokens</span>
+              <span className="text-xs text-ink-3">预算 {detail.monthly_token_budget}</span>
+            </div>
+            <Table
+              rowKey={r => String(r.k)}
+              data={Object.entries(detail.usage?.by_kind ?? {}).map(([k, v]) => ({ k, ...v }))}
+              columns={[
+                { key: 'k', title: '类型' },
+                { key: 'calls', title: '调用数' },
+                { key: 'tokens_in', title: 'tokens_in' },
+                { key: 'tokens_out', title: 'tokens_out' },
+              ]}
+              empty="本月暂无用量"
+            />
+          </>
+        ) : <p className="py-8 text-center text-xs text-ink-3">加载中…</p>}
+      </div>
+    </div>
   )
 }
-
-/* ---------- 策略中心 ---------- */
-type Policy = { name: string; tenant_id: number; kind: string; config: Record<string, unknown>; enabled: boolean; priority: number }
 
 function PoliciesTab() {
   const [list, setList] = useState<Policy[]>([])
-  const [name, setName] = useState('')
-  const [tenantId, setTenantId] = useState(1)
-  const [kind, setKind] = useState('provider-allowlist')
-  const [config, setConfig] = useState('{"providers":["mock"]}')
-  const [priority, setPriority] = useState(10)
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({ name: '', tenantId: 1, kind: 'model_whitelist', config: '{}', priority: 10 })
 
-  const load = async () => setList(await api<Policy[]>('GET', '/api/v1/policies'))
-  useEffect(() => { load() }, [])
+  const load = useCallback(async () => {
+    try {
+      setList(await api<Policy[]>('GET', '/api/v1/policies'))
+    } catch (e) {
+      toast.error(`加载策略失败：${(e as Error).message}`)
+    }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const create = async () => {
+    try {
+      await api('POST', '/api/v1/policies', {
+        name: form.name.trim(), tenant_id: form.tenantId, kind: form.kind,
+        config: JSON.parse(form.config), priority: form.priority,
+      })
+      toast.success('策略已创建')
+      setOpen(false)
+      setForm({ name: '', tenantId: 1, kind: 'model_whitelist', config: '{}', priority: 10 })
+      load()
+    } catch (e) {
+      toast.error(`创建失败：${(e as Error).message}`)
+    }
+  }
+
+  const toggle = async (p: Policy) => {
+    try {
+      await api('POST', `/api/v1/policies/${p.name}/enabled?enabled=${!p.enabled}`)
+      load()
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`)
+    }
+  }
 
   return (
-    <>
-      <Table<Policy> rowKey="name" size="small" pagination={false} dataSource={list}
-        columns={[
-          { title: '名称', dataIndex: 'name', render: v => <b>{v}</b> },
-          { title: '租户', dataIndex: 'tenant_id', render: v => v === 0 ? '平台默认' : v },
-          { title: '类型', dataIndex: 'kind' },
-          { title: '配置', dataIndex: 'config', render: c => <code style={{ fontSize: 12 }}>{JSON.stringify(c)}</code> },
-          { title: '优先级', dataIndex: 'priority' },
-          { title: '状态', dataIndex: 'enabled', render: e => <Tag color={e ? 'green' : 'default'}>{e ? '启用' : '停用'}</Tag> },
-          { title: '操作', render: (_, p) => (
-            <Button size="small" type="link" onClick={async () => {
-              await api('POST', `/api/v1/policies/${p.name}/enabled?enabled=${!p.enabled}`); load()
-            }}>{p.enabled ? '停用' : '启用'}</Button>) },
-        ]} />
-      <div style={{ marginTop: 12 }}>
-        <Input placeholder="策略名（如 local-only）" value={name} onChange={e => setName(e.target.value)} style={{ width: 150, marginRight: 8 }} />
-        <InputNumber min={0} value={tenantId} onChange={v => setTenantId(v ?? 1)} style={{ width: 70, marginRight: 8 }} />
-        <Input value={kind} onChange={e => setKind(e.target.value)} style={{ width: 170, marginRight: 8 }} />
-        <Input value={config} onChange={e => setConfig(e.target.value)} style={{ width: 260, marginRight: 8 }} />
-        <InputNumber min={1} value={priority} onChange={v => setPriority(v ?? 100)} style={{ width: 70, marginRight: 8 }} />
-        <Button type="primary" onClick={async () => {
-          try {
-            await api('POST', '/api/v1/policies', {
-              name: name.trim(), tenant_id: tenantId, kind,
-              config: JSON.parse(config), priority,
-            })
-            setName(''); load()
-          } catch (e) { message.error(String((e as Error).message)) }
-        }}>创建策略</Button>
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />创建策略</Button>
       </div>
-    </>
-  )
-}
-
-export default function GovernancePage() {
-  return (
-    <Tabs defaultActiveKey="releases" items={[
-      { key: 'releases', label: '发布治理（生命周期 / 门禁 / 灰度 / 回滚）', children: <ReleasesTab /> },
-      { key: 'budgets', label: '成本中心（预算 / 用量 / 熔断）', children: <BudgetsTab /> },
-      { key: 'policies', label: '策略中心（模型 / 供应商 / prompt 上限）', children: <PoliciesTab /> },
-    ]} />
+      <div className="rounded-[--radius-card] border border-line bg-surface">
+        <Table<Policy>
+          rowKey={p => p.name}
+          data={list}
+          columns={[
+            { key: 'name', title: '名称', render: p => <span className="font-medium">{p.name}</span> },
+            { key: 'kind', title: '类型', render: p => <Badge tone="brand">{p.kind}</Badge> },
+            { key: 'tenant_id', title: '租户' },
+            { key: 'priority', title: '优先级' },
+            { key: 'config', title: '配置', render: p => (
+              <code className="line-clamp-1 max-w-sm text-[11px] text-ink-3">{JSON.stringify(p.config)}</code>
+            ) },
+            { key: 'enabled', title: '状态', render: p => p.enabled ? <Badge tone="green">启用</Badge> : <Badge tone="gray">停用</Badge> },
+            { key: 'actions', title: '操作', render: p => (
+              <Button size="xs" variant="secondary" onClick={() => toggle(p)}>{p.enabled ? '停用' : '启用'}</Button>
+            ) },
+          ]}
+          empty="策略类型：模型白名单 / 供应商白名单 / prompt token 上限（违规 403 EAP-7101）"
+        />
+      </div>
+      <DialogContent open={open} onOpenChange={setOpen} title="创建策略"
+        footer={<>
+          <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={create} disabled={!form.name.trim()}>创建</Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>名称</Label>
+            <Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>类型</Label>
+              <Select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value })}>
+                <option value="model_whitelist">model_whitelist</option>
+                <option value="provider_whitelist">provider_whitelist</option>
+                <option value="prompt_limit">prompt_limit</option>
+              </Select>
+            </div>
+            <div>
+              <Label>优先级</Label>
+              <Input type="number" value={form.priority}
+                onChange={e => setForm({ ...form, priority: parseInt(e.target.value) || 10 })} />
+            </div>
+          </div>
+          <div>
+            <Label>配置（JSON）</Label>
+            <Input value={form.config} onChange={e => setForm({ ...form, config: e.target.value })} className="font-mono !text-[11px]" />
+          </div>
+        </div>
+      </DialogContent>
+    </div>
   )
 }

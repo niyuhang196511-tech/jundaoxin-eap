@@ -1,5 +1,4 @@
 import type { Metadata } from 'next'
-import { AntdRegistry } from '@ant-design/nextjs-registry'
 import { Toaster } from '@/components/ui'
 import './globals.css'
 
@@ -20,11 +19,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       </head>
       <body>
-        {/* AntdRegistry：旧视图仍在过渡期使用 antd，全部重写完成后移除 */}
-        <AntdRegistry>
-          {children}
-          <Toaster />
-        </AntdRegistry>
+        {children}
+        <Toaster />
       </body>
     </html>
   )
