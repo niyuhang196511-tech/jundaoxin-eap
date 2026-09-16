@@ -22,6 +22,9 @@ postgres = ["psycopg[binary]>=3.3.5"]
 redis = ["redis>=8.1.0"]
 # 向量路生产形态：EAP_MILVUS_URI 配置时需要（docs/04 §1 Milvus）
 milvus = ["pymilvus>=3.0.1"]
+migrations = [
+    "alembic>=1.20.0",
+]
 
 [dependency-groups]
 dev = [
