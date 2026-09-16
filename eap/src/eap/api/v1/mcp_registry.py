@@ -1,4 +1,8 @@
-"""MCP Registry API：外部 MCP Server 纳管 / 验证 / 启停（docs/04 §5）。"""
+"""MCP Registry API：外部 MCP Server 纳管 / 验证 / 启停（docs/04 §5）。
+
+transport=http：url 直连（streamable HTTP）；transport=stdio：本地手写 server 子进程
+（扩展开发体系：mcp_client.load_mcp_tools_stdio 拉取工具清单）。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...models import MCPServerRecord
+from ...runtime.mcp_client import load_mcp_tools, load_mcp_tools_stdio
 from ..deps import require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/mcp/servers",
@@ -17,7 +22,10 @@ router = fastapi.APIRouter(prefix="/api/v1/mcp/servers",
 
 class ServerCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,40}$")
-    url: str = Field(min_length=1)
+    url: str = ""
+    transport: str = Field(default="http", pattern=r"^(http|stdio)$")
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
     header_name: str = "Authorization"
     api_key: str | None = None
     enabled: bool = True
@@ -26,7 +34,8 @@ class ServerCreate(BaseModel):
 @router.get("")
 def list_servers(db: Session = fastapi.Depends(get_db)):
     return [
-        {"name": s.name, "url": s.url, "status": s.status, "enabled": s.enabled,
+        {"name": s.name, "url": s.url, "transport": s.transport, "command": s.command,
+         "args": s.args, "status": s.status, "enabled": s.enabled,
          "tools": s.tools, "created_at": str(s.created_at)}
         for s in db.scalars(select(MCPServerRecord)).all()
     ]
@@ -34,15 +43,20 @@ def list_servers(db: Session = fastapi.Depends(get_db)):
 
 @router.post("")
 def register_server(body: ServerCreate, db: Session = fastapi.Depends(get_db)):
+    if body.transport == "http" and not body.url:
+        raise fastapi.HTTPException(status_code=422, detail="http 传输需要 url")
+    if body.transport == "stdio" and not body.command:
+        raise fastapi.HTTPException(status_code=422, detail="stdio 传输需要 command")
     if db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 MCP Server {body.name} 已注册")
     record = MCPServerRecord(
-        name=body.name, url=body.url, header_name=body.header_name,
-        api_key=body.api_key, enabled=body.enabled,
+        name=body.name, url=body.url, transport=body.transport,
+        command=body.command, args=body.args,
+        header_name=body.header_name, api_key=body.api_key, enabled=body.enabled,
     )
     db.add(record)
     db.commit()
-    return {"name": record.name, "url": record.url, "status": record.status}
+    return {"name": record.name, "transport": record.transport, "status": record.status}
 
 
 @router.post("/{name}/validate")
@@ -52,45 +66,22 @@ async def validate_server(name: str, db: Session = fastapi.Depends(get_db)):
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 MCP Server {name} 不存在")
 
-    import httpx
-
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            headers = {"Accept": "application/json, text/event-stream"}
-            if record.api_key:
-                headers[record.header_name or "Authorization"] = record.api_key
-            resp = await client.post(
-                record.url.rstrip("/") + "/mcp" if "/mcp" not in record.url else record.url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            text = resp.text
-            tools = []
-            if text.lstrip().startswith("event:") or "\ndata:" in text:
-                for line in text.splitlines():
-                    if line.startswith("data:"):
-                        data = json_loads(line[5:].strip())
-                        tools = [t["name"] for t in
-                                 (data.get("result", {}).get("tools") or [])]
-                        break
-            else:
-                data = json_loads(text)
-                tools = [t["name"] for t in (data.get("result", {}).get("tools") or [])]
-            record.status = "verified"
-            record.tools = tools
-            db.commit()
-            return {"name": name, "status": "verified", "tools": tools}
+        if record.transport == "stdio":
+            tools = await load_mcp_tools_stdio(record.command, record.args, prefix=name)
+        else:
+            url = record.url.rstrip("/") + "/mcp" if "/mcp" not in record.url else record.url
+            tools = await load_mcp_tools(url, prefix=name)
+        tool_infos = [{"name": t.name, "description": t.description, "parameters": t.parameters}
+                      for t in tools]
+        record.status = "verified"
+        record.tools = [t["name"] for t in tool_infos]
+        db.commit()
+        return {"name": name, "status": "verified", "tools": tool_infos}
     except Exception as e:
         record.status = "unreachable"
         db.commit()
         return {"name": name, "status": "unreachable", "error": str(e)[:200]}
-
-
-def json_loads(text: str) -> dict:
-    import json
-
-    return json.loads(text)
 
 
 @router.patch("/{name}")

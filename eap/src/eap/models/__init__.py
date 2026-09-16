@@ -88,7 +88,7 @@ class AgentRecord(Base):
 
 
 class KB(Base):
-    """知识库实例（多 KB 模型，docs/04 §1）。"""
+    """知识库实例（多 KB 模型，docs/04 §1）。pipeline 为扩展开发体系的组件选型。"""
 
     __tablename__ = "kbs"
 
@@ -97,6 +97,9 @@ class KB(Base):
     title: Mapped[str] = mapped_column(String(128), default="")
     template: Mapped[str] = mapped_column(String(16), default="doc")  # doc | faq
     embedding_provider: Mapped[str] = mapped_column(String(16), default="hash")
+    # RAG pipeline 组件选型：{"chunker": {"name": str, "params": {}}, "reranker": {...}}；
+    # 空/缺省走内置默认（components.get_*）
+    pipeline: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -416,13 +419,20 @@ class EvalRunRecord(Base):
 
 
 class MCPServerRecord(Base):
-    """MCP Registry：外部 MCP Server 纳管（docs/04 §5）。"""
+    """MCP Registry：外部 MCP Server 纳管（docs/04 §5）。
+
+    transport: http（streamable_http_client，url 直连）| stdio（本地手写 server 子进程，
+    command/args 启动，扩展开发体系调试用）。
+    """
 
     __tablename__ = "mcp_servers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    url: Mapped[str] = mapped_column(String(256))
+    url: Mapped[str] = mapped_column(String(256), default="")  # http 传输的端点
+    transport: Mapped[str] = mapped_column(String(8), default="http")  # http | stdio
+    command: Mapped[str] = mapped_column(String(256), default="")  # stdio：可执行文件
+    args: Mapped[list] = mapped_column(JSON, default=list)  # stdio：启动参数
     header_name: Mapped[str] = mapped_column(String(64), default="Authorization")
     api_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
     tools: Mapped[list] = mapped_column(JSON, default=list)  # 上次验证时发现的工具名

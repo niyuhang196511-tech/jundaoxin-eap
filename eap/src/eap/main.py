@@ -21,6 +21,7 @@ from .api.v1 import conversations as api_conversations
 from .api.v1 import embed as api_embed
 from .api.v1 import im as api_im
 from .api.v1 import evals as api_evals
+from .api.v1 import extensions as api_extensions
 from .api.v1 import kb as api_kb
 from .api.v1 import memory as api_memory
 from .api.v1 import mcp_registry as api_mcp_registry
@@ -45,6 +46,9 @@ async def lifespan(app: FastAPI):
     from . import workflows as workflows_svc
 
     await workflows_svc.load_enabled()
+    from .plugins import load_plugins
+
+    load_plugins()  # 扩展开发体系：插件目录加载（单插件失败不阻断启动）
     await app.state.task_engine.start(workers=2)
     async with app.state.mcp.session_manager.run():  # MCP Streamable HTTP 会话管理
         yield
@@ -79,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(api_kb.router)
     app.include_router(api_memory.router)
     app.include_router(api_conversations.router)
+    app.include_router(api_extensions.router)
     app.include_router(api_mcp_registry.router)
     app.include_router(api_models.router)
     app.include_router(api_embed.router)

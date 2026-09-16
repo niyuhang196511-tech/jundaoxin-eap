@@ -38,7 +38,7 @@ def list_kbs(db: Session = fastapi.Depends(get_db)):
 def create_kb(body: KBCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(KB).where(KB.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 知识库 {body.name} 已存在")
-    kb = KB(name=body.name, title=body.title, template=body.template)
+    kb = KB(name=body.name, title=body.title, template=body.template, pipeline=body.pipeline)
     db.add(kb)
     db.commit()
     return {"name": kb.name, "title": kb.title, "template": kb.template}

@@ -36,6 +36,8 @@ class KBCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,40}$")
     title: str = ""
     template: str = "doc"  # doc | faq
+    # RAG pipeline 组件选型（扩展开发体系）：{"chunker": {"name": str, "params": {}}, ...}
+    pipeline: dict = {}
 
 
 class DocIngest(BaseModel):

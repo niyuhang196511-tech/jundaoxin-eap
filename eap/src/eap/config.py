@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True
 
+    # 插件目录（扩展开发体系）：手写工具/RAG 组件/Agent 的目录发现点，启动与 /plugins/reload 时加载
+    plugins_dir: str = "./plugins"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,4 +1,7 @@
-"""知识中心服务：摄入（分块+嵌入+图谱索引）、三路检索（BM25+向量+图谱 RRF）、级联删除。"""
+"""知识中心服务：摄入（分块+嵌入+图谱索引）、三路检索（BM25+向量+图谱 RRF）、级联删除。
+
+分块/重排组件经 components 注册表解析（KB.pipeline 选型，插件可注入自定义实现）。
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import Chunk, Document, KB
-from .chunking import split_text
+from .components import get_chunker, get_reranker
 from .embedding import cosine, get_embedder
 from .graph import delete_graph_for_doc, graph_recall, index_chunk_graph
 from .retrieval import bm25_scores, rrf_combine, top_n
@@ -15,15 +18,21 @@ from .tokenize import tokenize
 from .vector_store import get_vector_store
 
 
+def _kb_pipeline(kb: KB) -> dict:
+    return kb.pipeline if isinstance(kb.pipeline, dict) else {}
+
+
 def ingest_text(db: Session, kb: KB, title: str, text: str, source: str = "", meta: dict | None = None) -> Document:
     """文档摄入：分块 → 嵌入（本地+向量库上行）→ 图谱索引 → 入库（docs/04 §1.2 三路索引）。"""
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
     store = get_vector_store(settings)
+    pipeline = _kb_pipeline(kb).get("chunker") or {}
+    chunk = get_chunker(pipeline.get("name"), pipeline.get("params"))
     doc = Document(kb_id=kb.id, title=title, source=source, meta=meta or {})
     db.add(doc)
     db.flush()
-    for i, piece in enumerate(split_text(text)):
+    for i, piece in enumerate(chunk(text)):
         db.add(Chunk(
             kb_id=kb.id,
             doc_id=doc.id,
@@ -99,10 +108,14 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None
     fused_top = sorted(fused.items(), key=lambda kv: -kv[1])[:pool_n]
 
     if rerank and len(fused_top) > 1:
-        from .rerank import rerank_candidates
-
         candidates = [(idx, chunks[idx].content) for idx, _ in fused_top]
-        order = rerank_candidates(db, query, candidates, rerank)
+        rr = _kb_pipeline(kb).get("reranker") or {}
+        if rr.get("name"):  # KB 级自定义重排器（扩展注册表）
+            order = get_reranker(rr.get("name"), rr.get("params"))(query, candidates)[:top_k]
+        else:
+            from .rerank import rerank_candidates
+
+            order = rerank_candidates(db, query, candidates, rerank)
         ordered = [(candidates[i][0], fused_top[i][1]) for i in order][:top_k]
     else:
         ordered = fused_top[:top_k]
