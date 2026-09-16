@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
@@ -78,6 +78,7 @@ class RedisStreamBackend:
 
         self._r = aioredis.from_url(url, decode_responses=True)
         self._consumer = f"worker-{uuid.uuid4().hex[:8]}"
+        self._reclaimer: asyncio.Task | None = None
 
     async def start(self) -> None:
         try:
@@ -86,19 +87,47 @@ class RedisStreamBackend:
             if "BUSYGROUP" not in str(e):
                 raise
         # 崩溃恢复：接管其他实例遗留的 pending（空闲超过 60 秒）
+        await self._reclaim_stale()
+        # 运行期周期接管（M8）：某实例处理中崩溃后，存活实例自动接管其 pending 消息
+        self._reclaimer = asyncio.create_task(self._reclaim_loop())
+
+    async def _reclaim_stale(self) -> int:
+        """XAUTOCLAIM 接管空闲超 60s 的 pending → 重新入队（幂等：XACK 原消息）。"""
         try:
             claimed = await self._r.xautoclaim(self.STREAM, self.GROUP, self._consumer,
                                                min_idle_time=60_000, count=20)
             messages = claimed[1] if isinstance(claimed, (tuple, list)) else []
+            recovered = 0
             for entry in messages:
                 msg_id, fields = (entry[0], entry[1]) if isinstance(entry, tuple) else (entry, {})
                 if fields.get("task_id"):
                     await self._r.xadd(self.STREAM, {"task_id": fields["task_id"]})
                     await self._r.xack(self.STREAM, self.GROUP, msg_id)
+                    recovered += 1
+            if recovered:
+                logging.getLogger("eap.tasks").info("接管 %d 条遗留 pending 消息", recovered)
+            return recovered
         except Exception:
-            pass  # 恢复失败不阻塞启动（Redis 兼容实现差异）
+            return 0  # 恢复失败不阻塞启动/运行（Redis 兼容实现差异）
+
+    async def _reclaim_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(30)
+                await self._reclaim_stale()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(5)
 
     async def stop(self) -> None:
+        if self._reclaimer is not None:
+            self._reclaimer.cancel()
+            try:
+                await self._reclaimer
+            except asyncio.CancelledError:
+                pass
+            self._reclaimer = None
         await self._r.aclose()
 
     async def enqueue(self, task_id: str) -> None:
@@ -244,14 +273,22 @@ class TaskEngine:
                         TaskScheduleRecord.enabled == True,  # noqa: E712
                         TaskScheduleRecord.next_run_at <= now)).all()
                     for s in due:
-                        await self.submit(db, s.task_type, dict(s.payload or {}))
-                        s.last_run_at = now
-                        s.next_run_at = now + timedelta(seconds=s.interval_seconds)
+                        # 多副本防重复触发（M8）：抢占式更新 next_run_at——
+                        # UPDATE ... WHERE next_run_at=<旧值> 命中 0 行说明另一副本已抢到
+                        claimed = db.execute(
+                            update(TaskScheduleRecord)
+                            .where(TaskScheduleRecord.id == s.id,
+                                   TaskScheduleRecord.next_run_at == s.next_run_at)
+                            .values(next_run_at=now + timedelta(seconds=s.interval_seconds),
+                                    last_run_at=now)
+                        ).rowcount
+                        if claimed:
+                            await self.submit(db, s.task_type, dict(s.payload or {}))
                     db.commit()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"[tasks] 调度循环异常: {e}")
+                logging.getLogger("eap.tasks").warning("调度循环异常: %s", e)
             await asyncio.sleep(1)
 
     # ---------- 执行 ----------
