@@ -158,3 +158,63 @@ def verify_id_token(id_token: str) -> dict:
     if not claims.get("sub"):
         raise OIDCError("EAP-1102 ID Token 缺少 sub")
     return claims
+
+
+def verify_access_token(token: str) -> dict:
+    """外部 IdP 签发的 access token（JWT）验签 —— 资源服务器模式（扩展开发体系 / M6 租户集成）。
+
+    与 verify_id_token 同一 JWKS/RS256 机制，但不校验 aud=client_id（access token 的
+    aud 指向资源服务器，可经 EAP_OIDC_JWT_AUDIENCE 显式约束）；返回 claims：
+    tenant 取 tenant_id/tid 声明，用户取 sub，角色取 roles/realm_access.roles。
+    """
+    s = get_settings()
+    try:
+        head_b64, payload_b64, sig_b64 = token.split(".")
+        header = json.loads(_b64url(head_b64))
+        claims = json.loads(_b64url(payload_b64))
+    except (ValueError, json.JSONDecodeError) as e:
+        raise OIDCError(f"EAP-1102 token 格式无效: {e}") from e
+    if header.get("alg") != "RS256":
+        raise OIDCError(f"EAP-1102 不支持的签名算法 {header.get('alg')!r}（仅 RS256）")
+
+    kid = header.get("kid")
+    jwk = next((k for k in _jwks().get("keys", [])
+                if k.get("kid") == kid and k.get("kty") == "RSA"), None)
+    if jwk is None:
+        raise OIDCError(f"EAP-1102 JWKS 中找不到 kid={kid!r}")
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    signing_input = f"{head_b64}.{payload_b64}".encode()
+    try:
+        _rsa_public_key(jwk).verify(_b64url(sig_b64), signing_input,
+                                    padding.PKCS1v15(), hashes.SHA256())
+    except InvalidSignature as e:
+        raise OIDCError("EAP-1102 token 签名校验失败") from e
+
+    now = int(time.time())
+    if claims.get("exp", 0) < now:
+        raise OIDCError("EAP-1102 token 已过期")
+    if s.oidc_issuer and claims.get("iss") != s.oidc_issuer.rstrip("/"):
+        raise OIDCError(f"EAP-1102 iss 不匹配: {claims.get('iss')!r}")
+    if s.jwt_audience and claims.get("aud") not in (
+            s.jwt_audience, [s.jwt_audience]):
+        raise OIDCError(f"EAP-1102 aud 不匹配: {claims.get('aud')!r}")
+    if not claims.get("sub"):
+        raise OIDCError("EAP-1102 token 缺少 sub")
+    return claims
+
+
+def extract_identity(claims: dict) -> dict:
+    """claims → {tenant_key, user, roles}（租户键支持 tenant_id/tid 声明）。"""
+    roles = claims.get("roles")
+    if not isinstance(roles, list):
+        realm = claims.get("realm_access") or {}
+        roles = realm.get("roles") or []
+    return {
+        "tenant_key": claims.get("tenant_id", claims.get("tid")),
+        "user": claims.get("sub", ""),
+        "roles": [str(r) for r in roles],
+    }

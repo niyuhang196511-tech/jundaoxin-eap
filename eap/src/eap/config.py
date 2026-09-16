@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     oidc_client_id: str | None = None
     oidc_client_secret: str | None = None
     oidc_redirect_uri: str = "http://localhost:8300/api/v1/auth/oidc/callback"
+    # 资源服务器模式（M6）：外部 IdP access token 的 aud 约束（空=不校验）
+    jwt_audience: str | None = None
 
     # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
     redis_url: str | None = None

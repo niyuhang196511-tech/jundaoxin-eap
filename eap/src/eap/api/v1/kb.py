@@ -26,11 +26,20 @@ def _get_kb(db: Session, name: str) -> KB:
 
 
 @router.get("")
-def list_kbs(db: Session = fastapi.Depends(get_db)):
+def list_kbs(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    # 租户过滤（M6）：NULL=平台共享对所有人可见；JWT 登录租户额外可见自己的库。
+    # API Key/dev 通道保持全量可见，兼容单租户部署。
+    from sqlalchemy import or_
+
+    tenant_id = getattr(request.state, "tenant_id", None)
+    is_jwt = getattr(request.state, "auth_kind", "") == "jwt"
+    q = select(KB)
+    if is_jwt and tenant_id:
+        q = q.where(or_(KB.tenant_id.is_(None), KB.tenant_id == tenant_id))
     return [
         {"id": kb.id, "name": kb.name, "title": kb.title, "template": kb.template,
          "embedding_provider": kb.embedding_provider}
-        for kb in db.scalars(select(KB)).all()
+        for kb in db.scalars(q).all()
     ]
 
 

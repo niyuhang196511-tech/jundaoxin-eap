@@ -60,6 +60,7 @@ class ModelRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # NULL=平台共享
     provider: Mapped[str] = mapped_column(String(32), default="mock")  # mock | openai_compat
     base_url: Mapped[str | None] = mapped_column(String(256), nullable=True)
     api_key: Mapped[str | None] = mapped_column(String(256), nullable=True)

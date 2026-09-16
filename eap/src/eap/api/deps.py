@@ -1,4 +1,9 @@
-"""API 依赖：凭证体系（docs/07 §1）—— API Key（服务间）+ Embed 会话令牌（外链专用、最小权限）。"""
+"""API 依赖：凭证体系（docs/07 §1 + M6 资源服务器模式）三轨：
+
+- API Key（服务间/控制台）：全量权限
+- 会话令牌 eap_sess_（嵌入外链）：仅限绑定智能体的 invocations（最小权限）
+- 外部 IdP JWT（用户身份，租户系统签发）：JWKS RS256 验签 → claims 映射租户/用户/角色
+"""
 
 from __future__ import annotations
 
@@ -15,16 +20,25 @@ from ..models import ApiKey, Tenant
 security = fastapi.Security(fastapi.security.APIKeyHeader(name="Authorization", auto_error=False))
 
 
+def _resolve_jwt_tenant(db: Session, claims: dict) -> Tenant | None:
+    """claims.tenant_id/tid → Tenant。数字声明按主键；字符串按租户名匹配。"""
+    from ..runtime.oidc import extract_identity
+
+    identity = extract_identity(claims)
+    key = identity["tenant_key"]
+    if key is None:
+        return None
+    if isinstance(key, int):
+        return db.get(Tenant, key)
+    return db.scalar(select(Tenant).where(Tenant.name == str(key)))
+
+
 def resolve_tenant(
     request: fastapi.Request,
     db: Session = fastapi.Depends(get_db),
     authorization: str | None = fastapi.Security(fastapi.security.APIKeyHeader(name="Authorization", auto_error=False)),
 ) -> Tenant:
-    """Bearer 凭证二选一：
-
-    - API Key（服务间/控制台）：全量权限
-    - 会话令牌 eap_sess_（嵌入外链）：仅限绑定智能体的 invocations（最小权限，docs/06 §2）
-    """
+    """Bearer 凭证三轨：嵌入会话令牌 → API Key → 外部 IdP JWT（资源服务器）。"""
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -52,12 +66,33 @@ def resolve_tenant(
             request.state.auth_kind = "api_key"
             request.state.tenant_id = tenant.id
             return tenant
+
+    # ③ 外部 IdP JWT（形如 JWT 且未命中本地凭证时尝试；OIDC 未配置则跳过）
+    if token.count(".") == 2:
+        from ..runtime import oidc
+
+        if oidc.configured():
+            try:
+                claims = oidc.verify_access_token(token)
+            except oidc.OIDCError as e:
+                raise fastapi.HTTPException(status_code=401, detail=str(e)) from e
+            tenant = _resolve_jwt_tenant(db, claims)
+            if tenant is None:
+                raise fastapi.HTTPException(
+                    status_code=403, detail="EAP-1004 token 声明未映射到平台租户（tenant_id/tid）")
+            identity = oidc.extract_identity(claims)
+            request.state.auth_kind = "jwt"
+            request.state.tenant_id = tenant.id
+            request.state.user = identity["user"]
+            request.state.roles = identity["roles"]
+            return tenant
+
     raise fastapi.HTTPException(status_code=401, detail="EAP-1001 无效 API Key")
 
 
 def require_api_key(request: fastapi.Request) -> None:
     """仅 API Key 可访问（KB 检索/模型管理/chat 端点；会话令牌只允许 agent 调用）。"""
-    if getattr(request.state, "auth_kind", "") != "api_key":
+    if getattr(request.state, "auth_kind", "") not in ("api_key", "jwt"):
         raise fastapi.HTTPException(status_code=403, detail="EAP-3003 会话令牌无此权限（最小权限边界）")
 
 
