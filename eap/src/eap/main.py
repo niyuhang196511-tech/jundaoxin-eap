@@ -7,7 +7,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -65,8 +64,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.add_middleware(TraceMiddleware)
+    origins = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()] or ["*"]
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+        CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
     )
     app.include_router(api_chat.router)
     app.include_router(api_connectors.router)
@@ -90,23 +90,10 @@ def create_app() -> FastAPI:
     app.include_router(api_evals.router)
     app.include_router(api_embed.public_router)
 
-    # 嵌入外链静态资源：/sdk/eap-widget.js、/demo（演示页）；/console（React 控制台构建产物）
+    # 嵌入外链静态资源：/sdk/eap-widget.js、/demo.html（第三方站点嵌入 widget）；
+    # 控制台前端已独立部署（frontend/ → Next.js），不再由后端托管
     static_dir = Path(__file__).parent / "static"
     app.mount("/sdk", StaticFiles(directory=static_dir), name="sdk")
-    if (static_dir / "console").exists():
-        # 控制台静态资源（/assets/*）——index.html 由下方 /console 路由返回
-        app.mount("/assets", StaticFiles(directory=static_dir / "console" / "assets"),
-                  name="console-assets")
-
-    @app.get("/console")
-    def console():
-        index = static_dir / "console" / "index.html"
-        if index.exists():
-            return FileResponse(index)
-        return JSONResponse(
-            {"hint": "控制台未构建：cd frontend && npm install && npm run build"},
-            status_code=503,
-        )
 
     # MCP Server：平台能力以标准 MCP 工具暴露（Claude/Cursor/Harness 直连，需 API Key）
     mcp, mcp_app = create_mcp_server()

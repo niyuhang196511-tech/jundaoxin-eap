@@ -265,6 +265,24 @@ class WorkflowRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class WorkflowRunRecord(Base):
+    """工作流运行记录（DSL v2）：试运行/调用的逐节点执行历史，画布状态可视化数据源。"""
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # run-<hex>
+    workflow: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32), default="")
+    input: Mapped[str] = mapped_column(Text, default="")
+    output: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)  # running/succeeded/failed
+    error: Mapped[str] = mapped_column(Text, default="")
+    node_runs: Mapped[list] = mapped_column(JSON, default=list)
+    # [{id, type, status: running|ok|error, output, error, elapsed_ms}]
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class TaskScheduleRecord(Base):
     """定时调度（docs/03 §5，M3）：按固定间隔周期性提交任务（DB 持久化，重启不丢）。
 

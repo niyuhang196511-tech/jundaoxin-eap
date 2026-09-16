@@ -11,9 +11,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EAP_", env_file=".env", extra="ignore")
 
     # 服务
-    host: str = "0.0.0.0"
+    host: str = "192.168.0.7"
     port: int = 8300
     db_url: str = "sqlite:///./eap.db"
+
+    # CORS 白名单（逗号分隔 origin）：控制台前端独立部署时填其来源；"*" 全放行（仅开发）
+    cors_origins: str = "*"
 
     # 开发租户与密钥（生产走 OIDC/SSO，见 docs/06）
     dev_api_key: str = "dev-key-1"

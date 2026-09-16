@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+from uuid import uuid4
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .agents.registry import registry
 from .db import SessionLocal
-from .models import WorkflowRecord
-from .runtime.workflow import WorkflowSpec, create_workflow_agent_class
+from .models import WorkflowRecord, WorkflowRunRecord
+from .runtime.workflow import WorkflowSpec, create_workflow_agent_class, execute_workflow
 
 
 async def create_and_register(db: Session, spec: WorkflowSpec) -> WorkflowRecord:
@@ -50,3 +54,78 @@ async def disable(name: str) -> None:
         record.enabled = False
         db.commit()
     registry._agents.pop(name, None)  # 从目录摘除（版本历史仍在 DB）
+
+
+# ---------- 运行记录（DSL v2：逐节点执行历史，画布试运行可视化数据源） ----------
+
+def _flush_run(run_id: str, *, status: str, output: str, error: str,
+               node_runs: list[dict], elapsed_ms: int) -> None:
+    """运行记录落库（每个节点事件后调用，前端轮询可见中间态）。"""
+    with SessionLocal() as db:
+        record = db.get(WorkflowRunRecord, run_id)
+        if record is None:
+            return
+        record.status = status
+        record.output = output
+        record.error = error
+        record.node_runs = node_runs
+        record.elapsed_ms = elapsed_ms
+        db.commit()
+
+
+async def test_run_async(name: str, input_text: str) -> str:
+    """端点用：预生成 run_id → 立即落 running 记录 → create_task 后台执行 → 返回 run_id。"""
+    with SessionLocal() as db:
+        record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+        if record is None:
+            raise KeyError(f"工作流 {name} 不存在")
+        run_id = f"run-{uuid4().hex[:12]}"
+        db.add(WorkflowRunRecord(id=run_id, workflow=name, version=record.version,
+                                 input=input_text))
+        db.commit()
+    asyncio.get_running_loop().create_task(_run_with_id(name, input_text, run_id))
+    return run_id
+
+
+async def _run_with_id(name: str, input_text: str, run_id: str) -> None:
+    started = time.perf_counter()
+    node_runs: list[dict] = []
+
+    async def on_event(ev: dict) -> None:
+        if ev.get("type") == "start":
+            node_runs.append({"id": ev["node"], "type": ev.get("node_type", ""),
+                              "status": "running", "output": "", "error": "", "elapsed_ms": 0})
+        elif ev.get("type") == "end":
+            for nr in reversed(node_runs):
+                if nr["id"] == ev["node"] and nr["status"] == "running":
+                    nr["status"] = ev.get("status", "ok")
+                    nr["output"] = ev.get("output", "")
+                    nr["error"] = ev.get("error", "")
+                    nr["elapsed_ms"] = ev.get("elapsed_ms", 0)
+                    break
+        _flush_run(run_id, status="running", output="", error="",
+                   node_runs=[dict(nr) for nr in node_runs],
+                   elapsed_ms=int((time.perf_counter() - started) * 1000))
+
+    try:
+        from .agents.registry import get_platform_context
+
+        spec = get_spec(name)
+        ctx = get_platform_context()
+        with ctx.db() as db:
+            result = await execute_workflow(spec, ctx, db, input_text, on_event=on_event)
+        _flush_run(run_id, status="succeeded", output=str(result.get("output", "")), error="",
+                   node_runs=[dict(nr) for nr in node_runs],
+                   elapsed_ms=int((time.perf_counter() - started) * 1000))
+    except Exception as e:
+        _flush_run(run_id, status="failed", output="", error=str(e)[:4000],
+                   node_runs=[dict(nr) for nr in node_runs],
+                   elapsed_ms=int((time.perf_counter() - started) * 1000))
+
+
+def get_spec(name: str) -> WorkflowSpec:
+    with SessionLocal() as db:
+        record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+        if record is None:
+            raise KeyError(f"工作流 {name} 不存在")
+        return WorkflowSpec(**record.dsl)
