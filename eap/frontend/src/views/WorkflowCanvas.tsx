@@ -1,276 +1,365 @@
-"use client"
+'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Background, Controls, Handle, Position,
-  ReactFlow, type Edge, type Node, type NodeProps,
+  addEdge,
+  Background,
+  BackgroundVariant,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  useEdgesState,
+  useNodesState,
+  type Connection,
+  type Edge,
+  type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Button, Input, Select, Table, Tabs, message } from 'antd'
+import { Badge, Button, Input, Table, toast } from '@/components/ui'
+import { ListPlus, Save } from 'lucide-react'
 import { api } from '@/lib/api'
+import {
+  autoLayout, genEdgeId, genStepId, linearToEdges, NODE_TYPES,
+  type NodeRun, type Step, type StepType, type WorkflowDsl, type WorkflowRun,
+} from '@/components/canvas/dsl'
+import { nodeTypes, type WfNodeData } from '@/components/canvas/WfNode'
+import { NodePanel } from '@/components/canvas/NodePanel'
+import { ConfigDrawer } from '@/components/canvas/ConfigDrawer'
+import { RunPanel } from '@/components/canvas/RunPanel'
 
-/* ---------- DSL 类型（与后端 runtime/workflow.py 对齐） ---------- */
-type Condition = { left?: string | null; op: string; right?: string | null }
-type Step = {
-  id: string; type: string; when?: Condition | null
-  system?: string; model?: string; knowledge?: string[]; query_var?: string
-  prompt_name?: string | null; prompt_vars?: Record<string, string>
-  tool_name?: string | null; tool_args?: Record<string, unknown>
-  kb?: string | null; top_k?: number
-  left?: string | null; right?: string | null; then_id?: string | null; else_id?: string | null
-  branches?: { id: string; steps: Step[] }[]
-  join_with?: string
-  workflow?: string | null; input_var?: string
-}
-type WorkflowDsl = { name: string; version: string; description: string; steps: Step[] }
-
-const NODE_TYPES = ['llm', 'tool', 'retrieve', 'branch', 'parallel', 'subflow'] as const
-const TYPE_COLORS: Record<string, string> = {
-  llm: '#1d6ef2', tool: '#7c3aed', retrieve: '#0e9f6e',
-  branch: '#d97706', parallel: '#db2777', subflow: '#475569',
+const STATUS_BY_ID = (runs: NodeRun[]) => {
+  const map = new Map<string, NodeRun>()
+  for (const r of runs) map.set(r.id, r)
+  return map
 }
 
-/* ---------- 自定义节点渲染 ---------- */
-function StepNode({ data }: NodeProps) {
-  const d = data as { label: string; stepType: string }
-  return (
-    <div style={{
-      border: `2px solid ${TYPE_COLORS[d.stepType] ?? '#666'}`, borderRadius: 8,
-      background: '#fff', padding: '6px 14px', minWidth: 140, textAlign: 'center',
-      boxShadow: '0 1px 4px rgba(0,0,0,.12)',
-    }}>
-      <Handle type="target" position={Position.Top} />
-      <div style={{ fontSize: 11, color: TYPE_COLORS[d.stepType], fontWeight: 600 }}>{d.stepType}</div>
-      <div style={{ fontSize: 13, fontWeight: 700 }}>{d.label}</div>
-      <Handle type="source" position={Position.Bottom} />
-    </div>
-  )
-}
-const nodeTypes = { step: StepNode }
-
-/* ---------- DSL → 图（线性链 + branch 是/否跳转边） ---------- */
-function dslToGraph(steps: Step[]): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = steps.map((s, i) => ({
-    id: s.id, type: 'step', position: { x: 260 + (i % 2) * 30, y: 30 + i * 110 },
-    data: { label: s.id, stepType: s.type },
+function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
+  const edges: Edge[] = (dsl.edges ?? []).map(e => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: e.source_handle ?? undefined,
+    label: e.source_handle === 'then' ? '是' : e.source_handle === 'else' ? '否' : undefined,
+    style: { stroke: e.source_handle === 'then' ? '#10b981' : e.source_handle === 'else' ? '#f59e0b' : '#9db2c7' },
+    markerEnd: { type: 'arrowclosed' as const },
   }))
-  const edges: Edge[] = []
-  steps.forEach((s, i) => {
-    const next = steps[i + 1]
-    if (s.type === 'branch') {
-      if (s.then_id) edges.push({ id: `${s.id}-t-${s.then_id}`, source: s.id, target: s.then_id, label: '是', animated: true, style: { stroke: '#0e9f6e' } })
-      if (s.else_id) edges.push({ id: `${s.id}-e-${s.else_id}`, source: s.id, target: s.else_id, label: '否', style: { stroke: '#d97706' } })
-    } else if (next) {
-      edges.push({ id: `${s.id}-next`, source: s.id, target: next.id, style: { stroke: '#9db2c7' } })
-    }
-  })
+  const layout = autoLayout(dsl.steps, dsl.edges ?? [])
+  const nodes: Node[] = dsl.steps.map(s => ({
+    id: s.id,
+    type: 'wf',
+    position: s.position ?? layout.get(s.id) ?? { x: 0, y: 0 },
+    data: {
+      stepId: s.id, stepType: s.type, title: s.title || '', status: 'idle',
+    } satisfies WfNodeData,
+  }))
   return { nodes, edges }
 }
 
-/* ---------- 属性面板：按类型渲染可编辑字段 ---------- */
-function StepForm({ step, allIds, onChange }: {
-  step: Step; allIds: string[]
-  onChange: (patch: Partial<Step>) => void
-}) {
-  const row = { marginBottom: 8 }
-  const targetOptions = allIds.filter(id => id !== step.id).map(id => ({ value: id, label: id }))
+function flowToDsl(dsl: WorkflowDsl, nodes: Node[], edges: Edge[]): WorkflowDsl {
+  const steps: Step[] = nodes.map(n => {
+    const d = n.data as WfNodeData
+    const prev = dsl.steps.find(s => s.id === d.stepId)
+    return {
+      ...(prev ?? { id: d.stepId, type: d.stepType as StepType }),
+      id: d.stepId,
+      type: d.stepType as StepType,
+      title: d.title || undefined,
+      position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+    }
+  })
+  const dslEdges = edges.map(e => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    source_handle: (e.sourceHandle as 'then' | 'else' | null | undefined) ?? null,
+  }))
+  return { ...dsl, steps, edges: dslEdges }
+}
+
+interface WorkflowListItem {
+  name: string
+  version: string
+  enabled: boolean
+  steps: number
+  edges: number
+  [key: string]: unknown
+}
+
+export default function WorkflowCanvasPage() {
+  const [list, setList] = useState<WorkflowListItem[]>([])
+  const [dsl, setDsl] = useState<WorkflowDsl | null>(null)
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const wrapper = useRef<HTMLDivElement>(null)
+
+  const loadList = useCallback(async () => {
+    try {
+      setList(await api<WorkflowListItem[]>('GET', '/api/v1/workflows'))
+    } catch (e) {
+      toast.error(`加载工作流目录失败：${(e as Error).message}`)
+    }
+  }, [])
+  useEffect(() => { loadList() }, [loadList])
+
+  const openDsl = async (name: string) => {
+    try {
+      const full = await api<WorkflowDsl>('GET', `/api/v1/workflows/${encodeURIComponent(name)}/dsl`)
+      const normalized: WorkflowDsl = { ...full, edges: full.edges?.length ? full.edges : linearToEdges(full.steps) }
+      setDsl(normalized)
+      const g = dslToFlow(normalized)
+      setNodes(g.nodes)
+      setEdges(g.edges)
+      setDirty(false)
+    } catch (e) {
+      toast.error(`载入失败：${(e as Error).message}`)
+    }
+  }
+
+  const newWorkflow = () => {
+    const empty: WorkflowDsl = { name: '', version: '1.0.0', description: '', steps: [], edges: [] }
+    setDsl(empty)
+    setNodes([])
+    setEdges([])
+    setDirty(false)
+  }
+
+  /* ---------- 画布交互 ---------- */
+
+  const markDirty = useCallback(() => setDirty(true), [])
+
+  const onConnect = useCallback((c: Connection) => {
+    setEdges(es => addEdge({
+      ...c,
+      id: genEdgeId(c.source, c.target, c.sourceHandle),
+      label: c.sourceHandle === 'then' ? '是' : c.sourceHandle === 'else' ? '否' : undefined,
+      style: { stroke: c.sourceHandle === 'then' ? '#10b981' : c.sourceHandle === 'else' ? '#f59e0b' : '#9db2c7' },
+      markerEnd: { type: 'arrowclosed' as const },
+    }, es))
+    markDirty()
+  }, [setEdges, markDirty])
+
+  const onDrop = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    const type = event.dataTransfer.getData('application/eap-node') as StepType
+    if (!type || !NODE_TYPES.some(t => t.type === type)) return
+    const bounds = wrapper.current?.getBoundingClientRect()
+    if (!bounds) return
+    const id = genStepId(type, nodes.map(n => n.id))
+    const node: Node = {
+      id,
+      type: 'wf',
+      position: { x: event.clientX - bounds.left - 100, y: event.clientY - bounds.top - 30 },
+      data: { stepId: id, stepType: type, title: '', status: 'idle' } satisfies WfNodeData,
+    }
+    setNodes(ns => [...ns, node])
+    markDirty()
+  }, [nodes, setNodes, markDirty])
+
+  const deleteSelected = useCallback(() => {
+    setNodes(ns => ns.filter(n => !n.selected))
+    setEdges(es => es.filter(e => !e.selected))
+    markDirty()
+  }, [setNodes, setEdges, markDirty])
+
+  /* ---------- 保存 ---------- */
+
+  const save = async () => {
+    if (!dsl) return
+    if (!dsl.name.trim()) {
+      toast.error('请填写工作流名称（小写字母/数字/连字符）')
+      return
+    }
+    if (!/^[a-z][a-z0-9-]{2,40}$/.test(dsl.name)) {
+      toast.error('名称需以小写字母开头，仅含小写字母/数字/连字符，长度 3-41')
+      return
+    }
+    setSaving(true)
+    try {
+      const payload = flowToDsl(dsl, nodes, edges)
+      await api('POST', '/api/v1/workflows', payload)
+      setDsl(payload)
+      setDirty(false)
+      toast.success(`已保存并注册为智能体 ${payload.name}`)
+      loadList()
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /* ---------- 试运行状态映射 ---------- */
+
+  const onRunStatus = useCallback((runs: NodeRun[]) => {
+    const byId = STATUS_BY_ID(runs)
+    setNodes(ns => ns.map(n => {
+      const r = byId.get(n.id)
+      const status = r ? (r.status === 'running' ? 'running' : r.status === 'ok' ? 'ok' : 'error') : 'idle'
+      return (n.data as WfNodeData).status === status
+        ? n
+        : { ...n, data: { ...(n.data as WfNodeData), status } }
+    }))
+  }, [setNodes])
+
+  const selectedId = useMemo(() => nodes.find(n => n.selected)?.id ?? null, [nodes])
+  const selectedStep = useMemo(
+    () => (dsl && selectedId ? dsl.steps.find(s => s.id === selectedId) ?? null : null), [dsl, selectedId])
+
+  const patchStep = useCallback((id: string, patch: Partial<Step>) => {
+    setDsl(d => {
+      if (!d) return d
+      return { ...d, steps: d.steps.map(s => (s.id === id ? { ...s, ...patch } : s)) }
+    })
+    setNodes(ns => ns.map(n => {
+      if (n.id !== id) return n
+      const d = n.data as WfNodeData
+      return { ...n, data: { ...d, title: (patch.title !== undefined ? patch.title : d.title) || '' } }
+    }))
+    markDirty()
+  }, [markDirty])
+
+  /* ---------- 渲染 ---------- */
+
+  const listTab = (
+    <div className="rounded-[--radius-card] border border-line bg-surface">
+      <Table<WorkflowListItem>
+        rowKey={w => w.name}
+        data={list}
+        columns={[
+          { key: 'name', title: '名称', render: w => (
+            <button className="cursor-pointer font-medium text-brand-600 hover:underline dark:text-brand-400"
+              onClick={() => openDsl(w.name)}>{w.name}</button>
+          ) },
+          { key: 'version', title: '版本' },
+          { key: 'nodes', title: '节点 / 边', render: w => `${w.steps} / ${w.edges}` },
+          { key: 'enabled', title: '状态', render: w => w.enabled
+            ? <Badge tone="green">启用</Badge> : <Badge tone="gray">停用</Badge> },
+        ]}
+        onRowClick={w => openDsl(w.name)}
+        empty="暂无工作流，右侧「新建」开始编排"
+      />
+    </div>
+  )
+
   return (
-    <div>
-      <Input addonBefore="id" value={step.id} style={row}
-        onChange={e => onChange({ id: e.target.value })} />
-      {step.type === 'llm' && (<>
-        <Input.TextArea placeholder="system（系统提示词）" rows={3} value={step.system ?? ''} style={row}
-          onChange={e => onChange({ system: e.target.value })} />
-        <Input addonBefore="模型(auto=路由)" value={step.model ?? 'auto'} style={row}
-          onChange={e => onChange({ model: e.target.value })} />
-        <Input addonBefore="知识库(逗号分隔)" value={(step.knowledge ?? []).join(',')} style={row}
-          onChange={e => onChange({ knowledge: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} />
-      </>)}
-      {step.type === 'retrieve' && (<>
-        <Input addonBefore="kb" value={step.kb ?? ''} style={row}
-          onChange={e => onChange({ kb: e.target.value })} />
-        <Input addonBefore="top_k" value={String(step.top_k ?? 3)} style={row}
-          onChange={e => onChange({ top_k: parseInt(e.target.value) || 3 })} />
-      </>)}
-      {step.type === 'tool' && (<>
-        <Input addonBefore="tool_name" value={step.tool_name ?? ''} style={row}
-          onChange={e => onChange({ tool_name: e.target.value })} />
-        <Input addonBefore="tool_args(JSON)" value={JSON.stringify(step.tool_args ?? {})} style={row}
-          onChange={e => { try { onChange({ tool_args: JSON.parse(e.target.value || '{}') }) } catch { /* 编辑中暂存 */ } }} />
-      </>)}
-      {step.type === 'branch' && (<>
-        <Input addonBefore="left" value={step.when?.left ?? ''} style={row}
-          onChange={e => onChange({ when: { op: step.when?.op ?? 'contains', ...step.when, left: e.target.value || null } })} />
-        <Select value={step.when?.op ?? 'contains'} style={{ ...row, width: '100%' }}
-          onChange={v => onChange({ when: { left: null, right: null, ...step.when, op: v } })}
-          options={['contains', 'eq', 'ne', 'empty', 'not_empty'].map(op => ({ value: op, label: op }))} />
-        <Input addonBefore="right" value={step.when?.right ?? ''} style={row}
-          onChange={e => onChange({ when: { op: step.when?.op ?? 'contains', ...step.when, right: e.target.value || null } })} />
-        <Select value={step.then_id} options={targetOptions} allowClear
-          style={row} onChange={v => onChange({ then_id: v ?? null })} placeholder="then：满足时跳转到" />
-        <Select value={step.else_id} options={targetOptions} allowClear
-          style={row} onChange={v => onChange({ else_id: v ?? null })} placeholder="else：不满足跳转到" />
-      </>)}
-      {step.type === 'parallel' && (<>
-        <Input addonBefore="join_with" value={step.join_with ?? '\n\n'} style={row}
-          onChange={e => onChange({ join_with: e.target.value })} />
-        <Input.TextArea rows={4} value={JSON.stringify(step.branches ?? [], null, 1)} style={row}
-          onChange={e => { try { onChange({ branches: JSON.parse(e.target.value || '[]') }) } catch { /* 编辑中 */ } }} />
-      </>)}
-      {step.type === 'subflow' && (<>
-        <Input addonBefore="workflow" value={step.workflow ?? ''} style={row}
-          onChange={e => onChange({ workflow: e.target.value })} />
-        <Input addonBefore="input_var" value={step.input_var ?? 'input'} style={row}
-          onChange={e => onChange({ input_var: e.target.value })} />
-      </>)}
+    <div className="flex h-full gap-4">
+      {/* 左栏：目录 + 新建 */}
+      <div className="flex w-64 shrink-0 flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <Button variant="primary" className="flex-1" onClick={newWorkflow}>
+            <ListPlus className="size-3.5" /> 新建工作流
+          </Button>
+          {dsl && (
+            <Button variant={dirty ? 'primary' : 'secondary'} onClick={save} loading={saving} title="保存并注册">
+              <Save className="size-3.5" />{dirty ? '保存*' : '保存'}
+            </Button>
+          )}
+        </div>
+        {dsl && (
+          <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
+            <Input value={dsl.name} placeholder="名称（如 triage-flow）"
+              onChange={e => { setDsl({ ...dsl, name: e.target.value }); markDirty() }} />
+            <Input value={dsl.version} placeholder="版本"
+              onChange={e => { setDsl({ ...dsl, version: e.target.value }); markDirty() }} />
+            <Input value={dsl.description} placeholder="描述（可选）"
+              onChange={e => { setDsl({ ...dsl, description: e.target.value }); markDirty() }} />
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-y-auto">{listTab}</div>
+      </div>
+
+      {/* 中栏：画布 */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-[--radius-card] border border-line bg-surface">
+        <div className="flex h-full">
+          {dsl ? (
+            <>
+              <NodePanel />
+              <div className="relative min-w-0 flex-1" ref={wrapper}
+                onDrop={onDrop}
+                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }}>
+                <ReactFlow
+                  nodes={nodes}
+                  edges={edges}
+                  onNodesChange={ch => { onNodesChange(ch); if (ch.some(c => c.type !== 'select' && c.type !== 'dimensions')) markDirty() }}
+                  onEdgesChange={ch => { onEdgesChange(ch); if (ch.some(c => c.type === 'remove')) markDirty() }}
+                  onConnect={onConnect}
+                  nodeTypes={nodeTypes}
+                  onDelete={deleteSelected}
+                  onNodeDoubleClick={(_, n) => {
+                    const el = document.getElementById('wf-drawer-opener') as HTMLButtonElement | null
+                    el?.click()
+                    void n
+                  }}
+                  fitView
+                  deleteKeyCode={null}
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <Background variant={BackgroundVariant.Dots} gap={18} size={1.4} />
+                  <Controls />
+                  <MiniMap pannable zoomable className="!rounded-lg !bg-surface-2 !border-line"
+                    nodeColor={() => '#4f63f5'} />
+                </ReactFlow>
+                {nodes.length === 0 && (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <p className="rounded-lg bg-surface/90 px-4 py-2 text-sm text-ink-3 shadow-(--shadow-card)">
+                      从左侧节点库拖入节点，从节点出口拖线连接
+                    </p>
+                  </div>
+                )}
+              </div>
+              {/* 右栏：试运行 + 历史运行 */}
+              <div className="w-64 shrink-0 space-y-3 overflow-y-auto border-l border-line bg-surface p-3">
+                <RunPanel workflowName={dsl.name} onStatus={onRunStatus} enabled={!!dsl.name} />
+                <RunHistory name={dsl.name} />
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-sm text-ink-3">
+              左侧选择或新建一个工作流开始编排
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 配置抽屉（通过隐藏按钮让节点双击也能打开） */}
+      {dsl && (
+        <ConfigDrawer
+          step={selectedStep}
+          allIds={nodes.map(n => n.id)}
+          onChange={patch => selectedId && patchStep(selectedId, patch)}
+          onClose={() => setNodes(ns => ns.map(n => (n.selected ? { ...n, selected: false } : n)))}
+        />
+      )}
     </div>
   )
 }
 
-/* ---------- 主页面 ---------- */
-export default function WorkflowCanvasPage() {
-  const [list, setList] = useState<{ name: string; version: string; steps: number; enabled: boolean }[]>([])
-  const [dsl, setDsl] = useState<WorkflowDsl | null>(
-    { name: '', version: '1.0.0', description: '', steps: [] })
-  const [nodes, setNodes] = useState<Node[]>([])
-  const [edges, setEdges] = useState<Edge[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
-  const [testInput, setTestInput] = useState('如何创建知识库？')
-  const [testResult, setTestResult] = useState<string>('')
-
-  const loadList = async () => setList(await api<typeof list>('GET', '/api/v1/workflows'))
-  useEffect(() => { loadList() }, [])
-
-  const openDsl = (name: string) => {
-    api<Record<string, unknown>>('GET', `/api/v1/agents/${name}/card`).catch(() => null)
-    // DSL 从工作流列表接口没有全文：走创建时的本地缓存不可靠 → 经 /workflows 拿不到 steps 全文，
-    // 这里用后端目录 + 测试运行拿 trace；编辑场景直接以当前画布为准（新建或载入后修改）。
-    const existing = list.find(w => w.name === name)
-    setDsl({ name, version: existing?.version ?? '1.0.0', description: '', steps: [] })
-    message.info('已载入（步骤全文将从保存接口同步）')
-  }
-
-  const loadDsl = useCallback((d: WorkflowDsl) => {
-    setDsl(d)
-    const g = dslToGraph(d.steps)
-    setNodes(g.nodes); setEdges(g.edges)
-  }, [])
-
-  const viewDsl = async (name: string) => {
-    // 从测试运行轨迹反解不可靠：直接从后端 WorkflowRecord DSL 读取（经 /workflows 扩展字段）
-    const full = await api<WorkflowDsl & { steps: Step[] }>('GET', `/api/v1/workflows/${name}/dsl`)
-    loadDsl(full)
-  }
-
-  const addStep = (type: string) => {
-    if (!dsl) return
-    const id = `${type}${dsl.steps.length + 1}`
-    const base: Step = { id, type, ...(type === 'llm' ? { system: '' } : {}) }
-    const steps = [...dsl.steps, base]
-    loadDsl({ ...dsl, steps })
-    setSelected(id)
-  }
-  const removeStep = (id: string) => {
-    if (!dsl) return
-    loadDsl({ ...dsl, steps: dsl.steps.filter(s => s.id !== id) })
-    setSelected(null)
-  }
-  const moveStep = (id: string, delta: number) => {
-    if (!dsl) return
-    const i = dsl.steps.findIndex(s => s.id === id)
-    const j = i + delta
-    if (i < 0 || j < 0 || j >= dsl.steps.length) return
-    const steps = [...dsl.steps]
-    ;[steps[i], steps[j]] = [steps[j], steps[i]]
-    loadDsl({ ...dsl, steps })
-  }
-  const patchStep = (id: string, patch: Partial<Step>) => {
-    if (!dsl) return
-    loadDsl({ ...dsl, steps: dsl.steps.map(s => (s.id === id ? { ...s, ...patch } : s)) })
-  }
-
-  const save = async () => {
-    if (!dsl) return
+function RunHistory({ name }: { name: string }) {
+  const [runs, setRuns] = useState<WorkflowRun[] | null>(null)
+  const load = useCallback(async () => {
+    if (!name) return
     try {
-      await api('POST', '/api/v1/workflows', dsl)
-      message.success(`已保存并注册为智能体 ${dsl.name}`)
-      loadList()
-    } catch (e) { message.error(String((e as Error).message)) }
-  }
+      setRuns(await api<WorkflowRun[]>('GET', `/api/v1/workflows/${encodeURIComponent(name)}/runs`))
+    } catch { /* 目录加载失败静默 */ }
+  }, [name])
+  useEffect(() => { load() }, [load])
 
-  const runTest = async () => {
-    if (!dsl) return
-    try {
-      const r = await api<{ steps: string[]; output: string }>(
-        'POST', `/api/v1/agents/${dsl.name}/invocations`, { input: testInput })
-      setTestResult([...r.steps, '—— 输出 ——', r.output].join('\n'))
-    } catch (e) { setTestResult(`运行失败: ${String((e as Error).message)}`) }
-  }
-
-  const selectedStep = useMemo(
-    () => dsl?.steps.find(s => s.id === selected) ?? null, [dsl, selected])
-
-  const listTab = (
-    <Table rowKey="name" size="small" pagination={false} dataSource={list}
-      columns={[
-        { title: '名称', dataIndex: 'name', render: (v, w) => (
-          <Button type="link" size="small" onClick={() => viewDsl(v)}>{v}</Button>) },
-        { title: '版本', dataIndex: 'version' },
-        { title: '步骤数', dataIndex: 'steps' },
-        { title: '状态', dataIndex: 'enabled', render: e => e ? '启用' : '停用' },
-      ]} />
-  )
-
-  const canvasTab = (
+  if (!name || !runs?.length) return null
+  return (
     <div>
-      <div style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-        <Input addonBefore="名称" value={dsl?.name ?? ''} style={{ width: 220 }}
-          onChange={e => dsl && setDsl({ ...dsl, name: e.target.value })} />
-        <Input addonBefore="版本" value={dsl?.version ?? ''} style={{ width: 160 }}
-          onChange={e => dsl && setDsl({ ...dsl, version: e.target.value })} />
-        {NODE_TYPES.map(t => (
-          <Button key={t} size="small" onClick={() => addStep(t)}>+ {t}</Button>))}
-        <Button type="primary" onClick={save}>保存并注册</Button>
-      </div>
-      <div style={{ display: 'flex', gap: 12 }}>
-        <div style={{ width: 520, height: 480, border: '1px solid #e5eaf1', borderRadius: 8 }}>
-          <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes}
-            onNodeClick={(_, n) => setSelected(n.id)}
-            fitView proOptions={{ hideAttribution: true }}>
-            <Background />
-            <Controls />
-          </ReactFlow>
-        </div>
-        <div style={{ flex: 1 }}>
-          {selectedStep ? (
-            <>
-              <div style={{ marginBottom: 8 }}>
-                <Button size="small" onClick={() => moveStep(selectedStep.id, -1)} style={{ marginRight: 4 }}>↑ 上移</Button>
-                <Button size="small" onClick={() => moveStep(selectedStep.id, 1)} style={{ marginRight: 4 }}>↓ 下移</Button>
-                <Button size="small" danger onClick={() => removeStep(selectedStep.id)}>删除步骤</Button>
-              </div>
-              <StepForm step={selectedStep} allIds={dsl?.steps.map(s => s.id) ?? []}
-                onChange={patch => patchStep(selectedStep.id, patch)} />
-            </>
-          ) : <p style={{ color: '#999', fontSize: 13 }}>点击画布节点编辑属性；上方按钮添加步骤；顺序用上移/下移调整。</p>}
-          <div style={{ marginTop: 12 }}>
-            <Input addonBefore="试运行输入" value={testInput}
-              onChange={e => setTestInput(e.target.value)} style={{ marginBottom: 8 }} />
-            <Button type="primary" block onClick={runTest}>在画布上试运行</Button>
-            <pre style={{ background: '#f7f9fc', padding: 8, borderRadius: 6, fontSize: 12,
-              whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>
-              {testResult || '（试运行结果）'}
-            </pre>
+      <p className="mb-1.5 text-xs font-medium text-ink-3">历史运行</p>
+      <div className="space-y-1">
+        {runs.slice(0, 8).map(r => (
+          <div key={r.id} className="flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px]">
+            <span className={`size-1.5 shrink-0 rounded-full ${
+              r.status === 'succeeded' ? 'bg-emerald-500' : r.status === 'failed' ? 'bg-red-500' : 'bg-brand-500'}`} />
+            <span className="min-w-0 flex-1 truncate text-ink-2" title={r.input}>{r.input || '(空输入)'}</span>
+            <span className="shrink-0 text-ink-3">{r.elapsed_ms}ms</span>
           </div>
-        </div>
+        ))}
       </div>
     </div>
-  )
-
-  return (
-    <Tabs defaultActiveKey="canvas" items={[
-      { key: 'canvas', label: '画布编辑器', children: canvasTab },
-      { key: 'list', label: '工作流目录', children: listTab },
-    ]} />
   )
 }
