@@ -171,7 +171,7 @@ class TaskEngine:
             else:
                 self._backend = AsyncioQueueBackend()
         await self._backend.start()
-        logging.getLogger("eap.tasks").info("引擎启动：%s × %d workers", type(self._backend).__name__, workers)
+        print(f"[tasks] 引擎启动：{type(self._backend).__name__} × {workers} workers")
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(workers)]
         self._scheduler = asyncio.create_task(self._schedule_loop())
         await self._recover_pending()
@@ -181,15 +181,23 @@ class TaskEngine:
 
         AsyncioQueueBackend 不持久——进程退出即丢队列内容，但 TaskRecord 已落库（PENDING）；
         不恢复则任务永远滞留。RUNNING/等待审批的快照态不在恢复范围（由 HITL/超时语义管辖）。
+        恢复范围：updated_at 早于本引擎启动时刻的 PENDING——排除本进程并发写入的记录，
+        也避免多测试/多引擎实例互相捞取对方刚提交的任务。
         """
+        from datetime import datetime, timezone
+
         from sqlalchemy import select
 
         from ..db import SessionLocal
         from ..models import TaskRecord
 
+        boot_at = datetime.now(timezone.utc).replace(tzinfo=None)
         with SessionLocal() as db:
             pending = db.scalars(
-                select(TaskRecord).where(TaskRecord.state == "PENDING").limit(100)).all()
+                select(TaskRecord)
+                .where(TaskRecord.state == "PENDING",
+                       TaskRecord.updated_at < boot_at)
+                .limit(100)).all()
             ids = [t.id for t in pending]
         for task_id in ids:
             await self.enqueue(task_id)

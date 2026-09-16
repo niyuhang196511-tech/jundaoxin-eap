@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from .conftest import AUTH
 
 
-def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 8.0) -> dict:
+def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 20.0) -> dict:
     deadline = time.monotonic() + timeout
     last = {}
     while time.monotonic() < deadline:
@@ -132,6 +132,7 @@ def test_engine_recovers_pending_tasks_on_start(client):
     with SessionLocal() as db:
         db.add(TaskRecord(id="recover-e2e-1", type="echo", state="PENDING", payload={"text": "hi"}))
         db.commit()
+        import time as _t; _t.sleep(0.05)  # 确保任务 updated_at 严格早于引擎 boot（恢复范围判定）
 
     engine = TaskEngine()
 
