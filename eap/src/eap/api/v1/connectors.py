@@ -56,9 +56,12 @@ def create_connector(body: ConnectorCreate, db: Session = fastapi.Depends(get_db
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 连接器 {body.name} 已注册")
     if body.kind == "rest" and not body.base_url.lower().startswith(("http://", "https://")):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7002 rest 连接器必须提供 http(s) base_url")
+    from ...security_crypto import encrypt_secret
+
     record = ConnectorRecord(
         name=body.name, kind=body.kind, description=body.description,
-        base_url=body.base_url, header_name=body.header_name, api_key=body.api_key,
+        base_url=body.base_url, header_name=body.header_name,
+        api_key=encrypt_secret(body.api_key),
         endpoints=[e.model_dump() for e in body.endpoints], enabled=body.enabled,
     )
     db.add(record)
@@ -85,7 +88,9 @@ async def validate_connector(name: str, db: Session = fastapi.Depends(get_db)):
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             headers = {}
             if record.api_key:
-                headers[record.header_name or "Authorization"] = record.api_key
+                from ...security_crypto import decrypt_secret
+
+                headers[record.header_name or "Authorization"] = decrypt_secret(record.api_key)
             resp = await client.get(_safe_url(record.base_url, "/"), headers=headers)
         record.status = "verified" if resp.status_code < 500 else "unreachable"
         detail = f"HTTP {resp.status_code}"

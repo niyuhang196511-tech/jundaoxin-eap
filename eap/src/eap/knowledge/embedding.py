@@ -51,7 +51,7 @@ class OpenAIEmbedder:
 
     def __init__(self, base_url: str, api_key: str, model: str = "text-embedding-3-small") -> None:
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        self.api_key = api_key  # 来自 env 配置（明文），非库内密文
         self.model = model
         self._client = httpx.Client(timeout=30.0)
 

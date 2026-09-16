@@ -61,7 +61,9 @@ def _rest_handler(record: ConnectorRecord, endpoint: dict):
         url = _safe_url(record.base_url, endpoint.get("path") or "")
         headers = {}
         if record.api_key:
-            headers[record.header_name or "Authorization"] = record.api_key
+            from ..security_crypto import decrypt_secret
+
+            headers[record.header_name or "Authorization"] = decrypt_secret(record.api_key)
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
             if method == "GET":
                 resp = await client.request(method, url, params=args, headers=headers)

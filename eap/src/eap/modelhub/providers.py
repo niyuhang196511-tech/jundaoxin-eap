@@ -39,6 +39,15 @@ class LLMResult:
     latency_ms: int = 0
 
 
+def _bearer(stored: str | None) -> str | None:
+    """静态存储的 api_key → 请求用明文（enc1: 密文解密；明文兼容期原样）。"""
+    if not stored:
+        return stored
+    from ..security_crypto import decrypt_secret
+
+    return decrypt_secret(stored)
+
+
 class ProviderError(Exception):
     """供应商调用失败——由路由器捕获并走降级链。"""
 
@@ -152,7 +161,7 @@ class OpenAICompatProvider:
             resp = await self._client.post(
                 f"{record.base_url.rstrip('/')}/chat/completions",
                 json=payload,
-                headers={"Authorization": f"Bearer {record.api_key}"},
+                headers={"Authorization": f"Bearer {_bearer(record.api_key)}"},
             )
             resp.raise_for_status()
         except (httpx.HTTPError, httpx.StreamError) as e:
@@ -187,7 +196,7 @@ class OpenAICompatProvider:
                 "POST",
                 f"{record.base_url.rstrip('/')}/chat/completions",
                 json=payload,
-                headers={"Authorization": f"Bearer {record.api_key}"},
+                headers={"Authorization": f"Bearer {_bearer(record.api_key)}"},
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():

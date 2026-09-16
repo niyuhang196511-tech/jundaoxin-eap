@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # 资源服务器模式（M6）：外部 IdP access token 的 aud 约束（空=不校验）
     jwt_audience: str | None = None
 
+    # 静态秘密加密密钥（M8）：模型/连接器的 api_key 静态存储加密（Fernet）；未配置 = 明文存储（仅开发）
+    secret_key: str | None = None
+
     # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
     redis_url: str | None = None
 

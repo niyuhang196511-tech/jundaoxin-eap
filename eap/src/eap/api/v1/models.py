@@ -34,9 +34,12 @@ def register_model(body: ModelRegister, db: Session = fastapi.Depends(get_db)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 模型 {body.name} 已注册")
     if body.provider == "openai_compat" and not (body.base_url and body.api_key):
         raise fastapi.HTTPException(status_code=400, detail="EAP-4000 openai_compat 需要 base_url 与 api_key")
+    from ...security_crypto import encrypt_secret
+
     record = ModelRecord(
         name=body.name, capabilities=body.capabilities, provider=body.provider,
-        base_url=body.base_url, api_key=body.api_key, remote_model=body.remote_model,
+        base_url=body.base_url, api_key=encrypt_secret(body.api_key),
+        remote_model=body.remote_model,
         priority=body.priority, notes=body.notes,
     )
     db.add(record)
