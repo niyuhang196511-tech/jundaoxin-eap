@@ -1,100 +1,290 @@
-"use client"
+'use client'
 
-import { useEffect, useState } from 'react'
-import { Button, Card, Input, Space, Table, Typography } from 'antd'
+import { useCallback, useEffect, useState } from 'react'
+import { BookOpen, FileText, Plus, Search, Trash2 } from 'lucide-react'
+import {
+  Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Skeleton,
+  Textarea, toast,
+} from '@/components/ui'
 import { api } from '@/lib/api'
 
-type KB = { name: string; title: string; template: string }
-type Doc = { id: number; title: string; source: string }
-type Hit = { content: string; score: number; citation: { document: string; chunk_index: number } }
+interface KbItem {
+  id: number
+  name: string
+  title: string
+  template: string
+  embedding_provider: string
+}
 
+interface DocItem {
+  id: number
+  title: string
+  source: string
+  meta: Record<string, unknown>
+}
+
+interface Hit {
+  content: string
+  score: number
+  citation: { kb?: string; document?: string; chunk_index?: number }
+}
+
+/** 知识库页（RAGFlow/MaxKB 体验）：库卡片 → 库详情（文档 + 摄入 + 召回测试） */
 export default function KnowledgePage() {
-  const [kbs, setKbs] = useState<KB[]>([])
-  const [docs, setDocs] = useState<Doc[]>([])
-  const [cur, setCur] = useState<string | null>(null)
-  const [hits, setHits] = useState<Hit[] | null>(null)
-  const [query, setQuery] = useState('')
-  const [title, setTitle] = useState('')
-  const [text, setText] = useState('')
-  const [newName, setNewName] = useState('')
-  const [newTitle, setNewTitle] = useState('')
+  const [kbs, setKbs] = useState<KbItem[] | null>(null)
+  const [active, setActive] = useState<string | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [form, setForm] = useState({ name: '', title: '', template: 'doc' })
 
-  const load = async () => setKbs(await api<KB[]>('GET', '/api/v1/kb'))
-  const loadDocs = async (name: string) => {
-    setCur(name)
-    setDocs(await api<Doc[]>('GET', `/api/v1/kb/${name}/documents`))
+  const loadKbs = useCallback(async () => {
+    try {
+      const list = await api<KbItem[]>('GET', '/api/v1/kb')
+      setKbs(list)
+    } catch (e) {
+      toast.error(`加载知识库失败：${(e as Error).message}`)
+      setKbs([])
+    }
+  }, [])
+  useEffect(() => { loadKbs() }, [loadKbs])
+
+  const createKb = async () => {
+    try {
+      await api('POST', '/api/v1/kb', form)
+      toast.success(`知识库 ${form.name} 已创建`)
+      setCreateOpen(false)
+      setForm({ name: '', title: '', template: 'doc' })
+      loadKbs()
+    } catch (e) {
+      toast.error(`创建失败：${(e as Error).message}`)
+    }
   }
-  useEffect(() => { load() }, [])
+
+  if (active) {
+    return <KbDetail name={active} onBack={() => { setActive(null); loadKbs() }} />
+  }
 
   return (
-    <>
-      <Typography.Title level={4} style={{ marginTop: 0 }}>知识库</Typography.Title>
-      <Card variant="outlined" title="知识库实例">
-        <Table<KB>
-          rowKey="name" size="small" pagination={false} dataSource={kbs}
-          columns={[
-            { title: '名称', dataIndex: 'name', render: (v, k) => <b>{v}</b> },
-            { title: '标题', dataIndex: 'title' },
-            { title: '模板', dataIndex: 'template' },
-            { title: '操作', render: (_, k) => <Button size="small" type="link" onClick={() => loadDocs(k.name)}>管理</Button> },
-          ]}
-        />
-        <Space.Compact style={{ width: '100%', marginTop: 12 }}>
-          <Input placeholder="name" value={newName} onChange={e => setNewName(e.target.value)} style={{ width: 200 }} />
-          <Input placeholder="标题" value={newTitle} onChange={e => setNewTitle(e.target.value)} style={{ width: 260 }} />
-          <Button type="primary" onClick={async () => {
-            await api('POST', '/api/v1/kb', { name: newName.trim(), title: newTitle })
-            setNewName(''); setNewTitle(''); load()
-          }}>新建知识库</Button>
-        </Space.Compact>
-      </Card>
-
-      {cur && (
-        <>
-          <Table<Doc>
-            title={() => `文档（${cur}）`}
-            rowKey="id" size="small" pagination={false} dataSource={docs}
-            columns={[
-              { title: 'ID', dataIndex: 'id', width: 60 },
-              { title: '标题', dataIndex: 'title' },
-              { title: '来源', dataIndex: 'source' },
-              { title: '操作', render: (_, d) => (
-                <Button size="small" type="link" danger onClick={async () => {
-                  await api('DELETE', `/api/v1/kb/${cur}/documents/${d.id}`); loadDocs(cur)
-                }}>删除</Button>) },
-            ]}
-          />
-          <Typography.Title level={5}>检索测试</Typography.Title>
-          <Space.Compact style={{ width: '100%' }}>
-            <Input placeholder="检索问题" value={query} onChange={e => setQuery(e.target.value)}
-              onPressEnter={async () => {
-                const d = await api<any>('POST', `/api/v1/kb/${cur}/retrieve`, { query, top_k: 5 })
-                setHits(d.hits)
-              }} />
-            <Button type="primary" onClick={async () => {
-              const d = await api<any>('POST', `/api/v1/kb/${cur}/retrieve`, { query, top_k: 5 })
-              setHits(d.hits)
-            }}>检索</Button>
-          </Space.Compact>
-          {hits !== null && (hits.length
-            ? hits.map((h, i) => (
-              <div key={i} style={{ border: '1px solid #26385a', borderRadius: 8, padding: 10, marginTop: 8 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  [{h.score}] {h.citation.document} #{h.citation.chunk_index}
-                </Typography.Text>
-                <div style={{ fontSize: 12.5, marginTop: 4 }}>{h.content}</div>
-              </div>
-            ))
-            : <Typography.Text type="secondary">（无命中）</Typography.Text>)}
-          <Typography.Title level={5}>摄入文档</Typography.Title>
-          <Input placeholder="标题" value={title} onChange={e => setTitle(e.target.value)} />
-          <Input.TextArea placeholder="正文（空行分段，自动分块+嵌入）" rows={4} value={text} onChange={e => setText(e.target.value)} />
-          <Button type="primary" onClick={async () => {
-            await api('POST', `/api/v1/kb/${cur}/documents`, { title, text })
-            setTitle(''); setText(''); loadDocs(cur)
-          }}>摄入</Button>
-        </>
+    <div>
+      <PageHeader title="知识库" description="文档摄入 / 三路混合检索 / 引用溯源"
+        actions={<Button variant="primary" onClick={() => setCreateOpen(true)}><Plus className="size-3.5" />新建知识库</Button>} />
+      {!kbs ? (
+        <div className="grid grid-cols-3 gap-4">
+          <Skeleton className="h-28" /><Skeleton className="h-28" /><Skeleton className="h-28" />
+        </div>
+      ) : kbs.length === 0 ? (
+        <Card><EmptyState title="还没有知识库" description="创建第一个知识库并摄入文档" icon={<BookOpen className="size-10" />} /></Card>
+      ) : (
+        <div className="grid grid-cols-3 gap-4">
+          {kbs.map(kb => (
+            <Card key={kb.name} className="cursor-pointer transition-shadow hover:shadow-md"
+              onClick={() => setActive(kb.name)}>
+              <CardBody>
+                <div className="flex items-center gap-2.5">
+                  <span className="flex size-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-300">
+                    <BookOpen className="size-4.5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-ink">{kb.title || kb.name}</p>
+                    <p className="text-[11px] text-ink-3">{kb.name}</p>
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center gap-1.5">
+                  <Badge tone={kb.template === 'faq' ? 'amber' : 'green'}>{kb.template}</Badge>
+                  <Badge tone="gray">{kb.embedding_provider}</Badge>
+                </div>
+              </CardBody>
+            </Card>
+          ))}
+        </div>
       )}
-    </>
+
+      <DialogContent open={createOpen} onOpenChange={setCreateOpen}
+        title="新建知识库" description="模板决定摄入形态：doc 按分块索引 / faq 问答对整条成块"
+        footer={<>
+          <Button variant="ghost" onClick={() => setCreateOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={createKb} disabled={!form.name}>创建</Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>名称（小写字母/数字/连字符）</Label>
+            <Input value={form.name} placeholder="product-docs"
+              onChange={e => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <Label>显示名</Label>
+            <Input value={form.title} placeholder="产品文档库"
+              onChange={e => setForm({ ...form, title: e.target.value })} />
+          </div>
+          <div>
+            <Label>模板</Label>
+            <select value={form.template} onChange={e => setForm({ ...form, template: e.target.value })}
+              className="h-9 w-full rounded-lg border border-line bg-surface px-3 text-[13px] text-ink">
+              <option value="doc">doc（文档分块）</option>
+              <option value="faq">faq（问答对）</option>
+            </select>
+          </div>
+        </div>
+      </DialogContent>
+    </div>
+  )
+}
+
+function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
+  const [docs, setDocs] = useState<DocItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [ingestOpen, setIngestOpen] = useState(false)
+  const [ingestTitle, setIngestTitle] = useState('')
+  const [ingestText, setIngestText] = useState('')
+  const [ingesting, setIngesting] = useState(false)
+  const [query, setQuery] = useState('')
+  const [hits, setHits] = useState<Hit[] | null>(null)
+  const [searching, setSearching] = useState(false)
+
+  const loadDocs = useCallback(async () => {
+    try {
+      setDocs(await api<DocItem[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/documents`))
+    } catch (e) {
+      toast.error(`加载文档失败：${(e as Error).message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [name])
+  useEffect(() => { loadDocs() }, [loadDocs])
+
+  const ingest = async () => {
+    if (!ingestTitle.trim() || !ingestText.trim()) {
+      toast.error('标题与正文均必填')
+      return
+    }
+    setIngesting(true)
+    try {
+      await api('POST', `/api/v1/kb/${encodeURIComponent(name)}/documents`,
+        { title: ingestTitle, text: ingestText })
+      toast.success('文档已摄入（分块 → 嵌入 → 图谱索引）')
+      setIngestOpen(false)
+      setIngestTitle('')
+      setIngestText('')
+      loadDocs()
+    } catch (e) {
+      toast.error(`摄入失败：${(e as Error).message}`)
+    } finally {
+      setIngesting(false)
+    }
+  }
+
+  const removeDoc = async (docId: number) => {
+    try {
+      await api('DELETE', `/api/v1/kb/${encodeURIComponent(name)}/documents/${docId}`)
+      toast.success('文档已删除（chunk/图谱/向量级联清理）')
+      loadDocs()
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    }
+  }
+
+  const search = async () => {
+    if (!query.trim()) return
+    setSearching(true)
+    try {
+      const r = await api<{ hits: Hit[] }>('POST', `/api/v1/kb/${encodeURIComponent(name)}/retrieve`,
+        { query, top_k: 5 })
+      setHits(r.hits)
+    } catch (e) {
+      toast.error(`检索失败：${(e as Error).message}`)
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  return (
+    <div>
+      <PageHeader title={name} description="文档管理 / 召回测试"
+        actions={<Button variant="secondary" onClick={onBack}>返回列表</Button>} />
+
+      <div className="grid grid-cols-[1fr_400px] items-start gap-4">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+              <FileText className="size-4 text-ink-3" />文档（{docs.length}）
+            </p>
+            <Button variant="primary" onClick={() => setIngestOpen(true)}>
+              <Plus className="size-3.5" />摄入文档
+            </Button>
+          </div>
+          <div className="rounded-[--radius-card] border border-line bg-surface">
+            {loading ? (
+              <div className="space-y-2 p-4"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>
+            ) : docs.length === 0 ? (
+              <EmptyState title="暂无文档" description="摄入纯文本后自动分块、嵌入并建立图谱索引" />
+            ) : (
+              <div className="divide-y divide-line">
+                {docs.map(d => (
+                  <div key={d.id} className="flex items-center gap-3 px-4 py-3">
+                    <FileText className="size-4 shrink-0 text-ink-3" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[13px] font-medium text-ink">{d.title}</p>
+                      <p className="text-[11px] text-ink-3">
+                        {d.source || 'text'}{(d.meta as { type?: string })?.type ? ` · ${(d.meta as { type?: string }).type}` : ''}
+                      </p>
+                    </div>
+                    <Badge tone={(d.meta as { type?: string })?.type === 'faq' ? 'amber' : 'green'}>
+                      {(d.meta as { type?: string })?.type === 'faq' ? 'FAQ' : '已索引'}
+                    </Badge>
+                    <Button size="xs" variant="ghost" onClick={() => removeDoc(d.id)} title="删除">
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <Card>
+          <CardBody className="space-y-3">
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+              <Search className="size-4 text-brand-500" />召回测试
+            </p>
+            <Textarea rows={2} value={query} placeholder="输入查询，验证三路混合检索…"
+              onChange={e => setQuery(e.target.value)} />
+            <Button variant="primary" className="w-full" onClick={search} loading={searching}>
+              检索 top 5
+            </Button>
+            {hits !== null && (
+              <div className="space-y-2">
+                {hits.length === 0 && <p className="py-2 text-center text-xs text-ink-3">无命中</p>}
+                {hits.map((h, i) => (
+                  <div key={i} className="rounded-lg border border-line bg-surface-2 p-2.5">
+                    <div className="mb-1 flex items-center justify-between">
+                      <Badge tone="brand">[{i + 1}] {(h.citation.document ?? '').slice(0, 24)}</Badge>
+                      <span className="text-[11px] text-ink-3">score {h.score.toFixed(3)}</span>
+                    </div>
+                    <p className="line-clamp-3 text-[12px] text-ink-2">{h.content}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+
+      <DialogContent open={ingestOpen} onOpenChange={setIngestOpen}
+        title={`摄入文档 · ${name}`} description="纯文本摄入：自动分块 → 嵌入 → 三路索引"
+        footer={<>
+          <Button variant="ghost" onClick={() => setIngestOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={ingest} loading={ingesting}>摄入</Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>文档标题</Label>
+            <Input value={ingestTitle} onChange={e => setIngestTitle(e.target.value)} placeholder="产品手册第一章" />
+          </div>
+          <div>
+            <Label>正文（空行分段有助于分块质量）</Label>
+            <Textarea rows={10} value={ingestText} onChange={e => setIngestText(e.target.value)} />
+          </div>
+        </div>
+      </DialogContent>
+    </div>
   )
 }
