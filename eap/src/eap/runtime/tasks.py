@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -141,9 +142,30 @@ class TaskEngine:
             else:
                 self._backend = AsyncioQueueBackend()
         await self._backend.start()
-        print(f"[tasks] 引擎启动：{type(self._backend).__name__} × {workers} workers")
+        logging.getLogger("eap.tasks").info("引擎启动：%s × %d workers", type(self._backend).__name__, workers)
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(workers)]
         self._scheduler = asyncio.create_task(self._schedule_loop())
+        await self._recover_pending()
+
+    async def _recover_pending(self) -> None:
+        """崩溃恢复（M7）：把重启前遗留在 PENDING 的任务重新入队。
+
+        AsyncioQueueBackend 不持久——进程退出即丢队列内容，但 TaskRecord 已落库（PENDING）；
+        不恢复则任务永远滞留。RUNNING/等待审批的快照态不在恢复范围（由 HITL/超时语义管辖）。
+        """
+        from sqlalchemy import select
+
+        from ..db import SessionLocal
+        from ..models import TaskRecord
+
+        with SessionLocal() as db:
+            pending = db.scalars(
+                select(TaskRecord).where(TaskRecord.state == "PENDING").limit(100)).all()
+            ids = [t.id for t in pending]
+        for task_id in ids:
+            await self.enqueue(task_id)
+        if ids:
+            logging.getLogger("eap.tasks").info("恢复 %d 个遗留 PENDING 任务: %s", len(ids), ids)
 
     async def stop(self) -> None:
         for w in self._workers:
@@ -299,6 +321,8 @@ class TaskEngine:
         self._mark(task_id, "COMPLETED", result)
 
     def _mark(self, task_id: str, state: str, result: dict) -> None:
+        from ..observability.metrics import incr
+
         with SessionLocal() as db:
             task = db.get(TaskRecord, task_id)
             if task is None:
@@ -306,6 +330,10 @@ class TaskEngine:
             task.state = state
             task.result = result
             db.commit()
+        try:
+            incr("eap_tasks_total", {"state": state})
+        except Exception:
+            pass
 
     # ---------- 内置处理器 ----------
 

@@ -118,3 +118,41 @@ def test_approve_non_waiting_task_conflict(client: TestClient):
     resp = client.post(f"/api/v1/tasks/{task_id}/approve", headers=AUTH,
                        json={"decision": True})
     assert resp.status_code == 409
+
+
+def test_engine_recovers_pending_tasks_on_start(client):
+    """崩溃恢复：启动时遗留 PENDING 任务被重新入队执行（M7 可靠性）。"""
+    import asyncio
+
+    from eap.db import SessionLocal
+    from eap.models import TaskRecord
+    from eap.runtime.tasks import TaskEngine
+
+    # 落一个 PENDING 记录（模拟崩溃前未执行完的任务）
+    with SessionLocal() as db:
+        db.add(TaskRecord(id="recover-e2e-1", type="echo", state="PENDING", payload={"text": "hi"}))
+        db.commit()
+
+    engine = TaskEngine()
+
+    async def echo_handler(payload: dict, on_progress=None) -> dict:
+        return {"echo": payload.get("text", "")}
+
+    engine.register_handler("echo", echo_handler)
+
+    async def scenario():
+        await engine.start(workers=1)
+        try:
+            deadline = asyncio.get_running_loop().time() + 5
+            while asyncio.get_running_loop().time() < deadline:
+                with SessionLocal() as db:
+                    state = db.get(TaskRecord, "recover-e2e-1").state
+                if state == "COMPLETED":
+                    break
+                await asyncio.sleep(0.2)
+            with SessionLocal() as db:
+                assert db.get(TaskRecord, "recover-e2e-1").state == "COMPLETED"
+        finally:
+            await engine.stop()
+
+    asyncio.run(scenario())

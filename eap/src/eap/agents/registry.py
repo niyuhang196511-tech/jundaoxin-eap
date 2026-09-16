@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import uuid
 from dataclasses import dataclass, field
 
@@ -136,7 +137,7 @@ class AgentRegistry:
                     importlib.import_module(mod)
                 reloaded += 1
             except Exception as e:
-                print(f"[registry] 热加载模块 {mod} 失败: {e}")
+                logging.getLogger("eap.registry").warning("热加载模块 %s 失败: %s", mod, e)
         for name in self._agents:
             await self.start_agent(name)
         return reloaded
@@ -153,7 +154,7 @@ class AgentRegistry:
                 try:
                     ep.load()
                 except Exception as e:  # 单个包失败不影响平台
-                    print(f"[registry] entry_point {ep.name} 加载失败: {e}")
+                    logging.getLogger("eap.registry").warning("entry_point %s 加载失败: %s", ep.name, e)
         except Exception:
             pass
 
@@ -166,7 +167,7 @@ class AgentRegistry:
             try:
                 importlib.import_module(mod)
             except Exception as e:
-                print(f"[registry] 模块 {mod} 加载失败: {e}")
+                logging.getLogger("eap.registry").warning("模块 %s 加载失败: %s", mod, e)
 
         # ③ 逐个启动
         for name in self._agents:
@@ -211,7 +212,15 @@ class AgentRegistry:
         except Exception:
             pass  # 灰度失败不阻断主流程
         try:
+            from ..observability.metrics import incr
+
             result: InvokeResult = await agent.instance.on_invoke(request)
+            incr("eap_agent_invocations_total", {"agent": name, "status": "ok"})
+        except Exception:
+            from ..observability.metrics import incr as _incr
+
+            _incr("eap_agent_invocations_total", {"agent": name, "status": "error"})
+            raise
         finally:
             if token is not None:
                 from ..runtime.canary import reset_override

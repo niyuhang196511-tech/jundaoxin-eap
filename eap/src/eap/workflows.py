@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from uuid import uuid4
 
@@ -42,7 +43,7 @@ async def load_enabled() -> int:
                 await registry.start_agent(spec.name)
                 count += 1
             except Exception as e:
-                print(f"[workflow] {record.name} 注册失败: {e}")
+                logging.getLogger("eap.workflow").warning("%s 注册失败: %s", record.name, e)
     return count
 
 

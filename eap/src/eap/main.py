@@ -122,6 +122,15 @@ def create_app() -> FastAPI:
             "agents": {a.manifest.name: a.status for a in registry.all()},
         }
 
+    @app.get("/metrics")
+    def metrics():
+        """Prometheus text exposition（进程内计数器，M7）。"""
+        from fastapi.responses import PlainTextResponse
+
+        from .observability.metrics import render
+
+        return PlainTextResponse(render(), media_type="text/plain; version=0.0.4")
+
     return app
 
 
