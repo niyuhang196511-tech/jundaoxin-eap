@@ -228,6 +228,7 @@ class AgentRegistry:
                 if span_cm is not None and span is not None:
                     span.record_exception(e)
                     span_cm.__exit__(type(e), e, e.__traceback__)
+                _incr = incr  # 局部绑定（异常路径计数复用同一导入）
                 _incr("eap_agent_invocations_total", {"agent": name, "status": "error"})
                 raise
             incr("eap_agent_invocations_total", {"agent": name, "status": "ok"})
