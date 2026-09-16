@@ -38,7 +38,10 @@ def resolve_tenant(
     db: Session = fastapi.Depends(get_db),
     authorization: str | None = fastapi.Security(fastapi.security.APIKeyHeader(name="Authorization", auto_error=False)),
 ) -> Tenant:
-    """Bearer 凭证三轨：嵌入会话令牌 → API Key → 外部 IdP JWT（资源服务器）。"""
+    """Bearer 凭证三轨：嵌入会话令牌 → API Key → 外部 IdP JWT（资源服务器）。
+
+    JWT 通道把租户写入请求级会话变量（PostgreSQL RLS 行级隔离依据，db.get_db 消费）。
+    """
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -91,6 +94,11 @@ def resolve_tenant(
             request.state.tenant_id = tenant.id
             request.state.user = identity["user"]
             request.state.roles = identity["roles"]
+            # PostgreSQL RLS（M9）：会话变量为行级隔离依据（策略 fail-closed）
+            if db.get_bind().dialect.name == "postgresql":
+                from sqlalchemy import text as _text
+
+                db.execute(_text("SET LOCAL eap.tenant_id = :t"), {"t": str(tenant.id)})
             return tenant
 
     raise fastapi.HTTPException(status_code=401, detail="EAP-1001 无效 API Key")
