@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
 import { Button, Modal, Space, Table, Tag } from 'antd'
-import { api } from '../api/client'
+import { api } from '@/lib/api'
 
 type Task = {
   task_id: string; type: string; state: string

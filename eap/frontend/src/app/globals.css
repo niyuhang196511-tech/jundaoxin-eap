@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* class 驱动暗色（顶栏切换，localStorage 持久化；SSR 初始亮色，挂载后同步） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------- 主题 tokens（Tailwind 4 CSS-first） ---------- */
+@theme {
+  /* 品牌色（indigo 系，对齐 Dify 主色） */
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+  --color-brand-300: #a5b4fc;
+  --color-brand-400: #818cf8;
+  --color-brand-500: #4f63f5;
+  --color-brand-600: #4353e8;
+  --color-brand-700: #3742c7;
+  --color-brand-800: #2e379e;
+  --color-brand-900: #2a317a;
+
+  /* 侧边栏（亮暗主题下均为深色，Dify 式） */
+  --color-sidebar: #10131c;
+  --color-sidebar-hover: #1b2030;
+  --color-sidebar-active: #2a3552;
+  --color-sidebar-ink: rgba(255, 255, 255, 0.72);
+
+  --radius-card: 12px;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-pop: 0 4px 6px -2px rgba(16, 24, 40, 0.05), 0 12px 16px -4px rgba(16, 24, 40, 0.1);
+}
+
+/* ---------- 亮暗双主题语义变量 ---------- */
+:root {
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #f9fafb;
+  --line: #e9edf3;
+  --ink: #101828;
+  --ink-2: #475467;
+  --ink-3: #98a2b3;
+  --hover: #f2f4f7;
+}
+
+.dark {
+  --bg: #0d0f14;
+  --surface: #14161d;
+  --surface-2: #191d26;
+  --line: #222633;
+  --ink: #f2f4f7;
+  --ink-2: #a4abc0;
+  --ink-3: #6a7288;
+  --hover: #1b2030;
+}
+
+/* 语义变量映射为工具类：bg-bg / bg-surface / border-line / text-ink / text-ink-2 … */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-hover: var(--hover);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 细滚动条（Dify 风格） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 130, 155, 0.35) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 155, 0.35);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}

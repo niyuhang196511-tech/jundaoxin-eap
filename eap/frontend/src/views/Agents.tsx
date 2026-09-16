@@ -1,8 +1,10 @@
+"use client"
+
 import { useEffect, useState } from 'react'
 import { Avatar, Button, Card, Space, Switch, Table, Tag, Typography } from 'antd'
 import { RobotOutlined, UserOutlined } from '@ant-design/icons'
 import { Bubble, Sender } from '@ant-design/x'
-import { api, sseInvoke } from '../api/client'
+import { api, sseInvoke } from '@/lib/api'
 
 type Agent = {
   name: string
@@ -13,7 +15,8 @@ type Agent = {
   embeddable: boolean
 }
 
-type Msg = { role: 'ai' | 'user'; content: string; loading?: boolean; cite?: string[]; steps?: string[] }
+type Citation = string | { document: string; chunk_index: number }
+type Msg = { role: 'ai' | 'user'; content: string; loading?: boolean; cite?: Citation[]; steps?: string[] }
 
 const ROLES = {
   ai: {

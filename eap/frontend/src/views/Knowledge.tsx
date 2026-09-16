@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
-import { Button, Input, Table, Typography } from 'antd'
-import { api } from '../api/client'
+import { Button, Card, Input, Space, Table, Typography } from 'antd'
+import { api } from '@/lib/api'
 
 type KB = { name: string; title: string; template: string }
 type Doc = { id: number; title: string; source: string }

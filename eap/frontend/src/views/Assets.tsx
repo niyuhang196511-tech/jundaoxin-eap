@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
-import { Button, Input, Table, Tabs, Tag } from 'antd'
-import { api } from '../api/client'
+import { Button, Input, Space, Table, Tabs, Tag } from 'antd'
+import { api } from '@/lib/api'
 
 /* ---------- 技能 ---------- */
 type Skill = { name: string; version: string; description: string; enabled: boolean }

@@ -1,14 +1,34 @@
-// 平台 API 客户端：开发用 dev key；生产经控制台登录换取用户 Token（docs/07 §1）
+// 平台 API 客户端（前后端分离部署）：
+// - API 基址：构建期 NEXT_PUBLIC_API_BASE_URL 指定后端地址（默认同源）
+// - 凭证：Bearer token，默认取构建期 NEXT_PUBLIC_EAP_TOKEN；顶栏「凭证」可写入
+//   localStorage 运行时覆盖（eap-token）。生产经控制台登录换取用户 Token（docs/07 §1）
 
-const H: Record<string, string> = {
-  'Content-Type': 'application/json',
-  Authorization: 'Bearer dev-key-1',
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? ''
+
+export function getToken(): string {
+  if (typeof window !== 'undefined') {
+    const saved = window.localStorage.getItem('eap-token')
+    if (saved) return saved
+  }
+  return process.env.NEXT_PUBLIC_EAP_TOKEN ?? ''
+}
+
+export function setToken(token: string) {
+  if (token) window.localStorage.setItem('eap-token', token)
+  else window.localStorage.removeItem('eap-token')
+}
+
+function headers(): Record<string, string> {
+  const h: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = getToken()
+  if (token) h.Authorization = `Bearer ${token}`
+  return h
 }
 
 export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, {
+  const r = await fetch(API_BASE + url, {
     method,
-    headers: H,
+    headers: headers(),
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   const d = await r.json().catch(() => ({}))
@@ -26,9 +46,9 @@ export async function sseInvoke(
   onEvent: (event: string, data: any) => void,
   sessionId?: string,
 ): Promise<void> {
-  const r = await fetch(`/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
+  const r = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
     method: 'POST',
-    headers: H,
+    headers: headers(),
     body: JSON.stringify(sessionId ? { input, stream: true, session_id: sessionId } : { input, stream: true }),
   })
   if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`)

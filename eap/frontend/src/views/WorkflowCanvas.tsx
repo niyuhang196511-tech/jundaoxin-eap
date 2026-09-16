@@ -1,3 +1,5 @@
+"use client"
+
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Background, Controls, Handle, Position,
@@ -5,7 +7,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Button, Input, Select, Table, Tabs, message } from 'antd'
-import { api } from '../api/client'
+import { api } from '@/lib/api'
 
 /* ---------- DSL 类型（与后端 runtime/workflow.py 对齐） ---------- */
 type Condition = { left?: string | null; op: string; right?: string | null }
@@ -77,7 +79,7 @@ function StepForm({ step, allIds, onChange }: {
       <Input addonBefore="id" value={step.id} style={row}
         onChange={e => onChange({ id: e.target.value })} />
       {step.type === 'llm' && (<>
-        <Input.TextArea addonBefore="system" rows={3} value={step.system ?? ''} style={row}
+        <Input.TextArea placeholder="system（系统提示词）" rows={3} value={step.system ?? ''} style={row}
           onChange={e => onChange({ system: e.target.value })} />
         <Input addonBefore="模型(auto=路由)" value={step.model ?? 'auto'} style={row}
           onChange={e => onChange({ model: e.target.value })} />
@@ -97,17 +99,17 @@ function StepForm({ step, allIds, onChange }: {
           onChange={e => { try { onChange({ tool_args: JSON.parse(e.target.value || '{}') }) } catch { /* 编辑中暂存 */ } }} />
       </>)}
       {step.type === 'branch' && (<>
-        <Input addonBefore="left" value={step.left ?? ''} style={row}
-          onChange={e => onChange({ left: e.target.value })} />
-        <Select value={step.op} style={{ ...row, width: '100%' }}
-          onChange={v => onChange({ op: v })}
+        <Input addonBefore="left" value={step.when?.left ?? ''} style={row}
+          onChange={e => onChange({ when: { op: step.when?.op ?? 'contains', ...step.when, left: e.target.value || null } })} />
+        <Select value={step.when?.op ?? 'contains'} style={{ ...row, width: '100%' }}
+          onChange={v => onChange({ when: { left: null, right: null, ...step.when, op: v } })}
           options={['contains', 'eq', 'ne', 'empty', 'not_empty'].map(op => ({ value: op, label: op }))} />
-        <Input addonBefore="right" value={step.right ?? ''} style={row}
-          onChange={e => onChange({ right: e.target.value })} />
-        <Select addonBefore="then" value={step.then_id} options={targetOptions} allowClear
-          style={row} onChange={v => onChange({ then_id: v ?? null })} placeholder="满足时跳转到" />
-        <Select addonBefore="else" value={step.else_id} options={targetOptions} allowClear
-          style={row} onChange={v => onChange({ else_id: v ?? null })} placeholder="不满足跳转到" />
+        <Input addonBefore="right" value={step.when?.right ?? ''} style={row}
+          onChange={e => onChange({ when: { op: step.when?.op ?? 'contains', ...step.when, right: e.target.value || null } })} />
+        <Select value={step.then_id} options={targetOptions} allowClear
+          style={row} onChange={v => onChange({ then_id: v ?? null })} placeholder="then：满足时跳转到" />
+        <Select value={step.else_id} options={targetOptions} allowClear
+          style={row} onChange={v => onChange({ else_id: v ?? null })} placeholder="else：不满足跳转到" />
       </>)}
       {step.type === 'parallel' && (<>
         <Input addonBefore="join_with" value={step.join_with ?? '\n\n'} style={row}

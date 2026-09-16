@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
 import { Button, Input, InputNumber, Table, Tabs, Tag, message } from 'antd'
-import { api } from '../api/client'
+import { api } from '@/lib/api'
 
 /* ---------- 发布治理 ---------- */
 type Release = {

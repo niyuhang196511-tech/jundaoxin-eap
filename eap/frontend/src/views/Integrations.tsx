@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
 import { Button, Input, Table, Tabs, Tag, message } from 'antd'
-import { api } from '../api/client'
+import { api } from '@/lib/api'
 
 /* ---------- 企业连接器 ---------- */
 type Connector = {

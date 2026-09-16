@@ -1,6 +1,8 @@
+"use client"
+
 import { useEffect, useState } from 'react'
-import { Alert, Button, Input, Table } from 'antd'
-import { api } from '../api/client'
+import { Alert, Button, Input, Space, Table } from 'antd'
+import { api } from '@/lib/api'
 
 type DS = { name: string; description: string; cases: number }
 type RunResult = {
