@@ -138,9 +138,11 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
   const [ingesting, setIngesting] = useState(false)
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const [parser, setParser] = useState('local')
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
+  const [previewDoc, setPreviewDoc] = useState<{ id: number; title: string } | null>(null)
 
   const loadDocs = useCallback(async () => {
     try {
@@ -189,6 +191,7 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
     try {
       const body = new FormData()
       body.append('file', file)
+      if (parser !== 'local') body.append('parser', parser)
       const r = await fetch(`/api/v1/kb/${encodeURIComponent(name)}/upload`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${localStorage.getItem('eap-token') ?? ''}` },
@@ -196,7 +199,7 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
       })
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.detail ?? `HTTP ${r.status}`)
-      toast.success(`${file.name} 已上传，解析与摄入异步执行中`)
+      toast.success(`${file.name} 已上传（${parser} 后端），解析与摄入异步执行中`)
       // 轮询摄入任务完成后刷新文档列表
       const poll = setInterval(async () => {
         try {
@@ -246,6 +249,13 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
               <FileText className="size-4 text-ink-3" />文档（{docs.length}）
             </p>
             <div className="flex items-center gap-2">
+              <select value={parser} onChange={e => setParser(e.target.value)}
+                title="解析后端"
+                className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+                <option value="local">local（内置）</option>
+                <option value="mineru_cloud">MinerU 云端</option>
+                <option value="mineru_selfhosted">MinerU 自托管</option>
+              </select>
               <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden"
                 onChange={e => {
                   const f = e.target.files?.[0]
@@ -269,13 +279,14 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
               <div className="divide-y divide-line">
                 {docs.map(d => (
                   <div key={d.id} className="flex items-center gap-3 px-4 py-3">
-                    <FileText className="size-4 shrink-0 text-ink-3" />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] font-medium text-ink">{d.title}</p>
+                    <button className="min-w-0 flex-1 cursor-pointer text-left"
+                      onClick={() => setPreviewDoc({ id: d.id, title: d.title })}>
+                      <FileText className="mr-2 inline size-4 text-ink-3" />
+                      <span className="truncate text-[13px] font-medium text-ink">{d.title}</span>
                       <p className="text-[11px] text-ink-3">
-                        {d.source || 'text'}{(d.meta as { type?: string })?.type ? ` · ${(d.meta as { type?: string }).type}` : ''}
+                        {d.source || 'text'}{(d.meta as { type?: string })?.type ? ` · ${(d.meta as { type?: string }).type}` : ''} · 点击查看分块
                       </p>
-                    </div>
+                    </button>
                     <Badge tone={(d.meta as { type?: string })?.type === 'faq' ? 'amber' : 'green'}>
                       {(d.meta as { type?: string })?.type === 'faq' ? 'FAQ' : '已索引'}
                     </Badge>
@@ -317,6 +328,12 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
         </Card>
       </div>
 
+      {/* 分块预览抽屉（M14） */}
+      {previewDoc && (
+        <ChunksDrawer kb={name} doc={previewDoc}
+          onClose={() => setPreviewDoc(null)} />
+      )}
+
       <DialogContent open={ingestOpen} onOpenChange={setIngestOpen}
         title={`摄入文档 · ${name}`} description="纯文本摄入：自动分块 → 嵌入 → 三路索引"
         footer={<>
@@ -335,5 +352,47 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
         </div>
       </DialogContent>
     </div>
+  )
+}
+
+/** 分块预览抽屉：文档 chunk 列表（内容/索引），调参验证的分块效果直接可见 */
+function ChunksDrawer({ kb, doc, onClose }: {
+  kb: string
+  doc: { id: number; title: string }
+  onClose: () => void
+}) {
+  const [chunks, setChunks] = useState<{ id: number; idx: number; content: string }[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api<{ id: number; idx: number; content: string }[]>(
+      'GET', `/api/v1/kb/${encodeURIComponent(kb)}/documents/${doc.id}/chunks`)
+      .then(setChunks)
+      .catch(e => toast.error(`加载分块失败：${(e as Error).message}`))
+      .finally(() => setLoading(false))
+  }, [kb, doc.id])
+
+  return (
+    <DialogContent open onOpenChange={o => !o && onClose()}
+      title={`分块预览 · ${doc.title}`} wide
+      description={`${kb} / 文档 #${doc.id} · ${chunks.length} 块`}>
+      {loading ? (
+        <div className="space-y-2"><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
+      ) : chunks.length === 0 ? (
+        <p className="py-6 text-center text-xs text-ink-3">该文档没有分块</p>
+      ) : (
+        <div className="space-y-2">
+          {chunks.map(c => (
+            <div key={c.id} className="rounded-lg border border-line bg-surface-2 p-2.5">
+              <p className="mb-1 flex items-center justify-between text-[11px] text-ink-3">
+                <Badge tone="gray">#{c.idx}</Badge>
+                <span>{c.content.length} 字符</span>
+              </p>
+              <p className="whitespace-pre-wrap text-[12px] text-ink-2">{c.content}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </DialogContent>
   )
 }
