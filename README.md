@@ -35,6 +35,7 @@ cd frontend && pnpm install && pnpm dev   # 控制台 → http://localhost:3000
 | 07 | [API / SDK / Protocol 规范](docs/07-API-SDK-Protocol规范.md) | 凭证、对外 API、Manifest Schema、platform-sdk、JS SDK |
 | 08 | [观测评测成本与 SLO](docs/08-观测评测成本与SLO.md) | 链路追踪、监控告警、评测门禁、成本中心、SLO/容量 |
 | 09 | [技术选型与实施路线](docs/09-技术选型与实施路线.md) | 选型与许可证风险、M1/M2/M3 里程碑、团队分工、风险清单 |
+| 11 | [生产部署 Runbook](docs/11-production-runbook.md) | 上线必改清单、迁移流程、备份恢复、健康告警与常见故障 |
 
 ## 架构图源文件
 
