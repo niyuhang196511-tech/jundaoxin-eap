@@ -49,3 +49,26 @@ describe('canvas dsl 转换', () => {
     expect(lp.body?.map(b => b.id)).toEqual(['w1', 'w2'])
   })
 })
+
+describe('parallel 分支可视化往返', () => {
+  it('expand/collapse：首步骤类型回填', async () => {
+    const { expandParallelBranches, collapseParallelBranches } = await import('@/components/canvas/dsl')
+    const steps = [{
+      id: 'par', type: 'parallel' as const, join_with: '\n',
+      branches: [
+        { id: 'b1', steps: [{ id: 's1', type: 'llm' as const, system: 'A' }] },
+        { id: 'b2', steps: [{ id: 's2', type: 'tool' as const, tool_name: 't' }] },
+      ],
+    }]
+    const { branchNodes } = expandParallelBranches(steps)
+    expect(branchNodes).toHaveLength(2)
+    expect(branchNodes[0].step.id).toBe('par__branch__0')
+
+    const nodes = branchNodes.map(b => ({
+      id: b.step.id, position: { x: 0, y: 0 }, data: { stepType: b.step.type },
+    }))
+    const collapsed = collapseParallelBranches(steps, nodes as never)
+    expect(collapsed[0].branches?.[0].steps[0].type).toBe('llm')
+    expect(collapsed[0].branches?.[1].steps[0].type).toBe('tool')
+  })
+})

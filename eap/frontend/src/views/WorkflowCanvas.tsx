@@ -19,8 +19,9 @@ import { Badge, Button, Input, Table, toast } from '@/components/ui'
 import { ListPlus, Save } from 'lucide-react'
 import { api } from '@/lib/api'
 import {
-  autoLayout, collapseLoopBodies, expandLoopBodies, genEdgeId, genStepId, linearToEdges,
-  NODE_TYPES, BODY_PREFIX,
+  autoLayout, collapseLoopBodies, collapseParallelBranches, expandLoopBodies,
+  expandParallelBranches, genEdgeId, genStepId, linearToEdges,
+  NODE_TYPES, BODY_PREFIX, BRANCH_PREFIX,
   type NodeRun, type Step, type StepType, type WorkflowDsl, type WorkflowRun,
 } from '@/components/canvas/dsl'
 import { nodeTypes, type WfNodeData } from '@/components/canvas/WfNode'
@@ -79,13 +80,39 @@ function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
       })
     })
   }
+  // 并行分支可视化（M15）：branches 首步骤展开为分支子节点，横排挂在 parallel 节点下方
+  const { branchNodes } = expandParallelBranches(dsl.steps)
+  const byParallel = new Map<string, { index: number; step: Step }[]>()
+  for (const b of branchNodes) {
+    byParallel.set(b.parallelId, [...(byParallel.get(b.parallelId) ?? []), { index: b.index, step: b.step }])
+  }
+  for (const [pid, branches] of byParallel) {
+    const pNode = nodes.find(n => n.id === pid)
+    const baseX = (pNode?.position.x ?? 0) - ((branches.length - 1) * 120) / 2
+    branches.sort((a, b) => a.index - b.index).forEach((b, i) => {
+      nodes.push({
+        id: b.step.id,
+        type: 'wf',
+        position: { x: baseX + i * 240, y: (pNode?.position.y ?? 0) + 120 },
+        data: { stepId: b.step.id, stepType: b.step.type, title: b.step.title || '', status: 'idle' } satisfies WfNodeData,
+      })
+      edges.push({
+        id: `branch-edge-${pid}-${i}`,
+        source: pid,
+        target: b.step.id,
+        label: `分支 ${i + 1}`,
+        style: { stroke: '#db2777', strokeDasharray: '4 2' },
+        markerEnd: { type: 'arrowclosed' as const },
+      })
+    })
+  }
   return { nodes, edges }
 }
 
 function flowToDsl(dsl: WorkflowDsl, nodes: Node[], edges: Edge[]): WorkflowDsl {
-  // 循环体节点回收进 body（移出主图）；主图节点 = 无 BODY_PREFIX 的节点
-  const withCollapsedSteps = collapseLoopBodies(dsl.steps, nodes)
-  const mainNodes = nodes.filter(n => !n.id.includes(BODY_PREFIX))
+  // 循环体/并行分支节点回收（移出主图）；主图节点 = 无展开前缀的节点
+  const withCollapsedSteps = collapseParallelBranches(collapseLoopBodies(dsl.steps, nodes), nodes)
+  const mainNodes = nodes.filter(n => !n.id.includes(BODY_PREFIX) && !n.id.includes(BRANCH_PREFIX))
   const steps: Step[] = mainNodes.map(n => {
     const d = n.data as WfNodeData
     const prev = withCollapsedSteps.find(s => s.id === d.stepId)
@@ -98,7 +125,7 @@ function flowToDsl(dsl: WorkflowDsl, nodes: Node[], edges: Edge[]): WorkflowDsl 
     }
   })
   const dslEdges = edges
-    .filter(e => !e.id.startsWith('body-edge-'))
+    .filter(e => !e.id.startsWith('body-edge-') && !e.id.startsWith('branch-edge-'))
     .map(e => ({
       id: e.id,
       source: e.source,

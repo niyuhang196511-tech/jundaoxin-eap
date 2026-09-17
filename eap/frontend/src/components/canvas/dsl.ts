@@ -193,6 +193,44 @@ export function collapseLoopBodies(steps: Step[], nodes: Node[]): Step[] {
   })
 }
 
+/**
+ * 并行分支可视化（M15）：branches 的首步骤展开为分支子节点（同 loop 展开模式）。
+ * 子节点 id 规则 `${parallelId}__branch__${i}`；保存时按前缀回收进 branches[i].steps[0]。
+ * 分支的多步骤体仍在配置抽屉编辑（画布展开首步以表达拓扑）。
+ */
+export const BRANCH_PREFIX = '__branch__'
+
+export function expandParallelBranches(steps: Step[]): { steps: Step[]; branchNodes: { parallelId: string; index: number; step: Step }[] } {
+  const branchNodes: { parallelId: string; index: number; step: Step }[] = []
+  const expanded = steps.map(s => s)  // branches 不动，仅生成视图节点
+  steps.forEach(s => {
+    if (s.type !== 'parallel') return
+    ;(s.branches ?? []).forEach((b, i) => {
+      const head = b.steps[0] ?? { id: `${s.id}${BRANCH_PREFIX}${i}`, type: 'llm' as const, system: '' }
+      branchNodes.push({
+        parallelId: s.id, index: i,
+        step: { ...head, id: `${s.id}${BRANCH_PREFIX}${i}` },
+      })
+    })
+  })
+  return { steps: expanded, branchNodes }
+}
+
+/** 保存时：分支子节点的类型回填进 branches[i].steps[0]（首步骤），后续步骤保持抽屉编辑值 */
+export function collapseParallelBranches(steps: Step[], nodes: Node[]): Step[] {
+  return steps.map(s => {
+    if (s.type !== 'parallel') return s
+    const branches = (s.branches ?? []).map((b, i) => {
+      const viewId = `${s.id}${BRANCH_PREFIX}${i}`
+      const node = nodes.find(n => n.id === viewId)
+      if (!node || !b.steps.length) return b
+      const d = node.data as { stepType?: string }
+      return { ...b, steps: [{ ...b.steps[0], type: (d.stepType as 'llm' | 'tool' | 'retrieve') ?? b.steps[0].type }] }
+    })
+    return { ...s, branches }
+  })
+}
+
 /* ---------- 运行记录类型 ---------- */
 
 import type { Node } from '@xyflow/react'
