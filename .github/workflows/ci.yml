@@ -30,7 +30,9 @@ jobs:
           print('migration dry-run OK')
           "
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run pytest -q --ignore=tests/test_mcp.py --ignore=tests/test_tasks_redis.py
+      - name: MCP integration (live server)
+        run: uv run pytest tests/test_mcp.py tests/test_tasks_redis.py -q
         env:
           EAP_HOST: "127.0.0.1"
 

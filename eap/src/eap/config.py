@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True
 
+    # 测试子进程跳过 Alembic（库已 head；SQLite 父子进程并发 upgrade 会锁等待）
+    skip_migrations: bool = False
+
     # 插件目录（扩展开发体系）：手写工具/RAG 组件/Agent 的目录发现点，启动与 /plugins/reload 时加载
     plugins_dir: str = "./plugins"
 

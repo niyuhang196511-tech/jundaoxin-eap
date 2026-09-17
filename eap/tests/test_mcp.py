@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
-import threading
+import subprocess
+import sys
 import time
 
 import httpx
 import pytest
-import uvicorn
 
 # 固定回环地址 + 固定端口（全字面量；端口被占用则跳过本模块）
 TEST_HOST = "127.0.0.1"
@@ -30,27 +31,41 @@ def _port_free(port: int) -> bool:
 
 @pytest.fixture(scope="module")
 def live_server():
-    """独立线程跑真实 uvicorn（共享测试进程 settings/临时库）。"""
-    if not _port_free(MCP_TEST_PORT):
-        pytest.skip(f"端口 {MCP_TEST_PORT} 被占用，跳过 MCP 集成测试")
-    from eap.main import create_app
+    """独立进程跑真实 uvicorn（与 TestClient 的 app 实例完全隔离——同进程双实例的
+    MCP session manager / lifespan 互相干扰，全量顺序下 health 起不来）。
 
-    config = uvicorn.Config(create_app(), host=TEST_HOST, port=MCP_TEST_PORT, log_level="warning")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
+    共享同一测试库（EAP_DB_URL 由 conftest 设定），数据面与 TestClient 用例互通。
+    """
+    import os
+    import subprocess
+
+    if not _port_free(MCP_TEST_PORT):
+        # 端口被占：若是存活 eap 实例则复用（服务已就绪），否则跳过
         try:
-            if httpx.get("http://127.0.0.1:8931/health", timeout=1).status_code == 200:
-                break
+            if httpx.get(f"http://127.0.0.1:{MCP_TEST_PORT}/health", timeout=1).status_code == 200:
+                yield None
+                return
         except Exception:
-            time.sleep(0.2)
-    else:
-        raise RuntimeError("测试服务器未启动")
-    yield
-    server.should_exit = True
-    thread.join(timeout=5)
+            pass
+        pytest.skip(f"端口 {MCP_TEST_PORT} 被占用，跳过 MCP 集成测试")
+
+    env = {**os.environ, "EAP_HOST": TEST_HOST, "EAP_PORT": str(MCP_TEST_PORT), "EAP_SKIP_MIGRATIONS": "1"}
+    proc = subprocess.Popen([sys.executable, "-m", "eap"], env=env,
+                            stdout=None, stderr=None)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                if httpx.get(f"http://127.0.0.1:{MCP_TEST_PORT}/health", timeout=1).status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.3)
+        else:
+            raise RuntimeError("测试服务器未启动")
+        yield proc
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 def test_mcp_endpoint_raw_jsonrpc(live_server):

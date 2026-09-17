@@ -53,8 +53,15 @@ def init_db() -> None:
     - 存量库（表已存在但无 alembic_version）：stamp head 对齐（历史手工建表/手工 ALTER 的库），
       后续模型变更走 autogenerate 增量迁移
     - 已纳管库：upgrade head
+    - EAP_SKIP_MIGRATIONS=1（测试子进程）：仅 create_all + seed，不走 Alembic
+      （父子进程并发 upgrade 会 SQLite 锁等待）
     """
     from . import seed  # noqa: F401  确保种子逻辑可用
+
+    if get_settings().skip_migrations:
+        Base.metadata.create_all(engine)
+        seed.run(engine)
+        return
 
     inspector = inspect(engine)
     tables = inspector.get_table_names()
