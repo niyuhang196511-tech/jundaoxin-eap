@@ -86,13 +86,33 @@ services:
     environment:
       EAP_DB_URL: postgresql+psycopg://eap:eap@postgres:5432/eap
       EAP_REDIS_URL: redis://redis:6379/0
+      # CORS 白名单（逗号分隔）：控制台前端来源
+      EAP_CORS_ORIGINS: "http://localhost:3000"
+      # 容器内绑定全部网卡（M7 默认回环；容器必须显式放开，外层经端口映射/反代控制暴露面）
+      EAP_HOST: 0.0.0.0
       # 以下变量可由同目录 .env 覆盖（docker compose 自动读取）：
-      # EAP_DEV_API_KEY、EAP_SESSION_SECRET、EAP_OPENAI_*、EAP_EMBEDDING_PROVIDER ...
+      # EAP_DEV_API_KEY、EAP_SESSION_SECRET、EAP_SECRET_KEY（秘密加密，生产必配）、
+      # EAP_OIDC_*、EAP_OPENAI_*、EAP_EMBEDDING_PROVIDER ...
     env_file:
       - path: .env
         required: false
     ports:
       - "8300:8300"
+    restart: unless-stopped
+
+  # 控制台前端（Next.js 独立部署，与后端分开扩缩容）
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # 浏览器直接访问后端 API（NEXT_PUBLIC_* 构建期注入）
+        # M6：默认不注入 token（用户经 /login 登录）；确需免登录嵌入场景再显式设置
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8300}
+        NEXT_PUBLIC_EAP_TOKEN: ${NEXT_PUBLIC_EAP_TOKEN:-}
+    depends_on:
+      - eap
+    ports:
+      - "3000:3000"
     restart: unless-stopped
 
 volumes:

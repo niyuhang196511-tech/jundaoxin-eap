@@ -6,36 +6,38 @@ import {
   Blocks, BookOpen, Bot, ClipboardCheck, FlaskConical, Network, Plug, Puzzle, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { useI18n } from '@/lib/i18n'
 
 /** 控制台导航（Dify 式分组深色侧栏） */
 const GROUPS: { label: string; items: { href: string; label: string; icon: React.ReactNode }[] }[] = [
   {
-    label: '工作室',
+    label: 'nav.studio',
     items: [
-      { href: '/agents', label: '智能体', icon: <Bot className="size-4" /> },
-      { href: '/canvas', label: 'Workflow 画布', icon: <Workflow className="size-4" /> },
-      { href: '/assets', label: '技能 · Prompt', icon: <Blocks className="size-4" /> },
-      { href: '/extensions', label: '扩展中心', icon: <Puzzle className="size-4" /> },
+      { href: '/agents', label: 'nav.agents', icon: <Bot className="size-4" /> },
+      { href: '/canvas', label: 'nav.canvas', icon: <Workflow className="size-4" /> },
+      { href: '/assets', label: 'nav.assets', icon: <Blocks className="size-4" /> },
+      { href: '/extensions', label: 'nav.extensions', icon: <Puzzle className="size-4" /> },
     ],
   },
   {
-    label: '知识',
-    items: [{ href: '/kb', label: '知识库', icon: <BookOpen className="size-4" /> }],
+    label: 'nav.knowledge',
+    items: [{ href: '/kb', label: 'nav.kb', icon: <BookOpen className="size-4" /> }],
   },
   {
-    label: '运营',
+    label: 'nav.ops',
     items: [
-      { href: '/tasks', label: '任务 · 审批', icon: <ClipboardCheck className="size-4" /> },
-      { href: '/evals', label: '评测', icon: <FlaskConical className="size-4" /> },
-      { href: '/gov', label: '治理 · 成本', icon: <ShieldCheck className="size-4" /> },
-      { href: '/models', label: '模型中心', icon: <Network className="size-4" /> },
-      { href: '/conn', label: '连接器 · IM', icon: <Plug className="size-4" /> },
+      { href: '/tasks', label: 'nav.tasks', icon: <ClipboardCheck className="size-4" /> },
+      { href: '/evals', label: 'nav.evals', icon: <FlaskConical className="size-4" /> },
+      { href: '/gov', label: 'nav.gov', icon: <ShieldCheck className="size-4" /> },
+      { href: '/models', label: 'nav.models', icon: <Network className="size-4" /> },
+      { href: '/conn', label: 'nav.conn', icon: <Plug className="size-4" /> },
     ],
   },
 ]
 
 export function Sidebar() {
   const pathname = usePathname()
+  const { t } = useI18n()
   return (
     <aside className="fixed inset-y-0 left-0 z-40 flex w-56 flex-col bg-sidebar">
       {/* Logo 区 */}
@@ -52,7 +54,7 @@ export function Sidebar() {
       {/* 导航分组 */}
       <nav className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3">
         {GROUPS.map(group => (
-          <div key={group.label}>
+          <div key={t(group.label)}>
             <p className="px-2 pt-1 pb-1.5 text-[11px] font-medium tracking-wide text-white/35">
               {group.label}
             </p>
@@ -71,7 +73,7 @@ export function Sidebar() {
                     )}
                   >
                     <span className={active ? 'text-brand-300' : 'text-white/50'}>{item.icon}</span>
-                    {item.label}
+                    {t(item.label)}
                   </Link>
                 )
               })}
