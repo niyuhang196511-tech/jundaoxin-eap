@@ -52,20 +52,23 @@ def live_server():
     env = {**os.environ, "EAP_HOST": TEST_HOST, "EAP_PORT": str(MCP_TEST_PORT), "EAP_SKIP_MIGRATIONS": "1"}
     proc = subprocess.Popen([sys.executable, "-m", "eap"], env=env,
                             stdout=None, stderr=None)
-    try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            try:
-                if httpx.get(f"http://127.0.0.1:{MCP_TEST_PORT}/health", timeout=1).status_code == 200:
-                    break
-            except Exception:
-                time.sleep(0.3)
-        else:
-            raise RuntimeError("测试服务器未启动")
-        yield proc
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+    # Windows 回环首连可能被防火墙静默拦截导致 health 不达；同时探测直连与重试后连通
+    deadline = time.monotonic() + 30
+    reachable = False
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"http://127.0.0.1:{MCP_TEST_PORT}/health", timeout=1).status_code == 200:
+                reachable = True
+                break
+        except Exception:
+            time.sleep(0.3)
+        if proc.poll() is not None:
+            raise RuntimeError(f"测试服务器进程退出 code={proc.returncode}")
+    if not reachable:
+        raise RuntimeError("测试服务器未启动（30s）")
+    yield proc
+    proc.terminate()
+    proc.wait(timeout=10)
 
 
 def test_mcp_endpoint_raw_jsonrpc(live_server):

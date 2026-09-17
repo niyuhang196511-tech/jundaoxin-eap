@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, inspect, text as sa_text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_settings
+from .models import Base as _Base
 
 _settings = get_settings()
 
@@ -59,7 +60,7 @@ def init_db() -> None:
     from . import seed  # noqa: F401  确保种子逻辑可用
 
     if get_settings().skip_migrations:
-        Base.metadata.create_all(engine)
+        _Base.metadata.create_all(engine)
         seed.run(engine)
         return
 
