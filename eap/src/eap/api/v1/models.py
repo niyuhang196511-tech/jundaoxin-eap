@@ -28,24 +28,29 @@ def list_models(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("")
-def register_model(body: ModelRegister, db: Session = fastapi.Depends(get_db)):
+def register_model(body: ModelRegister, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """注册定制/专用模型：M1 直接上架（enabled=True）；评测门禁→灰度→上架流水线在 M2（docs/06 §4）。"""
     if db.scalar(select(ModelRecord).where(ModelRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 模型 {body.name} 已注册")
     if body.provider == "openai_compat" and not (body.base_url and body.api_key):
         raise fastapi.HTTPException(status_code=400, detail="EAP-4000 openai_compat 需要 base_url 与 api_key")
+    from ...observability import audit as _audit
     from ...security_crypto import encrypt_secret
 
-    record = ModelRecord(
+    _audit.record("model.register", actor=_audit.actor_of(request), target=body.name,
+                  detail={"provider": body.provider, "capabilities": body.capabilities,
+                          "priority": body.priority}, trace_id=getattr(request.state, "trace_id", ""),
+                  db=db)
+    model_record = ModelRecord(
         name=body.name, capabilities=body.capabilities, provider=body.provider,
         base_url=body.base_url, api_key=encrypt_secret(body.api_key),
         remote_model=body.remote_model,
         priority=body.priority, notes=body.notes,
     )
-    db.add(record)
+    db.add(model_record)
     db.commit()
-    return {"name": record.name, "capabilities": record.capabilities, "provider": record.provider,
-            "priority": record.priority, "enabled": record.enabled}
+    return {"name": model_record.name, "capabilities": model_record.capabilities, "provider": model_record.provider,
+            "priority": model_record.priority, "enabled": model_record.enabled}
 
 
 @router.patch("/{name}")

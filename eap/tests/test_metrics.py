@@ -36,3 +36,25 @@ def test_metrics_counters_increment(client: TestClient):
     client.get("/health")
     after = _counter(client.get("/metrics").text, series)
     assert after >= before + 2
+
+
+def test_audit_log_records_admin_ops(client: TestClient):
+    """M11 审计：策略创建/启停、任务审批落审计并可查询；敏感字段脱敏。"""
+    # 策略创建（含敏感形态 config 验证脱敏）
+    r = client.post("/api/v1/policies", headers=AUTH, json={
+        "name": "audit-test-policy", "tenant_id": 0, "kind": "model-allowlist",
+        "config": {"models": ["mock-llm"], "api_key": "should-be-masked"},
+    })
+    assert r.status_code == 200, r.text
+    r2 = client.post("/api/v1/policies/audit-test-policy/enabled?enabled=false", headers=AUTH)
+    assert r2.status_code == 200
+
+    logs = client.get("/api/v1/audit", headers=AUTH).json()
+    actions = [l["action"] for l in logs]
+    assert "policy.create" in actions and "policy.toggle" in actions
+    create_log = next(l for l in logs if l["action"] == "policy.create")
+    assert create_log["detail"]["config"]["api_key"] == "***"
+
+    # 按 action 过滤
+    filtered = client.get("/api/v1/audit", headers=AUTH, params={"action": "policy.toggle"}).json()
+    assert all(l["action"] == "policy.toggle" for l in filtered)

@@ -328,8 +328,17 @@ class TaskEngine:
 
         span_cm = None
         if otel_enabled():
+            # trace 传播：提交方经 payload._trace_id 透传（跨进程无上下文头，用属性关联）
+            with SessionLocal() as db:
+                _payload = db.get(TaskRecord, task_id)
+                submit_trace = (_payload.payload or {}).get("_trace_id", "") if _payload else ""
             span_cm = tracer().start_as_current_span(f"task.run {task_id}")
             span_cm.__enter__()
+            span = tracer().get_current_span()
+            if span is not None:
+                span.set_attribute("eap.task_id", task_id)
+                if submit_trace:
+                    span.set_attribute("eap.submit_trace_id", submit_trace)
         try:
             await self._run_one_inner(task_id)
         except Exception as e:

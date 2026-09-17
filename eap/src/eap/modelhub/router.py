@@ -45,11 +45,12 @@ class ModelHub:
         prefer: str | None = None,
         temperature: float = 0.7,
     ) -> Completion:
-        """遍历降级链：供应商失败自动切换下一个（docs/02 §5 ①）。"""
+        """遍历降级链：供应商失败自动切换下一个（docs/02 §5 ①）。每次尝试一个 LLM span。"""
         if prefer is None:
             from ..runtime.canary import current_model_override
 
             prefer = current_model_override()  # canary 灰度覆盖（显式 prefer 优先）
+        from ..observability.tracing import enabled as otel_enabled, tracer
         from ..runtime.policy import check_prompt, enforce_chain
 
         check_prompt(db, messages)  # Policy Engine：单次调用 prompt 上限
@@ -58,12 +59,26 @@ class ModelHub:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
         errors: list[str] = []
         for record in chain:
+            span_cm = tracer().start_as_current_span(
+                f"llm.complete {record.name}") if otel_enabled() else None
+            span = span_cm.__enter__() if span_cm is not None else None
+            if span is not None:
+                span.set_attribute("llm.model", record.name)
+                span.set_attribute("llm.provider", record.provider)
             try:
                 provider = get_provider(record.provider)
                 result = await provider.complete(record=record, messages=messages, tools=tools, temperature=temperature)
+                if span is not None:
+                    span.set_attribute("llm.tokens_out", result.tokens_out)
+                    span.set_attribute("llm.latency_ms", result.latency_ms)
                 return Completion(result=result, record=record)
             except ProviderError as e:
                 errors.append(str(e))
+                if span is not None:
+                    span.record_exception(e)
+            finally:
+                if span_cm is not None:
+                    span_cm.__exit__(None, None, None)
         raise ProviderError("所有模型均失败（降级链耗尽）: " + " | ".join(errors))
 
     async def stream(
@@ -94,6 +109,14 @@ class ModelHub:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
         errors: list[str] = []
         for record in chain:
+            from ..observability.tracing import enabled as otel_enabled, tracer
+
+            span_cm = tracer().start_as_current_span(
+                f"llm.stream {record.name}") if otel_enabled() else None
+            span = span_cm.__enter__() if span_cm is not None else None
+            if span is not None:
+                span.set_attribute("llm.model", record.name)
+                span.set_attribute("llm.provider", record.provider)
             provider = get_provider(record.provider)
             emitted = 0
             try:
@@ -107,8 +130,16 @@ class ModelHub:
                     record_usage("", 0, kind="chat", model=record.name,
                                  tokens_in=sum(max(1, len(str(m.get("content", "")))) // 4 for m in messages),
                                  tokens_out=max(1, emitted // 4), latency_ms=0)
+                    if span is not None:
+                        span.set_attribute("llm.tokens_out", max(1, emitted // 4))
+                    if span_cm is not None:
+                        span_cm.__exit__(None, None, None)
                     return
             except ProviderError as e:
+                if span is not None:
+                    span.record_exception(e)
+                if span_cm is not None:
+                    span_cm.__exit__(None, None, None)
                 if emitted:
                     return  # 已产出部分内容：中断重试会造成重复输出，就此收尾
                 errors.append(str(e))

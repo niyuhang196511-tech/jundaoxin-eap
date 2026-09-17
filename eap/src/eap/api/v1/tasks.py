@@ -50,8 +50,11 @@ def list_tasks(state: str | None = None, db: Session = fastapi.Depends(get_db)):
 
 @router.post("")
 async def submit_task(body: TaskSubmit, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    # trace 传播（M11）：提交方 trace_id 注入 payload，task.run span 属性关联
+    payload = dict(body.payload or {})
+    payload.setdefault("_trace_id", getattr(request.state, "trace_id", ""))
     try:
-        task_id = await _engine(request).submit(db, body.type, body.payload)
+        task_id = await _engine(request).submit(db, body.type, payload)
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
     return {"task_id": task_id, "state": "PENDING"}
@@ -99,13 +102,18 @@ async def cancel_task(task_id: str, request: fastapi.Request):
 
 @router.post("/{task_id}/approve")
 async def approve_task(task_id: str, body: ApprovalDecision, request: fastapi.Request):
-    """HITL 审批：批准/否决挂起的工具调用，任务续跑。"""
+    """HITL 审批：批准/否决挂起的工具调用，任务续跑（治理敏感操作 → 审计）。"""
+    from ...observability import audit as _audit
+
     try:
         state = await _engine(request).approve(task_id, body.decision, body.comment)
     except KeyError as e:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
     except ValueError as e:
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-4006 {e}") from e
+    _audit.record("task.approve", actor=_audit.actor_of(request), target=task_id,
+                  detail={"decision": body.decision, "comment": body.comment},
+                  trace_id=getattr(request.state, "trace_id", ""))
     return {"task_id": task_id, "state": state}
 
 

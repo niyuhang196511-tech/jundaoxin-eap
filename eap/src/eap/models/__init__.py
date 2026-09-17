@@ -518,3 +518,21 @@ class AgentReleaseRecord(Base):
     notes: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AuditLog(Base):
+    """审计日志（M11）：管理操作追踪（谁在何时对什么做了什么）。
+
+    管理面写操作经 observability.audit.record 落库；查询端点限 admin 语义
+    （当前=API Key 通道，多租户 RBAC 后按角色收敛）。
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(128), default="")  # api-key / jwt sub / system
+    action: Mapped[str] = mapped_column(String(64), index=True)  # model.register / policy.create / ...
+    target: Mapped[str] = mapped_column(String(128), default="")  # 操作对象标识
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)  # 脱敏后的变更摘要
+    trace_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

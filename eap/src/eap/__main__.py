@@ -21,6 +21,8 @@ def _warn_insecure_defaults() -> None:
             log.warning("EAP_%s 仍为开发默认值——生产部署必须更换！", attr.upper())
     if s.cors_origins.strip() == "*":
         log.warning("EAP_CORS_ORIGINS='*' 全放行——仅限本地开发！")
+    if s.skill_signing_key is None:
+        log.warning("EAP_SKILL_SIGNING_KEY 未配置——技能包签名使用开发默认密钥，生产必须更换！")
     if s.db_url.startswith("sqlite"):
         log.info("使用 SQLite（单机开发形态）；生产请配置 EAP_DB_URL=postgresql+psycopg://…")
 

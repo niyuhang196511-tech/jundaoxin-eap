@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...models import PolicyRecord
+from ...observability import audit as _audit
 from ..deps import require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/policies",
@@ -47,7 +48,7 @@ def list_policies(tenant_id: int | None = None, db: Session = fastapi.Depends(ge
 
 
 @router.post("")
-def create_policy(body: PolicyCreate, db: Session = fastapi.Depends(get_db)):
+def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PolicyRecord).where(PolicyRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 策略 {body.name} 已存在")
     cfg = body.config or {}
@@ -62,15 +63,21 @@ def create_policy(body: PolicyCreate, db: Session = fastapi.Depends(get_db)):
     record = PolicyRecord(name=body.name, tenant_id=body.tenant_id, kind=body.kind,
                           config=cfg, priority=body.priority, notes=body.notes)
     db.add(record)
+    _audit.record("policy.create", actor=_audit.actor_of(request), target=body.name,
+                  detail={"kind": body.kind, "config": cfg},
+                  trace_id=getattr(request.state, "trace_id", ""), db=db)
     db.commit()
     return _view(record)
 
 
 @router.post("/{name}/enabled")
-def toggle(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
+def toggle(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(PolicyRecord).where(PolicyRecord.name == name))
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 策略 {name} 不存在")
     record.enabled = enabled
+    _audit.record("policy.toggle", actor=_audit.actor_of(request), target=name,
+                  detail={"enabled": enabled},
+                  trace_id=getattr(request.state, "trace_id", ""), db=db)
     db.commit()
     return {"name": record.name, "enabled": record.enabled}
