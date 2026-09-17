@@ -115,6 +115,27 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  # 数据库定时备份（M15）：每天 02:00 备份到 ./backups，保留 14 天
+  # 恢复流程见 docs/11-production-runbook.md §4
+  backup:
+    image: alpine:3.20
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./backups:/backup
+    environment:
+      PG_CONTAINER: eap-postgres-1
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "chmod +x /usr/local/bin/backup.sh
+       while true; do
+         sleep $${BACKUP_INTERVAL_SECONDS:-86400}
+         /usr/local/bin/backup.sh /backup 14 || echo '[backup] failed, retry next interval'
+       done"
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   redis-data:

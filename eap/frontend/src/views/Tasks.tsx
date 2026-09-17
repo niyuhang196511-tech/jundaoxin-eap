@@ -1,8 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { CircleStop, RefreshCw } from 'lucide-react'
-import { Badge, Button, DialogContent, PageHeader, Table, toast, type BadgeTone } from '@/components/ui'
+import { CircleStop, Plus, RefreshCw } from 'lucide-react'
+import {
+  Badge, Button, DialogContent, Input, Label, PageHeader, Table, TabBar, Textarea, toast,
+  type BadgeTone,
+} from '@/components/ui'
 import { api } from '@/lib/api'
 
 type Task = {
@@ -13,13 +16,36 @@ type Task = {
   pending_tool: string | null
 }
 
+type Schedule = {
+  name: string
+  task_type: string
+  payload: Record<string, unknown>
+  interval_seconds: number
+  enabled: boolean
+  last_run_at: string | null
+  next_run_at: string | null
+  note: string
+}
+
 const STATE_TONE: Record<string, BadgeTone> = {
   COMPLETED: 'green', RUNNING: 'brand', PENDING: 'blue',
   WAITING_HUMAN: 'amber', FAILED: 'red', CANCELLED: 'gray',
 }
 
-/** 任务中心：长任务状态机 + HITL 人工审批 */
+/** 任务中心：长任务状态机 + HITL 人工审批 + 定时调度管理 */
 export default function TasksPage() {
+  return (
+    <div>
+      <PageHeader title="任务 · 审批" description="长任务 8 态状态机；HITL 人工审批在此进行（批准后从 Checkpoint 续跑）" />
+      <TabBar items={[
+        { key: 'tasks', label: '任务', content: <TasksPanel /> },
+        { key: 'schedules', label: '定时调度', content: <SchedulesPanel /> },
+      ]} />
+    </div>
+  )
+}
+
+function TasksPanel() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [detail, setDetail] = useState<Task | null>(null)
   const [confirm, setConfirm] = useState<{ id: string; decision: boolean } | null>(null)
@@ -63,10 +89,10 @@ export default function TasksPage() {
   }
 
   return (
-    <div>
-      <PageHeader title="任务 · 审批" description="长任务 8 态状态机；HITL 人工审批在此进行（批准后从 Checkpoint 续跑）"
-        actions={<Button variant="secondary" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>} />
-
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button variant="secondary" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>
+      </div>
       <div className="rounded-[--radius-card] border border-line bg-surface">
         <Table<Task>
           rowKey={t => t.task_id}
@@ -128,6 +154,115 @@ export default function TasksPage() {
             {confirm?.decision ? '批准' : '否决'}
           </Button>
         </>} />
+    </div>
+  )
+}
+
+/** 定时调度管理（M15）：创建/启停/删除，到期由引擎自动提交 */
+function SchedulesPanel() {
+  const [list, setList] = useState<Schedule[]>([])
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({
+    name: '', task_type: 'agent.invoke', interval: '60', payload: '{"agent": "faq-agent", "input": "巡检"}',
+  })
+
+  const load = useCallback(async () => {
+    try {
+      setList(await api<Schedule[]>('GET', '/api/v1/tasks/schedules'))
+    } catch (e) {
+      toast.error(`加载调度失败：${(e as Error).message}`)
+    }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const create = async () => {
+    try {
+      await api('POST', '/api/v1/tasks/schedules', {
+        name: form.name.trim(), task_type: form.task_type,
+        payload: JSON.parse(form.payload || '{}'), interval_seconds: parseInt(form.interval) || 60,
+      })
+      toast.success('调度已创建')
+      setOpen(false)
+      load()
+    } catch (e) {
+      toast.error(`创建失败：${(e as Error).message}`)
+    }
+  }
+
+  const toggle = async (name: string, enabled: boolean) => {
+    try {
+      await api('PATCH', `/api/v1/tasks/schedules/${name}?enabled=${enabled}`)
+      load()
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`)
+    }
+  }
+
+  const remove = async (name: string) => {
+    try {
+      await api('DELETE', `/api/v1/tasks/schedules/${name}`)
+      toast.success('已删除')
+      load()
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />新建调度</Button>
+      </div>
+      <div className="rounded-[--radius-card] border border-line bg-surface">
+        <Table<Schedule>
+          rowKey={s => s.name}
+          data={list}
+          columns={[
+            { key: 'name', title: '名称', render: s => <span className="font-medium">{s.name}</span> },
+            { key: 'task_type', title: '任务类型' },
+            { key: 'interval', title: '间隔', render: s => `${s.interval_seconds}s` },
+            { key: 'next', title: '下次执行', render: s => s.next_run_at?.slice(0, 19).replace('T', ' ') ?? '-' },
+            { key: 'enabled', title: '状态', render: s => s.enabled ? <Badge tone="green">启用</Badge> : <Badge tone="gray">停用</Badge> },
+            { key: 'actions', title: '操作', render: s => (
+              <div className="flex gap-1.5">
+                <Button size="xs" variant="secondary" onClick={() => toggle(s.name, !s.enabled)}>
+                  {s.enabled ? '停用' : '启用'}
+                </Button>
+                <Button size="xs" variant="ghost" onClick={() => remove(s.name)}>
+                  删除
+                </Button>
+              </div>
+            ) },
+          ]}
+          empty="暂无定时调度（多副本部署下由抢占式锁保证不重复触发）"
+        />
+      </div>
+
+      <DialogContent open={open} onOpenChange={setOpen} title="新建定时调度"
+        description="到期由任务引擎自动提交；多副本部署经调度锁防重复"
+        footer={<>
+          <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={create} disabled={!form.name.trim()}>创建</Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>名称（小写字母/数字/连字符）</Label>
+            <Input value={form.name} placeholder="daily-faq-smoke" onChange={e => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <Label>任务类型</Label>
+            <Input value={form.task_type} onChange={e => setForm({ ...form, task_type: e.target.value })} />
+          </div>
+          <div>
+            <Label>间隔（秒）</Label>
+            <Input type="number" min={1} value={form.interval} onChange={e => setForm({ ...form, interval: e.target.value })} />
+          </div>
+          <div>
+            <Label>Payload（JSON）</Label>
+            <Textarea rows={4} value={form.payload} onChange={e => setForm({ ...form, payload: e.target.value })} className="font-mono !text-[11px]" />
+          </div>
+        </div>
+      </DialogContent>
     </div>
   )
 }

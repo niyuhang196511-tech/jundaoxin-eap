@@ -1,17 +1,8 @@
-# EAP 平台镜像（多阶段：前端构建 → Python 运行时）
+# EAP 平台镜像（纯 API 后端；控制台前端独立构建，见 frontend/Dockerfile + docker-compose frontend 服务）
 # 构建：docker build -t eap:latest .
 # 运行：docker run -p 8300:8300 --env-file .env eap:latest
 # 或用 docker-compose.yml（含 PostgreSQL）
 
-# ---- 阶段 1：前端控制台构建 ----
-FROM node:22-alpine AS frontend
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend/ ./
-RUN npm run build   # 产物输出到 /app/src/eap/static/console（vite outDir）
-
-# ---- 阶段 2：Python 运行时 ----
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 
@@ -21,10 +12,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --extra postgres --extra redis --no-dev
 
-# 源码与前端产物
+# 源码
 COPY src/ ./src/
 RUN uv sync --frozen --extra postgres --extra redis --no-dev
-COPY --from=frontend /app/src/eap/static/console ./src/eap/static/console
 
 # 非 root 运行
 RUN useradd -r eap && chown -R eap:eap /app
