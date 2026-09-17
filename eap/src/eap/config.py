@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     mineru_api_url: str = "https://mineru.net/api/v4"  # 自托管填 http://host:port
     mineru_token: str | None = None
 
+    # 文档图片（M16）：内嵌图/MinerU 图落盘到 EAP_MEDIA_DIR 并挂 /media 静态服务；
+    # 配置 EAP_VISION_MODEL（OpenAI 兼容视觉模型，走 EAP_OPENAI_BASE_URL）后图片自动生成中文描述进 chunk
+    media_dir: str = "./media"
+    docs_extract_images: bool = True
+    vision_model: str | None = None
+
     # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
     redis_url: str | None = None
 

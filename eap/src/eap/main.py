@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -87,6 +89,11 @@ def create_app() -> FastAPI:
     app.include_router(api_budgets.router)
     app.include_router(api_auth.router)
     app.include_router(api_audit.router)
+    # 知识文档图片（M16）：/media 静态服务（media_dir 按内容哈希去重存储）
+
+    media_dir = get_settings().media_dir
+    os.makedirs(media_dir, exist_ok=True)
+    app.mount("/media", StaticFiles(directory=media_dir), name="media")
     app.include_router(api_a2a.router)
     app.include_router(api_a2a.wellknown)
     app.include_router(api_kb.router)

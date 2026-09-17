@@ -13,6 +13,7 @@ MinerU 未配置时给出提示性错误。HTTP 全部收敛在 _http_* 注入�
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 
@@ -39,12 +40,70 @@ def available_parsers() -> list[str]:
 
 
 def extract_text(filename: str, data: bytes, parser: str | None = None) -> str:
-    """按后端解析文件字节为文本/Markdown。parser 空 = EAP_DOCS_PARSER（默认 local）。"""
+    """按后端解析文件字节为文本/Markdown。parser 空 = EAP_DOCS_PARSER（默认 local）。
+
+    M16 图片链路：解析产出 md 后，若 EAP_VISION_MODEL 配置了视觉模型，对文档内图片
+    逐张生成中文描述并插入图片引用之后——图片内容进入 chunk 文本，变得可检索。
+    """
     backend = parser or get_settings().docs_parser or "local"
     fn = _PARSERS.get(backend)
     if fn is None:
         raise ValueError(f"未知解析后端 {backend!r}（可用: {', '.join(available_parsers())}）")
-    return fn(filename, data)
+    md = fn(filename, data)
+    from .media import extract_image_refs
+
+    if get_settings().vision_model and extract_image_refs(md):
+        md = _caption_images(md)
+    return md
+
+
+def _caption_images(md: str) -> str:
+    """对 md 中每张 /media 图片调用视觉模型生成描述，插入引用后（失败跳过单张）。"""
+    import re
+
+    from .media import image_abs_path
+
+    out = md
+    for m in re.finditer(r"(!\[[^\]]*\]\((/media/[^)]+)\))", md):
+        ref, web = m.group(1), m.group(2)
+        path = image_abs_path(web)
+        if not path:
+            continue
+        try:
+            with open(path, "rb") as f:
+                desc = _vision_describe(f.read(), os.path.splitext(path)[1])
+        except Exception as e:
+            logger.warning("图片描述失败 %s: %s", web, e)
+            continue
+        if desc:
+            out = out.replace(ref, f"{ref}\n\n【图片描述】{desc}", 1)
+    return out
+
+
+def _vision_describe(data: bytes, suffix: str) -> str | None:
+    """视觉模型生成中文图片描述（OpenAI 兼容 chat/completions，图片走 data URL）。"""
+    import base64
+
+    s = get_settings()
+    if not (s.openai_base_url and s.vision_model):
+        return None
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
+        suffix.lstrip(".").lower(), "image/png")
+    b64 = base64.b64encode(data).decode()
+    resp = httpx.post(
+        f"{s.openai_base_url.rstrip('/')}/chat/completions",
+        json={"model": s.vision_model, "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "用一句简洁的中文描述这张图片的内容，供知识检索使用。"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            ],
+        }], "temperature": 0.2},
+        headers={"Authorization": f"Bearer {s.openai_api_key or ''}"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return (resp.json()["choices"][0]["message"].get("content") or "").strip() or None
 
 
 # ---------- local 内置后端 ----------
@@ -70,7 +129,21 @@ def _pdf_local(data: bytes) -> str:
 
     reader = PdfReader(io.BytesIO(data))
     pages = [(page.extract_text() or "") for page in reader.pages]
-    return "\n\n".join(p for p in pages if p.strip())
+    md = "\n\n".join(p for p in pages if p.strip())
+    # M16 图片：内嵌图（照片/图表）落盘并附引用（视觉模型启用后自动补描述）
+    if get_settings().docs_extract_images:
+        parts = []
+        for i, page in enumerate(reader.pages):
+            try:
+                for img in page.images:
+                    web = _save_image_safe(img.data, img.name)
+                    if web:
+                        parts.append(f"![第{i + 1}页图片]({web})")
+            except Exception:
+                continue  # 单页图片提取失败不影响文本
+        if parts:
+            md = (md + "\n\n" if md.strip() else "") + "\n\n".join(parts)
+    return md
 
 
 def _docx_local(data: bytes) -> str:
@@ -87,7 +160,35 @@ def _docx_local(data: bytes) -> str:
             cells = [c.text.strip() for c in row.cells if c.text.strip()]
             if cells:
                 parts.append(" | ".join(cells))
-    return "\n".join(parts)
+    md = "\n".join(parts)
+    # M16 图片：内嵌图（inline shapes）落盘并附引用
+    if get_settings().docs_extract_images:
+        image_parts = []
+        for i, shape in enumerate(document.inline_shapes):
+            try:
+                rId = shape._inline.graphic.graphicData.pic.blipFill.blip.embed
+                blob = document.part.related_parts[rId].blob
+                web = _save_image_safe(blob, f"docx-{i}.png")
+                if web:
+                    image_parts.append(f"![文档图片{i + 1}]({web})")
+            except Exception:
+                continue
+        if image_parts:
+            md = (md + "\n\n" if md.strip() else "") + "\n\n".join(image_parts)
+    return md
+
+
+def _save_image_safe(data: bytes, name: str) -> str | None:
+    """图片字节落盘（/media 路径）；过小（<1KB，多为装饰元素）或失败返回 None。"""
+    if not data or len(data) < 1024:
+        return None
+    try:
+        from .media import save_image
+
+        return save_image(data, os.path.splitext(name)[1] or ".png")
+    except Exception as e:
+        logger.warning("图片落盘失败 %s: %s", name, e)
+        return None
 
 
 # ---------- MinerU 后端 ----------
@@ -155,7 +256,15 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
             md_names = [n for n in zf.namelist() if n.endswith(".md")]
             if not md_names:
                 raise ValueError("MinerU 结果包中没有 .md")
-            return zf.read(md_names[0]).decode("utf-8", errors="replace")
+            md = zf.read(md_names[0]).decode("utf-8", errors="replace")
+            # M16 图片：结果包的 images/ 落盘并重写引用（视觉模型启用后由 extract_text 补描述）
+            if get_settings().docs_extract_images:
+                from .media import save_and_rewrite
+
+                images = {n: zf.read(n) for n in zf.namelist()
+                          if n.startswith("images/") and len(zf.read(n)) >= 1024}
+                md = save_and_rewrite(md, images)
+            return md
     except ValueError:
         raise
     except Exception as e:

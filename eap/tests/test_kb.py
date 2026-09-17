@@ -199,3 +199,91 @@ def _resp(status, payload):
             return str(payload).encode()
 
     return R()
+
+
+def test_mineru_images_saved_and_rewritten(monkeypatch):
+    """MinerU 结果包 images/：落盘 /media + md 引用重写（M16 图片链路）。"""
+    import io
+    import zipfile
+
+    from eap.config import get_settings
+    from eap.knowledge import media, parsers
+
+    monkeypatch.setenv("EAP_MINERU_TOKEN", "t")
+    monkeypatch.setenv("EAP_MEDIA_DIR", "./media-test-kb")
+    get_settings.cache_clear()
+    try:
+        def fake_post(url, **kw):
+            if url.endswith("/file-urls/batch"):
+                return _resp(200, {"data": {"batch_id": "b2", "file_urls": ["https://oss/u"]}})
+            if url.endswith("/extract/task/batch"):
+                return _resp(200, {"data": {}})
+            raise AssertionError(url)
+
+        def fake_get(url, **kw):
+            if url.endswith("/batch/b2"):
+                return _resp(200, {"data": {"extract_result": [
+                    {"state": "done", "full_zip_url": "https://oss/r.zip"}]}})
+            if url.endswith("r.zip"):
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w") as zf:
+                    zf.writestr("out.md", "# 报告\n\n![图1](images/p1.jpg)\n\n正文")
+                    zf.writestr("images/p1.jpg", b"\xff\xd8\xff" + b"x" * 2048)  # 假 JPEG ≥1KB
+                return _resp(200, buf.getvalue())
+            raise AssertionError(url)
+
+        parsers.httpx.post = fake_post
+        parsers.httpx.get = fake_get
+        md = parsers.extract_text("scan.pdf", b"%PDF", parser="mineru_cloud")
+        assert "![图1](/media/" in md, md  # 引用已重写
+        # 图片确实落盘且可从 md 提取 web 路径
+        refs = media.extract_image_refs(md)
+        assert len(refs) == 1 and media.image_abs_path(refs[0])
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vision_caption_inserted(monkeypatch):
+    """配置视觉模型：图片自动生成中文描述插入引用后（进 chunk 可检索）。"""
+
+    from eap.config import get_settings
+    from eap.knowledge import media, parsers
+
+    monkeypatch.setenv("EAP_MEDIA_DIR", "./media-test-vision")
+    monkeypatch.setenv("EAP_VISION_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("EAP_OPENAI_BASE_URL", "https://api.example.com/v1")
+    get_settings.cache_clear()
+    try:
+        web = media.save_image(b"\x89PNG" + b"z" * 2048, ".png")
+        md = f"![图](/{web.removeprefix('/')})" if False else f"![图]({web})"
+
+        captured = {}
+
+        def fake_vision(data, suffix):
+            captured["size"] = len(data)
+            return "这是一张产品架构图"
+
+        monkeypatch.setattr(parsers, "_vision_describe", fake_vision)
+        out = parsers._caption_images(md)
+        assert "【图片描述】这是一张产品架构图" in out
+        assert captured["size"] > 1024
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vision_disabled_no_caption(monkeypatch):
+    """未配置视觉模型：图片引用保留但无描述插入。"""
+    from eap.config import get_settings
+    from eap.knowledge import media
+
+    monkeypatch.delenv("EAP_VISION_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        web = media.save_image(b"\x89PNG" + b"z" * 2048, ".png")
+        md = f"![图]({web})"
+        from eap.knowledge import parsers as _p
+
+        out = _p._caption_images(md)
+        assert "【图片描述】" not in out
+    finally:
+        get_settings.cache_clear()
