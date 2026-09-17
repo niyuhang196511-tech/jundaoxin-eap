@@ -29,7 +29,11 @@ def ingest_text(db: Session, kb: KB, title: str, text: str, source: str = "", me
     store = get_vector_store(settings)
     pipeline = _kb_pipeline(kb).get("chunker") or {}
     chunk = get_chunker(pipeline.get("name"), pipeline.get("params"))
-    doc = Document(kb_id=kb.id, title=title, source=source, meta=meta or {})
+    # M15：缓存原文到 meta（重摄入端点依赖；上限 2MB 防超大文档撑爆行存储）
+    doc_meta = dict(meta or {})
+    if len(text) <= 2 * 1024 * 1024:
+        doc_meta.setdefault("original_text", text)
+    doc = Document(kb_id=kb.id, title=title, source=source, meta=doc_meta)
     db.add(doc)
     db.flush()
     for i, piece in enumerate(chunk(text)):
@@ -80,7 +84,28 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None
 
     BM25（稀疏）+ 向量（稠密，Milvus 或本地余弦）+ 图谱（多跳扩展）
     → RRF 融合（召回池 = top_k×3 至少 10 条）→ rerank="lexical"/"llm" 头部精排 → top_k。
+
+    M15：OTel 启用时包 `kb.retrieve` span（挂在当前请求 span 下）。
     """
+    from ..observability.tracing import enabled as otel_enabled, tracer
+
+    span_cm = tracer().start_as_current_span(f"kb.retrieve {kb.name}") if otel_enabled() else None
+    span = span_cm.__enter__() if span_cm is not None else None
+    if span is not None:
+        span.set_attribute("kb.name", kb.name)
+        span.set_attribute("kb.query", query[:120])
+    try:
+        return _retrieve_inner(db, kb, query, top_k, rerank)
+    except Exception as e:
+        if span is not None:
+            span.record_exception(e)
+        raise
+    finally:
+        if span_cm is not None:
+            span_cm.__exit__(None, None, None)
+
+
+def _retrieve_inner(db: Session, kb: KB, query: str, top_k: int, rerank: str | None) -> list[dict]:
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
     store = get_vector_store(settings)

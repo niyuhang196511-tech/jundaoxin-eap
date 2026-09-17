@@ -436,7 +436,10 @@ class TaskEngine:
             if kb is None:
                 return {"status": "failed", "error": f"知识库 {kb_name} 不存在"}
             doc = kb_svc.ingest_text(db, kb, title, content,
-                                     source=str(payload.get("source", "upload")))
+                                     source=str(payload.get("source", "upload")),
+                                     meta={"parser": payload.get("parser") or "",
+                                           "original_filename": payload.get("filename") or "",
+                                           "original_file_b64": payload.get("file_b64") or ""})
             chunk_count = len(db.scalars(
                 select(Chunk.id).where(Chunk.doc_id == doc.id)).all())
             return {"status": "ok", "document_id": doc.id, "title": title,

@@ -154,3 +154,39 @@ def delete_document(name: str, doc_id: int, db: Session = fastapi.Depends(get_db
     if n == 0:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 文档 {doc_id} 不存在")
     return {"deleted_chunks": n}
+
+
+@router.post("/{name}/documents/{doc_id}/reingest")
+def reingest_document(name: str, doc_id: int, request: fastapi.Request,
+                      db: Session = fastapi.Depends(get_db)):
+    """文档重摄入（M15）：按缓存原文重新解析+分块+嵌入（删除旧块后新建）。
+
+    适用：解析后端切换（如换 MinerU）/分块参数调整后刷新既有文档。
+    前提：摄入时缓存了原文（M15 起的摄入自动缓存 original_text/original_file_b64 到 meta）。
+    """
+    from ...models import Document
+    from .tasks import _engine
+
+    kb = _get_kb(db, name)
+    doc = db.scalar(select(Document).where(Document.kb_id == kb.id, Document.id == doc_id))
+    if doc is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 文档 {doc_id} 不存在")
+    meta = doc.meta or {}
+    original_text = str(meta.get("original_text", ""))
+    if not original_text:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="EAP-4009 该文档无原文缓存（M15 前摄入），请删除后重新上传/粘贴")
+
+    payload = {"kb": kb.name, "title": doc.title, "text": original_text,
+               "parser": str(meta.get("parser") or ""), "source": doc.source}
+    if meta.get("original_file_b64"):
+        payload["file_b64"] = meta["original_file_b64"]
+        payload["filename"] = str(meta.get("original_filename", "doc"))
+
+    # 先删旧文档（级联 chunk/图谱/向量），任务执行时以当前解析后端/分块配置重建
+    kb_svc.delete_document(db, kb, doc_id)
+    db.commit()
+    task_id = _engine(request).submit(db, "kb.ingest", payload)
+    return {"task_id": task_id, "kb": kb.name, "document_id": doc_id,
+            "note": "重摄入异步执行，经任务端点轮询"}
