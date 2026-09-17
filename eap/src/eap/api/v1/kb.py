@@ -76,10 +76,12 @@ async def upload_document(
     request: fastapi.Request,
     file: fastapi.UploadFile = fastapi.File(...),
     title: str = fastapi.Form(""),
+    parser: str = fastapi.Form(""),
     db: Session = fastapi.Depends(get_db),
 ):
-    """文件上传摄入（M12）：pdf/docx/txt/md → 解析 → 异步摄入（任务引擎，不阻塞请求）。
+    """文件上传摄入（M12/M14）：pdf/docx/txt/md → 按指定后端解析 → 异步摄入。
 
+    parser: local（默认）| mineru_cloud | mineru_selfhosted——扫描件/复杂版式用 MinerU。
     返回 task_id；摄入状态经 GET /api/v1/tasks/{task_id} 轮询。
     """
     import base64
@@ -96,6 +98,7 @@ async def upload_document(
     task_id = await _engine(request).submit(db, "kb.ingest", {
         "kb": kb.name, "title": doc_title, "filename": filename,
         "file_b64": base64.b64encode(data).decode(), "source": "upload",
+        "parser": parser,
     })
     return {"task_id": task_id, "kb": kb.name, "filename": filename,
             "note": "解析与摄入异步执行，经任务端点轮询状态"}

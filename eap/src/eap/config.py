@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     otel_endpoint: str | None = None
     otel_sample_ratio: float = 1.0
 
+    # 文档解析（M12/M14）：默认后端 local；MinerU 支持 PDF 扫描件/复杂版式 → Markdown
+    docs_parser: str = "local"
+    mineru_api_url: str = "https://mineru.net/api/v4"  # 自托管填 http://host:port
+    mineru_token: str | None = None
+
     # 多副本任务队列（docs/03 §5）：配置 Redis 后任务经 Streams 跨实例分发
     redis_url: str | None = None
 

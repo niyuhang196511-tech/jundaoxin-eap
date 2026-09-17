@@ -412,7 +412,7 @@ class TaskEngine:
     # ---------- 内置处理器 ----------
 
     async def _h_kb_ingest(self, payload: dict, prev_result: dict) -> dict:
-        """异步文档摄入（M12）：大文档解析+分块+嵌入不阻塞请求线程。"""
+        """异步文档摄入（M12/M14）：解析后端可指定（local / mineru_*），解析+分块+嵌入不阻塞请求。"""
         from sqlalchemy import select
 
         from ..knowledge import service as kb_svc
@@ -426,7 +426,8 @@ class TaskEngine:
             import base64
 
             content = extract_text(str(payload.get("filename", "doc.txt")),
-                                   base64.b64decode(payload["file_b64"]))
+                                   base64.b64decode(payload["file_b64"]),
+                                   parser=payload.get("parser") or None)
         if not content.strip():
             return {"status": "failed", "error": "解析后内容为空"}
 
