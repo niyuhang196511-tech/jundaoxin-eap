@@ -16,7 +16,6 @@ HEADERS = {**AUTH, "Content-Type": "application/json"}
 @pytest.fixture()
 def llm_mode(monkeypatch):
     """llm 抽取模式：env 设置 + 缓存清理，测试结束恢复（真 fixture 保证 teardown）。"""
-    import os
 
     monkeypatch.setenv("EAP_GRAPH_EXTRACTION", "llm")
     from eap.config import get_settings

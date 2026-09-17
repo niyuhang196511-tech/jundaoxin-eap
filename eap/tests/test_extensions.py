@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 
 from fastapi.testclient import TestClient
@@ -82,7 +81,6 @@ def test_kb_pipeline_uses_custom_chunker(client: TestClient):
 
 def test_plugin_dir_load_and_hot_reload(client: TestClient, tmp_path):
     """plugins/ 目录 manifest 插件：加载 → 工具可用 → reload 生效。"""
-    import os
 
     plugin_dir = tmp_path / "plugins" / "echo-plugin"
     plugin_dir.mkdir(parents=True)

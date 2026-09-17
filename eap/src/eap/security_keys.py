@@ -19,7 +19,6 @@ def revoke_token(token: str, expires_at, reason: str = "") -> None:
     """吊销 JWT：存 token 哈希 + 原过期时刻（到点后黑名单条目失去意义，可被惰性清理）。"""
     from datetime import datetime
 
-    from sqlalchemy.orm import Session as _Session
 
     from .models import RevokedToken
 
@@ -35,7 +34,6 @@ def revoke_token(token: str, expires_at, reason: str = "") -> None:
 def is_revoked(token: str) -> bool:
     from datetime import datetime
 
-    from sqlalchemy import select
 
     from .db import SessionLocal
     from .models import RevokedToken

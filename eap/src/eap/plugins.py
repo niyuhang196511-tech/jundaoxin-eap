@@ -57,7 +57,6 @@ def load_plugins() -> list[PluginInfo]:
     if not os.path.isdir(d):
         return _LOADED
     from .knowledge import components as rag_components
-    from .runtime.workflow import register_workflow_tool
 
     for entry in sorted(os.listdir(d)):
         path = os.path.join(d, entry)

@@ -129,7 +129,6 @@ def test_oidc_rejects_bad_tokens(client, fake_idp):
     r = client.get("/api/v1/auth/oidc/callback", params={"code": "c"}, headers=HEADERS)
     assert r.status_code == 401 and "iss" in r.json()["detail"]
     # 篡改签名（用错误密钥签发）
-    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
 
     rogue = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     from cryptography.hazmat.primitives import hashes

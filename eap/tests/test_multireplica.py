@@ -51,7 +51,6 @@ def test_rate_limiter_fallback_without_redis(client: TestClient):
 
 def test_rate_limiter_redis_path(client: TestClient, monkeypatch):
     """配置 EAP_REDIS_URL：走 Redis 滑窗（compose redis 已在本地 63790）。"""
-    import os
 
     from eap.api.security import SlidingWindow
     from eap.config import get_settings

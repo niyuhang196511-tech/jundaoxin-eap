@@ -12,7 +12,6 @@ from ...agents.registry import registry
 from ...db import get_db
 from ...observability.middleware import record_usage
 from ...runtime import budget, policy
-from ...runtime import budget
 from ...schemas import InvokeRequest
 from ..deps import resolve_tenant
 

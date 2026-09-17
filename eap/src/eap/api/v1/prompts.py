@@ -125,7 +125,6 @@ def list_versions(name: str, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PromptRecord).where(PromptRecord.name == name)) is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 Prompt {name} 不存在")
     from ...models import PromptVersionRecord
-    from ...runtime import prompts as prompt_rt
 
     rows = db.scalars(select(PromptVersionRecord).where(PromptVersionRecord.name == name)
                       .order_by(PromptVersionRecord.created_at.desc())).all()

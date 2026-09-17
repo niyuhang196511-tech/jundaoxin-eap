@@ -50,7 +50,6 @@ def list_tools(db: Session = fastapi.Depends(get_db)):
                               "parameters": tool.parameters, "origin": f"agent:{agent_name}",
                               "requires_approval": tool.requires_approval})
 
-    from ...models import MCPServerRecord
 
     for record in db.scalars(select(MCPServerRecord)).all():
         for tool_name in record.tools or []:

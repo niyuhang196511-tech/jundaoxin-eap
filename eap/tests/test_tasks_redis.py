@@ -34,7 +34,6 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture()
 def redis_client_client():
     """带 EAP_REDIS_URL 的独立应用实例（进程内新引擎走 Redis Streams 后端）。"""
-    import urllib.request
 
     host, port = "127.0.0.1", 63790
     with socket.create_connection((host, port), timeout=1):

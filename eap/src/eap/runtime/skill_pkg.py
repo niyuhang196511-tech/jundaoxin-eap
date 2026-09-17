@@ -110,7 +110,6 @@ def sign_bundle(skill: dict, seed_hex: str | None = None) -> dict:
 def verify_bundle(bundle: dict, seed_hex: str | None = None) -> dict:
     """验签 + 结构校验；通过返回技能 dict，否则抛 PermissionError（EAP-8101）。"""
     from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     if not isinstance(bundle, dict) or bundle.get("format") != FORMAT:
         raise PermissionError(f"EAP-8101 不支持的技能包格式：{bundle.get('format')!r}")

@@ -14,7 +14,6 @@ from eap.runtime.tasks import TaskEngine
 
 def test_schedule_claim_prevents_double_fire(client):
     """两个引擎的调度循环并发扫表：抢占式 next_run_at 更新保证只 submit 一次。"""
-    from eap.config import get_settings
 
     calls: list[dict] = []
 

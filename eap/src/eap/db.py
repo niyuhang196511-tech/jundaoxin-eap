@@ -9,7 +9,6 @@ from sqlalchemy import create_engine, inspect, text as sa_text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_settings
-from .models import Base
 
 _settings = get_settings()
 

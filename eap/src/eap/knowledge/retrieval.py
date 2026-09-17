@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 
-from .tokenize import tokenize
 
 BM25_K1 = 1.5
 BM25_B = 0.75

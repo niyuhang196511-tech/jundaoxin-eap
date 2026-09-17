@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import Chunk, Document, KB
 from .components import get_chunker, get_reranker
-from .embedding import cosine, get_embedder
+from .embedding import get_embedder
 from .graph import delete_graph_for_doc, graph_recall, index_chunk_graph
 from .retrieval import bm25_scores, rrf_combine, top_n
 from .tokenize import tokenize

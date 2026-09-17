@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import sys
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .models import ApiKey, KB, ModelRecord, Tenant
+from .models import ApiKey, ModelRecord, Tenant
 
 
 def run(engine) -> None:  # noqa: C901
