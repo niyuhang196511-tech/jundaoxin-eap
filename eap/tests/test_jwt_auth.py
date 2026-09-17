@@ -53,3 +53,26 @@ def test_api_key_still_works_with_oidc_configured(client, fake_idp):
     """OIDC 配置后 API Key 通道不受影响（三轨共存）。"""
     r = client.get("/api/v1/conversations", headers=AUTH)
     assert r.status_code == 200
+
+
+def test_rbac_member_blocked_admin_only(client, fake_idp):
+    """M14 RBAC：member 角色可读但 admin 写操作 403；admin 角色（含服务间 API Key）放行。"""
+    member = _access_token(roles=["member"])
+    admin = _access_token(roles=["admin"])
+
+    # member 读 OK
+    assert client.get("/api/v1/models", headers={"Authorization": f"Bearer {member}"}).status_code == 200
+    # member 写模型 → 403（require_admin）
+    resp = client.post("/api/v1/models", headers={"Authorization": f"Bearer {member}"}, json={
+        "name": "rbac-test-model", "capabilities": ["chat"]})
+    assert resp.status_code == 403, resp.text
+    # member 审计查询 → 403
+    assert client.get("/api/v1/audit", headers={"Authorization": f"Bearer {member}"}).status_code == 403
+    # admin 写 OK
+    resp = client.post("/api/v1/models", headers={"Authorization": f"Bearer {admin}"}, json={
+        "name": "rbac-test-model", "capabilities": ["chat"]})
+    assert resp.status_code == 200, resp.text
+    # 服务间 API Key 写 OK（运维全量语义）
+    resp = client.post("/api/v1/models", headers=AUTH, json={
+        "name": "rbac-test-model-2", "capabilities": ["chat"]})
+    assert resp.status_code == 200, resp.text

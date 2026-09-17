@@ -8,10 +8,10 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...models import AuditLog
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/audit",
-                           dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
+                           dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_admin)])
 
 
 @router.get("")

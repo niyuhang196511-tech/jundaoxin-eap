@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import PolicyRecord
 from ...observability import audit as _audit
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/policies",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -47,7 +47,7 @@ def list_policies(tenant_id: int | None = None, db: Session = fastapi.Depends(ge
     return [_view(p) for p in db.scalars(stmt).all()]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PolicyRecord).where(PolicyRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 策略 {body.name} 已存在")
@@ -70,7 +70,7 @@ def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fa
     return _view(record)
 
 
-@router.post("/{name}/enabled")
+@router.post("/{name}/enabled", dependencies=[fastapi.Depends(require_admin)])
 def toggle(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(PolicyRecord).where(PolicyRecord.name == name))
     if record is None:

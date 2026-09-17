@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import ModelRecord
 from ...schemas import ModelRegister
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/models",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -27,7 +27,7 @@ def list_models(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def register_model(body: ModelRegister, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """注册定制/专用模型：M1 直接上架（enabled=True）；评测门禁→灰度→上架流水线在 M2（docs/06 §4）。"""
     if db.scalar(select(ModelRecord).where(ModelRecord.name == body.name)):
@@ -53,7 +53,7 @@ def register_model(body: ModelRegister, request: fastapi.Request, db: Session = 
             "priority": model_record.priority, "enabled": model_record.enabled}
 
 
-@router.patch("/{name}")
+@router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
 def toggle_model(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(ModelRecord).where(ModelRecord.name == name))
     if record is None:

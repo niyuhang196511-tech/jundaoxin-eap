@@ -113,4 +113,22 @@ def require_api_key(request: fastapi.Request) -> None:
         raise fastapi.HTTPException(status_code=403, detail="EAP-3003 会话令牌无此权限（最小权限边界）")
 
 
-__all__ = ["resolve_tenant", "require_api_key", "get_db", "hub", "get_settings"]
+def require_admin(request: fastapi.Request) -> None:
+    """管理面写操作守卫（M14 RBAC 最小实现）：
+
+    - API Key 通道 = 服务间运维身份 → 放行（与现有全量语义一致）
+    - JWT 通道 → roles 须含 admin（claim 映射见 oidc.extract_identity）；member 只读
+    - 身份微服务迁出后由其承担角色判定，本守卫换调用方即可
+    """
+    kind = getattr(request.state, "auth_kind", "")
+    if kind == "api_key":
+        return
+    if kind == "jwt":
+        roles = getattr(request.state, "roles", [])
+        if "admin" in roles:
+            return
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3005 需要 admin 角色")
+    raise fastapi.HTTPException(status_code=403, detail="EAP-3003 管理操作需要 API Key 或 admin JWT")
+
+
+__all__ = ["resolve_tenant", "require_api_key", "require_admin", "get_db", "hub", "get_settings"]

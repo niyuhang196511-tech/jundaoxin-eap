@@ -62,6 +62,19 @@ def list_documents(name: str, db: Session = fastapi.Depends(get_db)):
     return [{"id": d.id, "title": d.title, "source": d.source, "meta": d.meta} for d in docs]
 
 
+@router.get("/{name}/documents/{doc_id}/chunks")
+def list_chunks(name: str, doc_id: int, db: Session = fastapi.Depends(get_db)):
+    """分块预览（M14）：文档的 chunk 列表（内容 + 索引 + 元信息），知识库详情抽屉数据源。"""
+    kb = _get_kb(db, name)
+    from ...models import Chunk
+
+    chunks = db.scalars(
+        select(Chunk).where(Chunk.kb_id == kb.id, Chunk.doc_id == doc_id)
+        .order_by(Chunk.idx.asc())
+    ).all()
+    return [{"id": c.id, "idx": c.idx, "content": c.content, "meta": c.meta} for c in chunks]
+
+
 @router.post("/{name}/documents")
 def ingest_document(name: str, body: DocIngest, db: Session = fastapi.Depends(get_db)):
     kb = _get_kb(db, name)
