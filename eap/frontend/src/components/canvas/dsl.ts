@@ -153,7 +153,49 @@ export function autoLayout(steps: Step[], edges: DslEdge[]): Map<string, Positio
   return pos
 }
 
+/**
+ * 循环体/并行分支可视化（M12）：把 loop 的 body 展开为主图子节点。
+ * 子节点 id 规则 `${loopId}__body__${i}`（保存时按前缀回收进 body），容器节点负责视觉分组。
+ * 展开是纯视图层语义：执行引擎仍按 body 线性序列跑。
+ */
+export const BODY_PREFIX = '__body__'
+
+export function expandLoopBodies(steps: Step[]): { steps: Step[]; bodyNodes: { loopId: string; index: number; step: Step }[] } {
+  const bodyNodes: { loopId: string; index: number; step: Step }[] = []
+  const expanded = steps.map(s => {
+    if (s.type !== 'loop' || !s.body?.length) return s
+    s.body.forEach((b, i) => {
+      bodyNodes.push({ loopId: s.id, index: i, step: { ...b, id: `${s.id}${BODY_PREFIX}${i}` } })
+    })
+    return { ...s, body: s.body } // body 保留（保存时以子节点为准重建）
+  })
+  return { steps: expanded, bodyNodes }
+}
+
+/** 保存时：把展开的子节点按序回收进对应 loop 的 body */
+export function collapseLoopBodies(steps: Step[], nodes: Node[]): Step[] {
+  return steps.map(s => {
+    if (s.type !== 'loop') return s
+    const bodyIds = (s.body ?? []).map((_, i) => `${s.id}${BODY_PREFIX}${i}`)
+    const bodySteps = bodyIds
+      .map(id => nodes.find(n => n.id === id))
+      .filter(Boolean)
+      .map(n => {
+        const d = n!.data as { stepType?: string }
+        const prev = (s.body ?? [])[bodyIds.indexOf(n!.id)] ?? { id: n!.id, type: 'llm' as const }
+        return {
+          ...prev,
+          id: prev.id,
+          type: (d.stepType as 'llm' | 'tool' | 'retrieve') ?? prev.type,
+        }
+      })
+    return { ...s, body: bodySteps.length ? bodySteps : s.body }
+  })
+}
+
 /* ---------- 运行记录类型 ---------- */
+
+import type { Node } from '@xyflow/react'
 
 export interface NodeRun {
   id: string

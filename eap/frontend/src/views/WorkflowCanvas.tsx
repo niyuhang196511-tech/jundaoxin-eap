@@ -19,7 +19,8 @@ import { Badge, Button, Input, Table, toast } from '@/components/ui'
 import { ListPlus, Save } from 'lucide-react'
 import { api } from '@/lib/api'
 import {
-  autoLayout, genEdgeId, genStepId, linearToEdges, NODE_TYPES,
+  autoLayout, collapseLoopBodies, expandLoopBodies, genEdgeId, genStepId, linearToEdges,
+  NODE_TYPES, BODY_PREFIX,
   type NodeRun, type Step, type StepType, type WorkflowDsl, type WorkflowRun,
 } from '@/components/canvas/dsl'
 import { nodeTypes, type WfNodeData } from '@/components/canvas/WfNode'
@@ -52,13 +53,42 @@ function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
       stepId: s.id, stepType: s.type, title: s.title || '', status: 'idle',
     } satisfies WfNodeData,
   }))
+  // 循环体可视化（M12）：body 展开为子节点，挂在其 loop 节点下方，与 loop 串联
+  const { steps: _, bodyNodes } = expandLoopBodies(dsl.steps)
+  const loopIds = new Set(dsl.steps.filter(s => s.type === 'loop').map(s => s.id))
+  const byLoop = new Map<string, { index: number; step: Step }[]>()
+  for (const b of bodyNodes) {
+    byLoop.set(b.loopId, [...(byLoop.get(b.loopId) ?? []), { index: b.index, step: b.step }])
+  }
+  for (const [loopId, bodies] of byLoop) {
+    const loopNode = nodes.find(n => n.id === loopId)
+    const baseY = (loopNode?.position.y ?? 0) + 130
+    bodies.sort((a, b) => a.index - b.index).forEach((b, i) => {
+      nodes.push({
+        id: b.step.id,
+        type: 'wf',
+        position: { x: (loopNode?.position.x ?? 0) + 40, y: baseY + i * 110 },
+        data: { stepId: b.step.id, stepType: b.step.type, title: b.step.title || '', status: 'idle' } satisfies WfNodeData,
+      })
+      edges.push({
+        id: `body-edge-${loopId}-${i}`,
+        source: i === 0 ? loopId : bodies[i - 1].step.id,
+        target: b.step.id,
+        style: { stroke: '#0891b2', strokeDasharray: '4 2' },
+        markerEnd: { type: 'arrowclosed' as const },
+      })
+    })
+  }
   return { nodes, edges }
 }
 
 function flowToDsl(dsl: WorkflowDsl, nodes: Node[], edges: Edge[]): WorkflowDsl {
-  const steps: Step[] = nodes.map(n => {
+  // 循环体节点回收进 body（移出主图）；主图节点 = 无 BODY_PREFIX 的节点
+  const withCollapsedSteps = collapseLoopBodies(dsl.steps, nodes)
+  const mainNodes = nodes.filter(n => !n.id.includes(BODY_PREFIX))
+  const steps: Step[] = mainNodes.map(n => {
     const d = n.data as WfNodeData
-    const prev = dsl.steps.find(s => s.id === d.stepId)
+    const prev = withCollapsedSteps.find(s => s.id === d.stepId)
     return {
       ...(prev ?? { id: d.stepId, type: d.stepType as StepType }),
       id: d.stepId,
@@ -67,12 +97,14 @@ function flowToDsl(dsl: WorkflowDsl, nodes: Node[], edges: Edge[]): WorkflowDsl 
       position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
     }
   })
-  const dslEdges = edges.map(e => ({
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    source_handle: (e.sourceHandle as 'then' | 'else' | null | undefined) ?? null,
-  }))
+  const dslEdges = edges
+    .filter(e => !e.id.startsWith('body-edge-'))
+    .map(e => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      source_handle: (e.sourceHandle as 'then' | 'else' | null | undefined) ?? null,
+    }))
   return { ...dsl, steps, edges: dslEdges }
 }
 

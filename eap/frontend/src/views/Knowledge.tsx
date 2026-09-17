@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { BookOpen, FileText, Plus, Search, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BookOpen, FileText, Plus, Search, Trash2, Upload } from 'lucide-react'
 import {
   Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Skeleton,
   Textarea, toast,
@@ -136,6 +136,8 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
   const [ingestTitle, setIngestTitle] = useState('')
   const [ingestText, setIngestText] = useState('')
   const [ingesting, setIngesting] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -182,6 +184,42 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
     }
   }
 
+  const uploadFile = async (file: File) => {
+    setUploading(true)
+    try {
+      const body = new FormData()
+      body.append('file', file)
+      const r = await fetch(`/api/v1/kb/${encodeURIComponent(name)}/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('eap-token') ?? ''}` },
+        body,
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.detail ?? `HTTP ${r.status}`)
+      toast.success(`${file.name} 已上传，解析与摄入异步执行中`)
+      // 轮询摄入任务完成后刷新文档列表
+      const poll = setInterval(async () => {
+        try {
+          const task = await api<{ state: string }>('GET', `/api/v1/tasks/${d.task_id}`)
+          if (task.state === 'COMPLETED') {
+            clearInterval(poll)
+            toast.success('摄入完成')
+            loadDocs()
+          } else if (task.state === 'FAILED') {
+            clearInterval(poll)
+            toast.error('摄入失败（解析错误或格式不支持）')
+            loadDocs()
+          }
+        } catch { clearInterval(poll) }
+      }, 1000)
+      loadDocs()
+    } catch (e) {
+      toast.error(`上传失败：${(e as Error).message}`)
+    } finally {
+      setUploading(false)
+    }
+  }
+
   const search = async () => {
     if (!query.trim()) return
     setSearching(true)
@@ -207,9 +245,20 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
             <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
               <FileText className="size-4 text-ink-3" />文档（{docs.length}）
             </p>
-            <Button variant="primary" onClick={() => setIngestOpen(true)}>
-              <Plus className="size-3.5" />摄入文档
-            </Button>
+            <div className="flex items-center gap-2">
+              <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0]
+                  if (f) void uploadFile(f)
+                  e.target.value = ''
+                }} />
+              <Button variant="secondary" onClick={() => fileRef.current?.click()} loading={uploading}>
+                <Upload className="size-3.5" />上传文件
+              </Button>
+              <Button variant="primary" onClick={() => setIngestOpen(true)}>
+                <Plus className="size-3.5" />粘贴文本
+              </Button>
+            </div>
           </div>
           <div className="rounded-[--radius-card] border border-line bg-surface">
             {loading ? (
