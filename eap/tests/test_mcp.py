@@ -36,8 +36,6 @@ def live_server():
 
     共享同一测试库（EAP_DB_URL 由 conftest 设定），数据面与 TestClient 用例互通。
     """
-    import os
-    import subprocess
 
     if not _port_free(MCP_TEST_PORT):
         # 端口被占：若是存活 eap 实例则复用（服务已就绪），否则跳过
@@ -96,7 +94,6 @@ def test_mcp_endpoint_requires_api_key(live_server):
 
 def test_mcp_auth_disabled_flag():
     """EAP_MCP_AUTH=0：内网可信环境关闭门禁（独立 app 验证构建期开关）。"""
-    import os
 
     from eap.config import get_settings
 
