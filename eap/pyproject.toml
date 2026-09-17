@@ -14,6 +14,7 @@ dependencies = [
     "mcp>=2.2.0",
     "cryptography>=42.0",
     "alembic>=1.20.0",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]
@@ -28,9 +29,15 @@ otel = [
     "opentelemetry-exporter-otlp>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
 ]
+# 文档解析（M12）：PDF/DOCX 摄入（未装时解析报提示性 ValueError）
+docs = [
+    "pypdf>=6.0",
+    "python-docx>=1.1",
+]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
 

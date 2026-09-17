@@ -70,6 +70,37 @@ def ingest_document(name: str, body: DocIngest, db: Session = fastapi.Depends(ge
     return {"document_id": doc.id, "title": doc.title, "kb": kb.name}
 
 
+@router.post("/{name}/upload")
+async def upload_document(
+    name: str,
+    request: fastapi.Request,
+    file: fastapi.UploadFile = fastapi.File(...),
+    title: str = fastapi.Form(""),
+    db: Session = fastapi.Depends(get_db),
+):
+    """文件上传摄入（M12）：pdf/docx/txt/md → 解析 → 异步摄入（任务引擎，不阻塞请求）。
+
+    返回 task_id；摄入状态经 GET /api/v1/tasks/{task_id} 轮询。
+    """
+    import base64
+
+    kb = _get_kb(db, name)
+    data = await file.read()
+    if len(data) > 20 * 1024 * 1024:
+        raise fastapi.HTTPException(status_code=413, detail="文件超过 20MB 上限")
+    filename = file.filename or "doc.txt"
+    doc_title = title or filename.rsplit(".", 1)[0]
+
+    from .tasks import _engine
+
+    task_id = await _engine(request).submit(db, "kb.ingest", {
+        "kb": kb.name, "title": doc_title, "filename": filename,
+        "file_b64": base64.b64encode(data).decode(), "source": "upload",
+    })
+    return {"task_id": task_id, "kb": kb.name, "filename": filename,
+            "note": "解析与摄入异步执行，经任务端点轮询状态"}
+
+
 @router.post("/{name}/faq")
 def ingest_faq(name: str, body: FAQIngest, db: Session = fastapi.Depends(get_db)):
     kb = _get_kb(db, name)

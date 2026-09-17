@@ -411,6 +411,36 @@ class TaskEngine:
 
     # ---------- 内置处理器 ----------
 
+    async def _h_kb_ingest(self, payload: dict, prev_result: dict) -> dict:
+        """异步文档摄入（M12）：大文档解析+分块+嵌入不阻塞请求线程。"""
+        from sqlalchemy import select
+
+        from ..knowledge import service as kb_svc
+        from ..knowledge.parsers import extract_text
+        from ..models import KB, Chunk
+
+        kb_name = str(payload.get("kb", ""))
+        title = str(payload.get("title", "未命名"))
+        content = str(payload.get("text", ""))
+        if payload.get("file_b64"):
+            import base64
+
+            content = extract_text(str(payload.get("filename", "doc.txt")),
+                                   base64.b64decode(payload["file_b64"]))
+        if not content.strip():
+            return {"status": "failed", "error": "解析后内容为空"}
+
+        with SessionLocal() as db:
+            kb = db.scalar(select(KB).where(KB.name == kb_name))
+            if kb is None:
+                return {"status": "failed", "error": f"知识库 {kb_name} 不存在"}
+            doc = kb_svc.ingest_text(db, kb, title, content,
+                                     source=str(payload.get("source", "upload")))
+            chunk_count = len(db.scalars(
+                select(Chunk.id).where(Chunk.doc_id == doc.id)).all())
+            return {"status": "ok", "document_id": doc.id, "title": title,
+                    "chunks": chunk_count}
+
     async def _h_agent_invoke(self, payload: dict, prev_result: dict) -> dict:
         """异步执行一次智能体调用（长任务/批量场景）。"""
         from ..agents.registry import registry
@@ -448,4 +478,5 @@ def create_task_engine(queue_backend=None) -> TaskEngine:
     engine = TaskEngine(queue_backend)
     engine.register_handler("agent.invoke", engine._h_agent_invoke)
     engine.register_handler("agent.hitl", engine._h_agent_hitl)
+    engine.register_handler("kb.ingest", engine._h_kb_ingest)
     return engine

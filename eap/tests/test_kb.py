@@ -68,3 +68,39 @@ def test_faq_ingest_and_retrieve(client: TestClient):
 def test_retrieve_auth_required(client: TestClient):
     assert client.post("/api/v1/kb/website-faq/retrieve",
                        json={"query": "x"}).status_code == 401
+
+
+def test_document_upload_async_ingest(client: TestClient):
+    """M12 文件上传：PDF/DOCX 解析经任务引擎异步摄入（用 txt 验证全链路，解析器单测覆盖格式分发）。"""
+    import io
+    import time
+
+    files = {"file": ("notes.txt", io.BytesIO("第一段内容。\n\n第二段内容。".encode()), "text/plain")}
+    r = client.post("/api/v1/kb/website-faq/upload", headers=AUTH, files=files,
+                    data={"title": "上传测试"})
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task_id"]
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        detail = client.get(f"/api/v1/tasks/{task_id}", headers=AUTH).json()
+        if detail["state"] in ("COMPLETED", "FAILED"):
+            break
+        time.sleep(0.2)
+    assert detail["state"] == "COMPLETED", detail
+    assert detail["result"]["chunks"] >= 1
+
+    # 文档出现在列表
+    docs = client.get("/api/v1/kb/website-faq/documents", headers=AUTH).json()
+    assert any(d["title"] == "上传测试" for d in docs)
+
+
+def test_parser_format_dispatch():
+    """解析器分发：txt 直读；未知格式提示性报错。"""
+    import pytest
+
+    from eap.knowledge.parsers import extract_text
+
+    assert "内容" in extract_text("a.txt", "内容".encode())
+    with pytest.raises(ValueError, match="不支持的文档格式"):
+        extract_text("a.exe", b"MZ")

@@ -19,12 +19,31 @@ _COLLECTION = "eap_vectors"
 
 
 class LocalVectorStore:
-    """本地余弦（默认）：向量在 Chunk.embedding，检索时全量算分（无额外状态）。"""
+    """本地余弦（默认）：向量在 Chunk.embedding。
+
+    M12 提速：numpy 矩阵化一次算全部余弦（替代逐条 Python 循环，数千块快两个数量级）；
+    numpy 未安装回退逐条实现。O(N) 扫描语义不变（生产大规模切 Milvus）。
+    """
 
     def scores_for(self, chunks, query_vec) -> list[float]:
-        from .embedding import cosine
+        try:
+            import numpy as np
+        except ImportError:
+            from .embedding import cosine
 
-        return [cosine(query_vec, c.embedding or []) for c in chunks]
+            return [cosine(query_vec, c.embedding or []) for c in chunks]
+
+        q = np.asarray(query_vec, dtype="float32")
+        q_norm = float(np.linalg.norm(q)) or 1.0
+        matrix_rows = []
+        for c in chunks:
+            emb = np.asarray(c.embedding or [], dtype="float32")
+            matrix_rows.append(emb / (float(np.linalg.norm(emb)) or 1.0))
+        if not matrix_rows or matrix_rows[0].size == 0:
+            return [0.0] * len(chunks)
+        matrix = np.vstack(matrix_rows)
+        scores = matrix @ (q / q_norm)
+        return [round(float(s), 6) for s in scores]
 
     def upsert(self, kb_id: int, chunk_id: int, vector: list[float]) -> None:
         pass  # 本地向量随 Chunk 落库，无独立动作
