@@ -17,7 +17,18 @@ jobs:
         with:
           python-version: "3.12"
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra otel --extra docs --extra tokens
+      - name: Lint (ruff: F/E9 only)
+        run: uv run ruff check src/ tests/ --select F,E9
+      - name: Migration dry-run (empty DB)
+        run: |
+          uv run python -c "
+          import os, tempfile
+          os.environ['EAP_DB_URL'] = 'sqlite:///' + tempfile.mkdtemp() + '/ci.db'
+          from eap.db import init_db
+          init_db()
+          print('migration dry-run OK')
+          "
       - name: Run tests
         run: uv run pytest -q
         env:
@@ -42,5 +53,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm typecheck
+      - name: Unit tests (vitest)
+        run: pnpm test
       - name: Build
         run: pnpm build

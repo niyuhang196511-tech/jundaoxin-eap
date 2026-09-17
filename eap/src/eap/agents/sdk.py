@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from ..db import SessionLocal
 from ..modelhub.router import hub as model_hub
@@ -21,6 +22,9 @@ from ..schemas import InvokeRequest, InvokeResult
 from .app import AgentApp
 from .manifest import AgentManifest
 from .runtime_tools import retriever_tool
+
+if TYPE_CHECKING:
+    from ..runtime.tools import Tool
 
 
 class Retriever:

@@ -18,8 +18,23 @@ import httpx
 
 
 def approx_tokens(text: str) -> int:
-    """粗略 token 估算（生产应使用分词器精确计量，见 docs/08 §4）。"""
-    return max(1, len(text or "") // 4)
+    """token 估算：tiktoken 可用时按 cl100k_base 精确计数，否则 len//4 粗估（docs/08 §4）。"""
+    if not text:
+        return 0
+    global _TIKTOKEN_ENC
+    if _TIKTOKEN_ENC is False:  # 惰性探测一次
+        try:
+            import tiktoken
+
+            _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN_ENC = None
+    if _TIKTOKEN_ENC is not None:
+        return max(1, len(_TIKTOKEN_ENC.encode(text)))
+    return max(1, len(text) // 4)
+
+
+_TIKTOKEN_ENC: object | None | bool = False  # False=未探测 / None=不可用 / Encoding 实例
 
 
 @dataclass

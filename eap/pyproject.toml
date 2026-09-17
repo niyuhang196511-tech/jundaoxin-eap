@@ -34,11 +34,14 @@ docs = [
     "pypdf>=6.0",
     "python-docx>=1.1",
 ]
+# 精确 token 计量（M13）：tiktoken 缺失时回退 len//4 估算
+tokens = ["tiktoken>=0.9"]
 
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "ruff>=0.16.8",
 ]
 
 [build-system]
@@ -50,3 +53,12 @@ packages = ["src/eap"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixture 跨模块复用：导入即注册，使用点在装饰器参数中（F811 误报场景）
+"tests/test_jwt_auth.py" = ["F811"]
+# 测试中的占位赋值
+"tests/test_multiagent.py" = ["F841"]

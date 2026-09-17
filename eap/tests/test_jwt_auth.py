@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from .conftest import AUTH
-from .test_oidc import _make_id_token, fake_idp  # noqa: F401 复用模拟 IdP 夹具与签名设施
+from .test_oidc import _make_id_token, fake_idp  # noqa: F401,F811 复用模拟 IdP 夹具（fixture 再导出）
 
 ISSUER = "https://idp.example"
 

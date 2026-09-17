@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 
-import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
@@ -82,7 +81,6 @@ def test_hitl_deny(client: TestClient):
 
 def test_cancel_pending_task(client: TestClient):
     """取消：注册一个慢处理器，提交后取消 → CANCELLED。"""
-    import asyncio
 
     engine = client.app.state.task_engine
 
@@ -114,7 +112,7 @@ def test_approve_non_waiting_task_conflict(client: TestClient):
                        json={"type": "agent.invoke",
                              "payload": {"agent": "faq-agent", "input": "hi"}})
     task_id = resp.json()["task_id"]
-    task = _poll(client, task_id, {"COMPLETED"})
+    _poll(client, task_id, {"COMPLETED"})
     resp = client.post(f"/api/v1/tasks/{task_id}/approve", headers=AUTH,
                        json={"decision": True})
     assert resp.status_code == 409
@@ -122,7 +120,6 @@ def test_approve_non_waiting_task_conflict(client: TestClient):
 
 def test_engine_recovers_pending_tasks_on_start(client):
     """崩溃恢复：启动时遗留 PENDING 任务被重新入队执行（M7 可靠性）。"""
-    import asyncio
 
     from eap.db import SessionLocal
     from eap.models import TaskRecord
