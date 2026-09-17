@@ -87,12 +87,49 @@ def domain_allowed(domains: list, origin: str | None, referer: str | None) -> bo
 # ---------- 滑动窗口限流 ----------
 
 class SlidingWindow:
-    """进程内限流（单实例开发用；多副本换 Redis 滑窗，docs/03 §5）。"""
+    """进程内限流（单实例/无 Redis 回退；多副本自动切 Redis 滑窗，docs/03 §5）。"""
 
     def __init__(self, limit: int, window_seconds: int = 60) -> None:
         self.limit = limit
         self.window = window_seconds
         self._hits: dict[str, list[float]] = {}
+        self._redis_url: str | None = None
+        self._redis_checked = False
+
+    def _redis(self):
+        """惰性探测 Redis（EAP_REDIS_URL 配置即启用多副本限流）。"""
+        import redis.asyncio as aioredis  # noqa: F401  探测仅确认配置
+
+        if not self._redis_checked:
+            self._redis_checked = True
+            self._redis_url = get_settings().redis_url
+        return self._redis_url
+
+    async def allow_async(self, key: str) -> bool:
+        """Redis 滑窗（MULTI 原子 ZADD+ZREM+ZCARD）；未配置 Redis 回退进程内 allow。"""
+        url = self._redis()
+        if not url:
+            return self.allow(key)
+        import time as _time
+
+        import redis.asyncio as aioredis
+
+        now = _time.time()
+        window_start = now - self.window
+        redis_key = f"eap:ratelimit:{key}"
+        r = aioredis.from_url(url, decode_responses=True)
+        try:
+            pipe = r.pipeline(transaction=True)
+            pipe.zremrangebyscore(redis_key, 0, window_start)
+            pipe.zadd(redis_key, {f"{now}": now})
+            pipe.zcard(redis_key)
+            _, _, count = await pipe.execute()
+            await r.expire(redis_key, self.window)
+            return int(count) <= self.limit
+        except Exception:
+            return self.allow(key)  # Redis 抖动回退进程内
+        finally:
+            await r.aclose()
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()

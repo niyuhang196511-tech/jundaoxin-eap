@@ -68,3 +68,28 @@ def oidc_callback(code: str, db: Session = fastapi.Depends(get_db)):
     return {"api_key": plain, "user": {"sub": user.sub, "email": user.email,
                                        "name": user.name, "tenant_id": user.tenant_id},
             "issuer": get_settings().oidc_issuer}
+
+
+class _RevokeBody(fastapi.Request):
+    pass
+
+
+@router.post("/jwt/revoke")
+async def revoke_jwt(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """吊销当前请求的 JWT（M10）：管理端点——带有效 JWT 调用即吊销自身（登出/失窃处置）。
+
+    身份微服务迁出后由身份服务提供等价能力；本端点保持兼容代理。
+    """
+    from datetime import datetime
+
+    from ...security_keys import revoke_token
+
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if token.count(".") != 2 or not oidc.configured():
+        raise fastapi.HTTPException(status_code=400, detail="EAP-1104 无可吊销的 JWT")
+    # 过期时刻取自 claims（exp），由验签保证真实性——这里轻解析即可
+    claims = oidc.verify_access_token(token)
+    expires_at = datetime.utcfromtimestamp(int(claims.get("exp", 0)))
+    revoke_token(token, expires_at, reason="self-revoke")
+    return {"revoked": True, "expires_at": expires_at.isoformat() + "Z"}

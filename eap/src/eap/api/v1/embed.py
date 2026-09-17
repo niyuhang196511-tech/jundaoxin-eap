@@ -64,7 +64,7 @@ def disable_embed_channel(channel_id: int, db: Session = fastapi.Depends(get_db)
 
 
 @public_router.post("/session")
-def exchange_session(
+async def exchange_session(
     body: EmbedSessionRequest,
     request: fastapi.Request,
     db: Session = fastapi.Depends(get_db),
@@ -89,7 +89,7 @@ def exchange_session(
     if not domain_allowed(channel.domains, origin, referer):
         raise fastapi.HTTPException(status_code=403, detail=f"EAP-3001 域名不在白名单: {origin or referer}")
 
-    if not rate_limiter.allow(f"embed:{channel.id}"):
+    if not await rate_limiter.allow_async(f"embed:{channel.id}"):
         raise fastapi.HTTPException(status_code=429, detail="EAP-2001 请求过于频繁")
 
     session_token = sign_session(

@@ -161,6 +161,21 @@ class UsageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class RevokedToken(Base):
+    """JWT 吊销黑名单（M10）：token 哈希 → 过期时刻。过期条目由清理任务/查询时惰性剔除。
+
+    身份微服务迁出预留：本表的读写收敛在 security_keys.revoke/ is_revoked，
+    迁出后由身份服务提供等价接口，deps 只换调用方。
+    """
+
+    __tablename__ = "revoked_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256(token)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)  # 原 token 过期时刻（到点可清）
+    revoked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    reason: Mapped[str] = mapped_column(String(128), default="")
+
+
 class BudgetRecord(Base):
     """成本中心·租户预算（docs/08 §4）：按自然月统计 token 用量，超限熔断调用。"""
 

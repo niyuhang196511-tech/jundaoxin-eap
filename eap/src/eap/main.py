@@ -49,12 +49,15 @@ async def lifespan(app: FastAPI):
     from . import workflows as workflows_svc
 
     await workflows_svc.load_enabled()
+    from .agents import registry_sync
     from .plugins import load_plugins
 
     load_plugins()  # 扩展开发体系：插件目录加载（单插件失败不阻断启动）
+    registry_sync.start_subscriber(registry.apply_remote_event)  # M10：跨副本管理操作广播
     await app.state.task_engine.start(workers=2)
     async with app.state.mcp.session_manager.run():  # MCP Streamable HTTP 会话管理
         yield
+    await registry_sync.stop_subscriber()
     await app.state.task_engine.stop()
     for agent in registry.all():
         if agent.instance:

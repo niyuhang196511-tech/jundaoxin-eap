@@ -79,8 +79,11 @@ class AgentRegistry:
 
     # ---------- 生命周期 ----------
 
-    async def start_agent(self, name: str) -> None:
-        """实例化 + START + 健康检查 + DB 纳管（bootstrap 与动态注册共用）。"""
+    async def start_agent(self, name: str, *, broadcast: bool = True) -> None:
+        """实例化 + START + 健康检查 + DB 纳管（bootstrap 与动态注册共用）。
+
+        broadcast=True 时跨副本广播；本副本 bootstrap 不广播（各副本自行拉起）。
+        """
         agent = self._agents[name]
         ctx = get_platform_context()
         try:
@@ -93,9 +96,28 @@ class AgentRegistry:
             agent.status = "unhealthy"
             agent.health = {"ok": False, "error": str(e)}
         self._persist(agent)
+        if broadcast:
+            from . import registry_sync
 
-    async def stop_agent(self, name: str) -> None:
-        """STOP：调用 on_stop 钩子，实例保留（start 可再拉起），拒绝后续调用。"""
+            await registry_sync.publish({"action": "start", "name": name})
+
+    async def apply_remote_event(self, event: dict) -> None:
+        """应用远端副本的管理事件（registry_sync 订阅回调）。目录中没有的名字忽略。"""
+        action, name = event.get("action"), event.get("name", "")
+        if name not in self._agents:
+            return
+        if action == "start" and self._agents[name].status != "started":
+            await self.start_agent(name, broadcast=False)
+        elif action == "stop" and self._agents[name].status == "started":
+            await self.stop_agent(name, broadcast=False)
+        elif action == "unregister" and name in self._agents:
+            await self.unregister(name, broadcast=False)
+
+    async def stop_agent(self, name: str, *, broadcast: bool = True) -> None:
+        """STOP：调用 on_stop 钩子，实例保留（start 可再拉起），拒绝后续调用。
+
+        broadcast=True 时跨副本广播（远端副本以 broadcast=False 应用，避免回环）。
+        """
         agent = self._agents[name]
         if agent.instance is not None and agent.status == "started":
             try:
@@ -105,17 +127,25 @@ class AgentRegistry:
         agent.status = "stopped"
         agent.health = {"ok": False, "reason": "stopped by operator"}
         self._persist(agent)
+        if broadcast:
+            from . import registry_sync
 
-    async def unregister(self, name: str) -> None:
+            await registry_sync.publish({"action": "stop", "name": name})
+
+    async def unregister(self, name: str, *, broadcast: bool = True) -> None:
         """注销：停实例 + 移出注册表 + 删除 DB 纳管记录。"""
         if self._agents[name].status == "started":
-            await self.stop_agent(name)
+            await self.stop_agent(name, broadcast=False)
         del self._agents[name]
         with SessionLocal() as db:
             record = db.scalar(select(AgentRecord).where(AgentRecord.name == name))
             if record is not None:
                 db.delete(record)
                 db.commit()
+        if broadcast:
+            from . import registry_sync
+
+            await registry_sync.publish({"action": "unregister", "name": name})
 
     async def reload_modules(self) -> int:
         """热加载：先停全部运行中实例（触发 on_stop 钩子），importlib.reload 配置模块

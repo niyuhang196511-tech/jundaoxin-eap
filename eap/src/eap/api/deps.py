@@ -79,8 +79,11 @@ def resolve_tenant(
     # ③ 外部 IdP JWT（形如 JWT 且未命中本地凭证时尝试；OIDC 未配置则跳过）
     if token.count(".") == 2:
         from ..runtime import oidc
+        from ..security_keys import is_revoked
 
         if oidc.configured():
+            if is_revoked(token):
+                raise fastapi.HTTPException(status_code=401, detail="EAP-1002 token 已被吊销")
             try:
                 claims = oidc.verify_access_token(token)
             except oidc.OIDCError as e:
