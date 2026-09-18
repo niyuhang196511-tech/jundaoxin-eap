@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ...agents.registry import registry
 from ...db import get_db
-from ...models import AgentRecord, AgentVersionRecord
+from ...models import AgentRecord, AgentVersionRecord, InteractionRecord
 from ...observability import audit
 from ...observability.middleware import record_usage
 from ...runtime import agent_config, budget, policy
@@ -163,12 +163,40 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
             # 配置版本覆盖层（v0.5）：流式路径与 registry.invoke 同语义
             config_version, overlay_cfg = agent_config.resolve_effective_overlay(db, name, body.output_schema)
             with agent_config.apply_overlay(overlay_cfg):
-                async for event, data in agent.on_invoke_stream(body):
-                    if event == "token":
-                        tokens_out += len(data.get("content", ""))
-                    if event == "result" and config_version:
-                        data = {**data, "config_version": config_version}
-                    yield send(event, data)
+                try:
+                    async for event, data in agent.on_invoke_stream(body):
+                        if event == "token":
+                            tokens_out += len(data.get("content", ""))
+                        if event == "result" and config_version:
+                            data = {**data, "config_version": config_version}
+                        yield send(event, data)
+                except Exception as e:
+                    from ...runtime.interaction import InteractionRequested
+                    from ...models import InteractionRecord
+
+                    if isinstance(e, InteractionRequested):
+                        # 交互引擎（v0.5）：流式挂起 → result 帧携带 interaction
+                        payload = e.request
+                        record = InteractionRecord(
+                            id="itx-" + _uuid.uuid4().hex[:12],
+                            agent=name, session_id=body.session_id,
+                            schema=await payload.aresolved_schema(db, agent_name=name),
+                            values={}, state="waiting", trace_id=trace_id,
+                        )
+                        db.add(record)
+                        db.commit()
+                        result_data = {
+                            "content": payload.title or "等待用户输入",
+                            "citations": [], "steps": [], "usage": {"model": "interaction"},
+                            "config_version": config_version,
+                            "interaction": {"id": record.id, "key": payload.key,
+                                            "title": payload.title,
+                                            "description": payload.description,
+                                            "ui_schema": record.schema},
+                        }
+                        yield send("result", result_data)
+                    else:
+                        raise
         else:
             resp = await registry.invoke(db, name, body, trace_id=trace_id)
             for step in resp.steps:
@@ -328,3 +356,79 @@ def diff_versions(name: str, version_a: str, version_b: str, db: Session = fasta
         if cfg_a.get(key) != cfg_b.get(key):
             changes.append({"key": key, "from": cfg_a.get(key), "to": cfg_b.get(key)})
     return {"agent": name, "from": version_a, "to": version_b, "changes": changes}
+
+
+# ---------- 交互引擎（v0.5-④：聊天通道挂起/恢复 + 动态选项数据源） ----------
+
+class InteractionValues(BaseModel):
+    values: dict = Field(min_length=1, description="用户提交的表单值 {field_id: value}")
+    session_id: str | None = None
+
+
+class OptionRequest(BaseModel):
+    field: str
+    values: dict = Field(default_factory=dict, description="已填父字段值（级联取选项）")
+
+
+def _require_waiting_interaction(db: Session, interaction_id: str, name: str) -> InteractionRecord:
+    record = db.get(InteractionRecord, interaction_id)
+    if record is None or record.agent != name:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 交互 {interaction_id} 不存在")
+    if record.state != "waiting":
+        raise fastapi.HTTPException(status_code=409,
+                                    detail=f"EAP-4006 交互 {interaction_id} 状态为 {record.state}")
+    return record
+
+
+@router.post("/{name}/interactions/{interaction_id}/submit")
+async def submit_interaction(name: str, interaction_id: str, body: InteractionValues,
+                             request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """提交交互表单值 → 标记 submitted → 以交互恢复协议再次流式调用智能体（SSE）。
+
+    恢复协议：input 为 JSON {"__interaction__": <id>, <field>: <value>}，
+    智能体经 ctx.interaction_values(request) 读取提交值并从交互点继续。
+    """
+    embed_agent = getattr(request.state, "embed_agent", None)
+    if embed_agent and embed_agent != name:
+        raise fastapi.HTTPException(status_code=403, detail=f"EAP-3002 会话令牌仅限智能体 {embed_agent}")
+    _require_agent(name)
+    record = _require_waiting_interaction(db, interaction_id, name)
+    record.values = body.values
+    record.state = "submitted"
+    db.commit()
+    from ...observability import audit
+
+    audit.record("interaction.submit", actor=audit.actor_of(request),
+                 target=f"{name}:{interaction_id}", detail={"fields": sorted(body.values)},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    resume_input = json.dumps({"__interaction__": interaction_id, **body.values}, ensure_ascii=False)
+    resume_request = InvokeRequest(input=resume_input, stream=True,
+                                   session_id=body.session_id or record.session_id)
+    return StreamingResponse(
+        _stream_invoke(name, resume_request, request, db),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/{name}/interactions/{interaction_id}/options")
+async def interaction_options(name: str, interaction_id: str, body: OptionRequest,
+                              db: Session = fastapi.Depends(get_db)):
+    """级联动态选项：按已填父字段值实时重取某字段的 options（调已注册 Tool + 审计）。"""
+    _require_agent(name)
+    record = db.get(InteractionRecord, interaction_id)
+    if record is None or record.agent != name:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 交互 {interaction_id} 不存在")
+    fields = {f.get("id"): f for f in (record.schema or {}).get("fields", [])}
+    field = fields.get(body.field)
+    if field is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 字段 {body.field} 不存在")
+    data_source = field.get("data_source")
+    if not data_source:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 字段 {body.field} 无动态数据源")
+    from ...runtime.interaction import aresolve_options
+
+    try:
+        options = await aresolve_options(db, data_source, values=body.values, agent_name=name)
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
+    return {"interaction_id": interaction_id, "field": body.field, "options": options}

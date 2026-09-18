@@ -7,6 +7,7 @@ import {
 import { Button, Input } from '@/components/ui'
 import { Markdown } from '@/components/chat/Markdown'
 import { SchemaRenderer } from '@/components/chat/renderers/SchemaRenderer'
+import { UISchemaRenderer, toastInteractionError, type UISchema } from '@/components/chat/UISchemaRenderer'
 import { api, conversationsApi, sseInvoke } from '@/lib/api'
 import { cn } from '@/lib/cn'
 
@@ -25,6 +26,7 @@ interface ChatMsg {
   steps?: string[]
   data?: Record<string, unknown>
   data_schema?: Record<string, unknown>
+  interaction?: { id: string; ui_schema: UISchema } | null
 }
 
 /** 对话调试面板：左侧会话历史 + 中间消息流（打字机/Markdown/引用/步骤）+ 底部输入 */
@@ -122,6 +124,7 @@ export function ChatPanel({ agent }: { agent: string }) {
             steps: data.steps ?? steps,
             data: data.data ?? undefined,
             data_schema: data.data_schema ?? undefined,
+            interaction: data.interaction ?? null,
           })
         } else if (event === 'error') {
           patchLast({ streaming: false, content: `⚠️ ${data.message ?? '调用失败'}` })
@@ -144,6 +147,73 @@ export function ChatPanel({ agent }: { agent: string }) {
     abortRef.current?.abort()
     setStreaming(false)
   }
+
+  /** 交互提交（v0.5-④）：表单值 → submit 端点 → 恢复流式调用续写同一条消息 */
+  const submitInteraction = useCallback(async (interactionId: string, values: Record<string, unknown>) => {
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    setStreaming(true)
+    const steps: string[] = []
+    try {
+      const r = await fetch(`/api/v1/agents/${encodeURIComponent(agent)}/interactions/${encodeURIComponent(interactionId)}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('eap-token') || process.env.NEXT_PUBLIC_EAP_TOKEN || ''}` },
+        body: JSON.stringify({ values, session_id: sessionId }),
+        signal: ctrl.signal,
+      })
+      if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`)
+      const reader = r.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const frames = buf.split('\n\n')
+        buf = frames.pop() ?? ''
+        for (const frame of frames) {
+          let ev = 'message'
+          let dataRaw = ''
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) ev = line.slice(6).trim()
+            else if (line.startsWith('data:')) dataRaw += line.slice(5).trim()
+          }
+          if (!dataRaw) continue
+          let data: any
+          try { data = JSON.parse(dataRaw) } catch { continue }
+          if (ev === 'token') {
+            setMessages(ms => {
+              const next = [...ms]
+              const last = next[next.length - 1]
+              if (last?.role === 'assistant') {
+                next[next.length - 1] = { ...last, content: last.content + (data.content ?? ''), interaction: null }
+              }
+              return next
+            })
+          } else if (ev === 'result') {
+            patchLast({
+              streaming: false,
+              content: data.content ?? '',
+              citations: data.citations ?? [],
+              steps: data.steps ?? steps,
+              data: data.data ?? undefined,
+              data_schema: data.data_schema ?? undefined,
+              interaction: data.interaction ?? null,
+            })
+          } else if (ev === 'error') {
+            patchLast({ streaming: false, content: `⚠️ ${data.message ?? '调用失败'}` })
+          }
+        }
+      }
+      loadSessions()
+    } catch (e) {
+      patchLast({ streaming: false })
+      toastInteractionError(e)
+    } finally {
+      setStreaming(false)
+      abortRef.current = null
+    }
+  }, [agent, sessionId, patchLast, loadSessions])
 
   const regenerate = () => {
     const lastUser = [...messages].reverse().find(m => m.role === 'user')
@@ -209,7 +279,9 @@ export function ChatPanel({ agent }: { agent: string }) {
             </div>
           )}
           {messages.map((m, i) => (
-            <MessageBubble key={i} msg={m} onRegenerate={
+            <MessageBubble key={i} msg={m} agent={agent} onInteractionSubmit={
+              m.interaction ? (values) => submitInteraction(m.interaction!.id, values) : undefined
+            } onRegenerate={
               m.role === 'assistant' && i === messages.length - 1 && !streaming && messages.length >= 2
                 ? regenerate : undefined} />
           ))}
@@ -248,7 +320,12 @@ export function ChatPanel({ agent }: { agent: string }) {
   )
 }
 
-function MessageBubble({ msg, onRegenerate }: { msg: ChatMsg; onRegenerate?: () => void }) {
+function MessageBubble({ msg, agent, onInteractionSubmit, onRegenerate }: {
+  msg: ChatMsg
+  agent?: string
+  onInteractionSubmit?: (values: Record<string, unknown>) => void
+  onRegenerate?: () => void
+}) {
   const [showSteps, setShowSteps] = useState(false)
   const [showCitations, setShowCitations] = useState(false)
   const isUser = msg.role === 'user'
@@ -272,6 +349,15 @@ function MessageBubble({ msg, onRegenerate }: { msg: ChatMsg; onRegenerate?: () 
                 : null}
           {!isUser && msg.data ? (
             <SchemaRenderer data={msg.data} schema={msg.data_schema ?? null} />
+          ) : null}
+          {!isUser && msg.interaction && agent ? (
+            <UISchemaRenderer
+              agent={agent}
+              interactionId={msg.interaction.id}
+              schema={msg.interaction.ui_schema}
+              onSubmit={onInteractionSubmit}
+              busy={msg.streaming}
+            />
           ) : null}
         </div>
         {!isUser && (msg.steps?.length || msg.citations?.length) ? (

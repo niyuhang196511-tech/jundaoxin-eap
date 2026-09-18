@@ -567,3 +567,26 @@ class AuditLog(Base):
     detail: Mapped[dict] = mapped_column(JSON, default=dict)  # 脱敏后的变更摘要
     trace_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class InteractionRecord(Base):
+    """交互引擎（docs/unfinished v0.5-④）：Agent 请求用户结构化输入的挂起/恢复记录。
+
+    - 聊天/工作流通道：挂起时落库（schema 为解析后的 AI UI Schema），submit 后 values 回填
+    - 任务通道的快照在 TaskRecord.result 内（与 HITL 审批同语义），不落此表
+    - state: waiting（等待用户）| submitted（已提交）| expired（超时/作废）
+    """
+
+    __tablename__ = "interactions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # itx-<hex>
+    agent: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(40), index=True, nullable=True)  # workflow run
+    schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    values: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(16), default="waiting", index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

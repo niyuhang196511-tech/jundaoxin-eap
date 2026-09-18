@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import TaskRecord
 from .loop import TaskSuspended
+from .interaction import InteractionRequested
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -270,6 +271,31 @@ class TaskEngine:
         await self.enqueue(task_id)
         return "PENDING"
 
+    async def interact(self, task_id: str, values: dict) -> str:
+        """交互引擎（v0.5-④）：合并用户提交的表单值到快照 → PENDING 重新入队续跑。
+
+        提交值写入 result.interactions[key]，handler 恢复时经 resume 快照回传给 agent。
+        """
+        if not isinstance(values, dict) or not values:
+            raise ValueError("values 必须是非空对象")
+        with SessionLocal() as db:
+            task = db.get(TaskRecord, task_id)
+            if task is None:
+                raise KeyError(f"任务 {task_id} 不存在")
+            if task.state != "WAITING_INPUT":
+                raise ValueError(f"任务 {task_id} 状态为 {task.state}，不在等待用户输入")
+            result = dict(task.result or {})
+            pending = result.get("pending_interaction", {})
+            interactions = dict(result.get("interactions", {}))
+            interactions[pending.get("key", "input")] = values
+            result["interactions"] = interactions
+            result["pending_interaction"] = None
+            task.result = result
+            task.state = "PENDING"
+            db.commit()
+        await self.enqueue(task_id)
+        return "PENDING"
+
     # ---------- 定时调度（docs/03 §5）：到期即 submit，走统一队列/HITL/取消链路 ----------
 
     @staticmethod
@@ -401,6 +427,16 @@ class TaskEngine:
                 "messages": sus.messages,
                 "pending": {"tool": sus.pending_tool, "arguments": sus.pending_args},
                 "approvals": prev_result.get("approvals", {}),
+            })
+            return
+        except InteractionRequested as ir:
+            # 交互引擎（v0.5-④）：结构化输入挂起 → WAITING_INPUT + 快照，interact 端点提交后续跑
+            self._mark(task_id, "WAITING_INPUT", {
+                "messages": ir.messages,
+                "pending_interaction": {"key": ir.request.key, "title": ir.request.title,
+                                        "description": ir.request.description,
+                                        "schema": ir.request.schema},
+                "interactions": (prev_result or {}).get("interactions", {}),
             })
             return
         except asyncio.CancelledError:

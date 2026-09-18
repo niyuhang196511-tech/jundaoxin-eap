@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import AgentRecord
-from ..schemas import InvokeRequest, InvokeResponse, InvokeResult
+from ..schemas import InteractionPayload, InvokeRequest, InvokeResponse, InvokeResult
 from .app import AgentApp
 from .manifest import AgentManifest
 
@@ -153,7 +153,8 @@ class AgentRegistry:
         settings = get_settings()
         builtin = ["eap.agents.builtin.faq_agent",
                    "eap.agents.builtin.order_agent",
-                   "eap.agents.builtin.supervisor_agent"]
+                   "eap.agents.builtin.supervisor_agent",
+                   "eap.agents.builtin.warehouse_agent"]
         modules = list(dict.fromkeys([*builtin, *settings.agent_modules]))
         for name in self._agents:
             if self._agents[name].status == "started":
@@ -191,7 +192,8 @@ class AgentRegistry:
         # ② 配置模块发现（内置示例 + EAP_AGENT_MODULES；env 覆盖不挤掉内置）
         builtin = ["eap.agents.builtin.faq_agent",
                    "eap.agents.builtin.order_agent",
-                   "eap.agents.builtin.supervisor_agent"]
+                   "eap.agents.builtin.supervisor_agent",
+                   "eap.agents.builtin.warehouse_agent"]
         modules = dict.fromkeys([*builtin, *settings.agent_modules])
         for mod in modules:
             try:
@@ -261,6 +263,38 @@ class AgentRegistry:
                 with agent_config.apply_overlay(overlay_cfg):
                     result: InvokeResult = await agent.instance.on_invoke(request)
             except Exception as e:
+                from ..runtime.interaction import InteractionRequested
+
+                if isinstance(e, InteractionRequested):
+                    # 交互引擎（v0.5）：挂起落库 → result 帧返回交互请求，submit 后恢复
+                    if span_cm is not None and span is not None:
+                        span_cm.__exit__(None, None, None)
+                    incr("eap_agent_invocations_total", {"agent": name, "status": "interaction"})
+                    from ..models import InteractionRecord
+
+                    payload = e.request
+                    record = InteractionRecord(
+                        id="itx-" + uuid.uuid4().hex[:12],
+                        agent=name, session_id=request.session_id,
+                        schema=await payload.aresolved_schema(db, agent_name=name),
+                        values={}, state="waiting",
+                        trace_id=trace_id or uuid.uuid4().hex,
+                    )
+                    db.add(record)
+                    db.commit()
+                    return InvokeResponse(
+                        invocation_id=uuid.uuid4().hex,
+                        agent=agent.manifest.name,
+                        agent_version=agent.manifest.version,
+                        trace_id=trace_id or uuid.uuid4().hex,
+                        output=payload.title or "等待用户输入",
+                        usage={"model": "interaction"},
+                        config_version=config_version,
+                        interaction=InteractionPayload(
+                            id=record.id, key=payload.key, title=payload.title,
+                            description=payload.description, ui_schema=record.schema,
+                        ),
+                    )
                 if span_cm is not None and span is not None:
                     span.record_exception(e)
                     span_cm.__exit__(type(e), e, e.__traceback__)

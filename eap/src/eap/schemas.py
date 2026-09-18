@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_CAPABILITIES = {
     "chat", "reasoning", "embedding", "rerank", "vision",
@@ -155,6 +155,17 @@ class InvokeRequest(BaseModel):
         default=None, description="结构化输出 JSON Schema（v0.5，请求级，优先于配置版本/代码默认）")
 
 
+class InteractionPayload(BaseModel):
+    """挂起的交互请求（v0.5 交互引擎）：result 帧内返回给前端渲染表单。"""
+
+    model_config = ConfigDict(protected_namespaces=())
+    id: str  # interactions 表主键（itx-<hex>），submit 端点凭此恢复
+    key: str = "input"  # 提交值在 agent 上下文中的变量名
+    title: str = ""
+    description: str = ""
+    ui_schema: dict = Field(default_factory=dict)  # AI UI Schema（options 已服务端解析）
+
+
 class InvokeResult(BaseModel):
     """AgentApp.on_invoke 的统一返回（docs/03 §7）。"""
 
@@ -164,6 +175,7 @@ class InvokeResult(BaseModel):
     usage: dict = Field(default_factory=dict)
     data: dict | None = None  # 结构化输出（v0.5）：schema 校验通过的 JSON 对象
     data_schema: dict | None = None  # 生成 data 所用的 schema（前端渲染提示）
+    interaction: InteractionPayload | None = None  # 挂起的交互请求（v0.5）
 
 
 class InvokeResponse(BaseModel):
@@ -179,3 +191,4 @@ class InvokeResponse(BaseModel):
     config_version: str | None = None  # 命中的配置版本（Agent 配置版本层，v0.5）
     data: dict | None = None  # 结构化输出（v0.5）
     data_schema: dict | None = None
+    interaction: InteractionPayload | None = None  # 挂起的交互请求（v0.5）

@@ -32,10 +32,12 @@ class ApprovalDecision(BaseModel):
 def _view(task: TaskRecord) -> dict:
     result = task.result or {}
     pending = result.get("pending")
+    interaction = result.get("pending_interaction")
     return {
         "task_id": task.id, "type": task.type, "state": task.state,
         "payload": task.payload, "result": result,
         "pending_tool": pending.get("tool") if pending else None,
+        "pending_interaction": interaction,  # v0.5 交互引擎：{key,title,description,schema}
         "created_at": str(task.created_at), "updated_at": str(task.updated_at),
     }
 
@@ -115,6 +117,27 @@ async def approve_task(task_id: str, body: ApprovalDecision, request: fastapi.Re
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-4006 {e}") from e
     _audit.record("task.approve", actor=_audit.actor_of(request), target=task_id,
                   detail={"decision": body.decision, "comment": body.comment},
+                  trace_id=getattr(request.state, "trace_id", ""))
+    return {"task_id": task_id, "state": state}
+
+
+class InteractionSubmit(BaseModel):
+    values: dict = Field(min_length=1, description="用户提交的表单值 {field_id: value}")
+
+
+@router.post("/{task_id}/interact")
+async def interact_task(task_id: str, body: InteractionSubmit, request: fastapi.Request):
+    """交互引擎（v0.5-④）：提交 WAITING_INPUT 任务的表单值，任务续跑。"""
+    try:
+        state = await _engine(request).interact(task_id, body.values)
+    except KeyError as e:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=409, detail=f"EAP-4006 {e}") from e
+    from ...observability import audit as _audit
+
+    _audit.record("task.interact", actor=_audit.actor_of(request), target=task_id,
+                  detail={"fields": sorted(body.values)},
                   trace_id=getattr(request.state, "trace_id", ""))
     return {"task_id": task_id, "state": state}
 

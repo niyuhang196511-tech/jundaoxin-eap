@@ -94,6 +94,40 @@ class PlatformContext:
         schema = self.overlay.get("output_schema")
         return schema if schema is not None else default
 
+    @staticmethod
+    def interact(schema: dict, *, key: str = "input", title: str = "", description: str = "",
+                 resume: dict | None = None) -> dict:
+        """向用户请求结构化输入（v0.5 交互引擎）。
+
+        用法（on_invoke / on_invoke_task 内）：
+            values = ctx.interact(schema, key="warehouse", resume=resume)
+        - 首次执行：抛 InteractionRequested —— 任务通道挂起为 WAITING_INPUT（提交后续跑），
+          聊天通道返回 InvokeResult.interaction（submit 后以恢复协议重新调用）。
+        - 恢复执行：resume 快照带 interactions[key] = 提交值，本函数直接返回提交值，
+          agent 代码从交互点继续（无需写两套逻辑）。
+        """
+        from ..runtime.interaction import InteractionRequested, InteractionRequest
+
+        submitted = (resume or {}).get("interactions", {}).get(key)
+        if submitted is not None:
+            return submitted
+        raise InteractionRequested(
+            InteractionRequest(schema=schema, key=key, title=title, description=description),
+        )
+
+    @staticmethod
+    def interaction_values(request: InvokeRequest) -> dict | None:
+        """聊天通道恢复协议：input 为 {"__interaction__": id, ...values} JSON 时返回提交值。"""
+        import json as _json
+
+        try:
+            parsed = _json.loads(request.input)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(parsed, dict) and "__interaction__" in parsed:
+            return {k: v for k, v in parsed.items() if k != "__interaction__"}
+        return None
+
     def retriever(self, kb_name: str) -> Retriever:
         allowed = self.overlay.get("knowledge")
         if allowed and kb_name not in allowed:

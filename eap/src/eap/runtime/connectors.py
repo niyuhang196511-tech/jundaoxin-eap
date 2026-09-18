@@ -35,7 +35,13 @@ def _mock_erp_handler(endpoint_name: str):
             args = {}
         if endpoint_name == "inventory.query":
             product = str(args.get("product") or args.get("query") or "").strip()
-            stock = {"EAP 一体机": 15, "EAP 网关": 42}.get(product, 8)
+            catalog = {"EAP 一体机": 15, "EAP 网关": 42, "EAP 传感器": 8}
+            if not product:
+                # 无查询条件 → 返回目录（交互引擎动态选项的数据源形态）
+                return json.dumps({"options": [{"product": k, "stock": v, "unit": "台"}
+                                               for k, v in catalog.items()]},
+                                  ensure_ascii=False)
+            stock = catalog.get(product, 8)
             return json.dumps({"product": product, "warehouse": "CN-EAST-1",
                                "stock": stock, "unit": "台"}, ensure_ascii=False)
         if endpoint_name == "order.create":
