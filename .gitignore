@@ -20,3 +20,8 @@ eap/src/eap/static/console/
 # 系统文件
 Thumbs.db
 .DS_Store
+# 运行时数据：上传媒体存储（EAP_MEDIA_DIR，含测试 media-test-*）
+eap/media/
+eap/media-test-*/
+# 本地向量索引持久化缓存（npz per KB）
+eap/vector-cache/
