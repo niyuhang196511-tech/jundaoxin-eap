@@ -269,7 +269,7 @@ class TaskEngine:
     # ---------- 定时调度（docs/03 §5）：到期即 submit，走统一队列/HITL/取消链路 ----------
 
     @staticmethod
-    def _next_run(s) -> datetime:
+    def _next_run(s) -> "datetime":
         """下次执行时刻：cron 优先（croniter 从当前推算），否则 interval_seconds。
 
         cron 解析失败回退 interval（调度不因坏表达式停摆，告警可见）。
@@ -289,7 +289,7 @@ class TaskEngine:
         return datetime.now(timezone.utc) + timedelta(seconds=s.interval_seconds or 60)
 
     async def _schedule_loop(self) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timezone
 
         from ..models import TaskScheduleRecord
 
