@@ -15,6 +15,7 @@ dependencies = [
     "cryptography>=42.0",
     "alembic>=1.20.0",
     "numpy>=2.5.3",
+    "croniter>=6.2.4",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ otel = [
 docs = [
     "pypdf>=6.0",
     "python-docx>=1.1",
+    "openpyxl>=3.1",
 ]
 # 精确 token 计量（M13）：tiktoken 缺失时回退 len//4 估算
 tokens = ["tiktoken>=0.9"]

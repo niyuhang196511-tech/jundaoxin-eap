@@ -114,10 +114,12 @@ def _local(filename: str, data: bytes) -> str:
         return _pdf_local(data)
     if suffix == "docx":
         return _docx_local(data)
+    if suffix in ("xlsx", "xls", "csv"):
+        return _tabular_local(filename, data)
     if suffix in ("txt", "md", "markdown"):
         return data.decode("utf-8", errors="replace")
-    raise ValueError(f"local 后端不支持的文档格式 .{suffix}（支持 pdf / docx / txt / md；"
-                     "扫描件/复杂版式请用 mineru 后端）")
+    raise ValueError(f"local 后端不支持的文档格式 .{suffix}（支持 pdf / docx / xlsx / csv / txt / md；"
+                     "扫描件/复杂版式请用 mineru 后端)")
 
 
 def _pdf_local(data: bytes) -> str:
@@ -189,6 +191,45 @@ def _save_image_safe(data: bytes, name: str) -> str | None:
     except Exception as e:
         logger.warning("图片落盘失败 %s: %s", name, e)
         return None
+
+
+def _tabular_local(filename: str, data: bytes) -> str:
+    """表格（xlsx/csv）→ markdown 表格文本：每行渲染为 `列: 值` 键值行（分块友好）。"""
+    import csv
+    import io
+
+    suffix = filename.lower().rsplit(".", 1)[-1]
+    rows: list[dict]
+    if suffix == "csv":
+        text = data.decode("utf-8-sig", errors="replace")
+        reader = csv.DictReader(io.StringIO(text))
+        rows = list(reader)
+    else:
+        try:
+            import openpyxl
+        except ImportError as e:
+            raise ValueError("XLSX 解析需要 openpyxl：uv sync --extra docs") from e
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        rows = []
+        for ws in wb.worksheets:
+            it = ws.iter_rows(values_only=True)
+            header = next(it, None)
+            if header is None:
+                continue
+            for raw in it:
+                rows.append({str(h): v for h, v in zip(header, raw) if h is not None})
+
+    if not rows:
+        return ""
+    headers = [h for h in rows[0].keys()]
+    out = ["| " + " | ".join(str(h) for h in headers) + " |"]
+    for r in rows:
+        out.append("| " + " | ".join(str(r.get(h, "")) for h in headers) + " |")
+    table_md = "\n".join(out)
+    # 大表按 50 行切 markdown 表格段（分块友好）
+    lines = table_md.splitlines()
+    chunks = ["\n".join(lines[i:i + 51]) for i in range(0, len(lines), 50)]
+    return f"（表格 {filename}，{len(rows)} 行）\n\n" + "\n\n".join(chunks)
 
 
 # ---------- MinerU 后端 ----------

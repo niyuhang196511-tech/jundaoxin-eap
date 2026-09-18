@@ -287,3 +287,24 @@ def test_vision_disabled_no_caption(monkeypatch):
         assert "【图片描述】" not in out
     finally:
         get_settings.cache_clear()
+
+
+def test_tabular_parsers():
+    """CSV/XLSX 表格解析：键值行 markdown 化。"""
+    import io
+
+    from eap.knowledge.parsers import extract_text
+
+    csv_md = extract_text("data.csv", "产品,价格\nA,1\nB,2".encode())
+    assert "| 产品 | 价格 |" in csv_md and "| A | 1 |" in csv_md
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["城市", "销量"])
+    ws.append(["北京", 100])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_md = extract_text("table.xlsx", buf.getvalue())
+    assert "| 北京 | 100 |" in xlsx_md
