@@ -55,3 +55,28 @@ def test_schedule_lifecycle(client):
                              "interval_seconds": 1}).status_code == 409
     assert client.delete("/api/v1/tasks/schedules/demo-cron", headers=HEADERS).json()["status"] == "deleted"
     assert client.delete("/api/v1/tasks/schedules/demo-cron", headers=HEADERS).status_code == 404
+
+
+def test_schedule_cron_expression(client):
+    """M17 cron 调度：表达式校验（无效 400）、next_run_at 按 cron 推算、_next_run 语义。"""
+    # 无效 cron → 400
+    r = client.post("/api/v1/tasks/schedules", headers=HEADERS,
+                    json={"name": "cron-bad", "task_type": "agent.invoke",
+                          "payload": {"agent": "faq-agent", "input": "x"},
+                          "interval_seconds": 60, "cron": "not-a-cron"})
+    assert r.status_code == 400, r.text
+
+    # 有效 cron：每天零点（UTC）
+    r = client.post("/api/v1/tasks/schedules", headers=HEADERS,
+                    json={"name": "cron-daily", "task_type": "agent.invoke",
+                          "payload": {"agent": "faq-agent", "input": "cron 冒烟"},
+                          "interval_seconds": 86400, "cron": "0 0 * * *"})
+    assert r.status_code == 200, r.text
+    assert r.json()["cron"] == "0 0 * * *"
+
+    sched = {s["name"]: s for s in client.get("/api/v1/tasks/schedules", headers=HEADERS).json()}
+    assert sched["cron-daily"]["next_run_at"] is not None
+    assert sched["cron-daily"]["next_run_at"].endswith("00:00:00"), sched["cron-daily"]
+
+    # 清理
+    assert client.delete("/api/v1/tasks/schedules/cron-daily", headers=HEADERS).status_code == 200

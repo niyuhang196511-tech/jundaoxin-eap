@@ -307,9 +307,10 @@ class WorkflowRunRecord(Base):
 
 
 class TaskScheduleRecord(Base):
-    """定时调度（docs/03 §5，M3）：按固定间隔周期性提交任务（DB 持久化，重启不丢）。
+    """定时调度（docs/03 §5，M3）：固定间隔或 cron 表达式周期性提交任务（DB 持久化，重启不丢）。
 
-    MVP 用固定间隔（interval_seconds）；cron 表达式接入时复用同一执行链路。
+    M17：cron（5 段表达式，croniter 解析）优先于 interval_seconds；
+    多副本防重复：抢占式更新 next_run_at（runtime/tasks._schedule_loop）。
     """
 
     __tablename__ = "task_schedules"
@@ -319,6 +320,7 @@ class TaskScheduleRecord(Base):
     task_type: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    cron: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 5 段 cron
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)

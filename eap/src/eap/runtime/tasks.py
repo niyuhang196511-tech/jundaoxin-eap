@@ -268,6 +268,26 @@ class TaskEngine:
 
     # ---------- 定时调度（docs/03 §5）：到期即 submit，走统一队列/HITL/取消链路 ----------
 
+    @staticmethod
+    def _next_run(s) -> datetime:
+        """下次执行时刻：cron 优先（croniter 从当前推算），否则 interval_seconds。
+
+        cron 解析失败回退 interval（调度不因坏表达式停摆，告警可见）。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        if s.cron:
+            try:
+                from croniter import croniter
+
+                base = datetime.now(timezone.utc)
+                return croniter(s.cron, base).get_next(datetime).replace(tzinfo=None)
+            except Exception as e:
+                logging.getLogger("eap.tasks").warning(
+                    "调度 %s cron %r 无效（回退 interval）: %s", s.name, s.cron, e)
+                return datetime.now(timezone.utc) + timedelta(seconds=s.interval_seconds or 60)
+        return datetime.now(timezone.utc) + timedelta(seconds=s.interval_seconds or 60)
+
     async def _schedule_loop(self) -> None:
         from datetime import datetime, timedelta, timezone
 
@@ -287,8 +307,7 @@ class TaskEngine:
                             update(TaskScheduleRecord)
                             .where(TaskScheduleRecord.id == s.id,
                                    TaskScheduleRecord.next_run_at == s.next_run_at)
-                            .values(next_run_at=now + timedelta(seconds=s.interval_seconds),
-                                    last_run_at=now)
+                            .values(next_run_at=self._next_run(s), last_run_at=now)
                         ).rowcount
                         if claimed:
                             await self.submit(db, s.task_type, dict(s.payload or {}))

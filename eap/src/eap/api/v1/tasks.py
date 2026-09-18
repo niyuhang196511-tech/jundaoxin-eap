@@ -68,12 +68,14 @@ class ScheduleCreate(BaseModel):
     task_type: str
     payload: dict = Field(default_factory=dict)
     interval_seconds: int = Field(ge=1, le=86400 * 7)
+    cron: str | None = Field(default=None, max_length=64,
+                             description="5 段 cron 表达式（UTC）；配置后优先于 interval_seconds")
     note: str = Field(default="", max_length=256)
 
 
 def _sched_view(s: TaskScheduleRecord) -> dict:
     return {"name": s.name, "task_type": s.task_type, "payload": s.payload,
-            "interval_seconds": s.interval_seconds, "enabled": s.enabled,
+            "interval_seconds": s.interval_seconds, "cron": s.cron, "enabled": s.enabled,
             "last_run_at": str(s.last_run_at) if s.last_run_at else None,
             "next_run_at": str(s.next_run_at) if s.next_run_at else None, "note": s.note}
 
@@ -130,10 +132,20 @@ def create_schedule(body: ScheduleCreate, request: fastapi.Request,
         raise fastapi.HTTPException(
             status_code=404, detail=f"EAP-4004 未知任务类型 {body.task_type}（未注册处理器）")
     now = datetime.now(timezone.utc)
+    if body.cron:
+        from croniter import croniter
+
+        try:
+            croniter(body.cron, now)
+        except ValueError as e:
+            raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 cron 无效: {e}") from e
+    first_next = None
+    if body.cron:
+        first_next = croniter(body.cron, now).get_next(datetime).replace(tzinfo=None)
     record = TaskScheduleRecord(
         name=body.name, task_type=body.task_type, payload=body.payload,
-        interval_seconds=body.interval_seconds, note=body.note,
-        next_run_at=now + timedelta(seconds=body.interval_seconds))
+        interval_seconds=body.interval_seconds, cron=body.cron, note=body.note,
+        next_run_at=first_next or now + timedelta(seconds=body.interval_seconds))
     db.add(record)
     db.commit()
     return _sched_view(record)
