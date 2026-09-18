@@ -24,11 +24,54 @@ class LocalVectorStore:
     M12 提速：numpy 矩阵化一次算全部余弦（替代逐条 Python 循环，数千块快两个数量级）；
     numpy 未安装回退逐条实现。O(N) 扫描语义不变（生产大规模切 Milvus）。
 
-    M15 跨请求缓存：矩阵按 (kb_id, chunk 数, 最后 chunk id) 做失效键缓存在进程内——
-    摄入/删除改变 chunk 集合时键不匹配即自动重建（无需显式失效通知）。
+    M15 跨请求缓存 + M17 持久化：矩阵按 (kb_id, chunk 数, 首/尾 chunk id) 做失效键缓存在
+    进程内，并落盘 EAP_MEDIA_DIR/../vector-cache/{kb_id}.npz（矩阵+chunk id 序）——进程重启
+    后首次检索直接加载，仅当 chunk 集合变化时重建。
     """
 
     _cache: dict[int, tuple[tuple, object, list]] = {}  # kb_id -> (失效键, 归一化矩阵, chunk_id 序)
+
+    def _persisted(self, kb_id: int, cache_key: tuple):
+        """从磁盘 npz 加载（存在且失效键匹配），加载成功回填进程缓存。"""
+        import os
+
+        import numpy as np
+
+        from ..config import get_settings
+
+        path = os.path.join(get_settings().media_dir, "..", "vector-cache", f"{kb_id}.npz")
+        if not os.path.exists(path):
+            return None
+        try:
+            data = np.load(path)
+            if tuple(data["cache_key"]) != cache_key:
+                return None
+            matrix = data["matrix"]
+            chunk_ids = data["chunk_ids"].tolist()
+            self._cache[kb_id] = (cache_key, matrix, chunk_ids)
+            return matrix, chunk_ids
+        except Exception:
+            return None
+
+    def _persist(self, kb_id: int, cache_key: tuple, matrix, chunk_ids: list) -> None:
+        import os
+
+        import numpy as np
+
+        from ..config import get_settings
+
+        cache_dir = os.path.abspath(os.path.join(get_settings().media_dir, "..", "vector-cache"))
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            np.savez_compressed(
+                os.path.join(cache_dir, f"{kb_id}.npz"),
+                matrix=matrix, chunk_ids=np.asarray(chunk_ids, dtype="int64"),
+                cache_key=np.asarray(list(cache_key), dtype="int64"),
+            )
+        except Exception as e:
+            import logging
+
+            logging.getLogger("eap.vector").warning("向量索引持久化失败: %s", e)
 
     def scores_for(self, chunks, query_vec) -> list[float]:
         try:
@@ -49,21 +92,26 @@ class LocalVectorStore:
         if cached is not None and cached[0] == cache_key:
             _, matrix, chunk_ids = cached
         else:
-            rows = []
-            ids = []
-            for c in chunks:
-                emb = np.asarray(c.embedding or [], dtype="float32")
-                if emb.size == 0:
-                    continue
-                rows.append(emb / (float(np.linalg.norm(emb)) or 1.0))
-                ids.append(c.id)
-            if not rows:
-                return [0.0] * len(chunks)
-            matrix = np.vstack(rows)
-            chunk_ids = ids
-            self._cache[kb_id] = (cache_key, matrix, chunk_ids)
-            if len(self._cache) > 64:  # 防无界增长：超出即全清（下次检索重建）
-                self._cache.clear()
+            loaded = self._persisted(kb_id, cache_key)
+            if loaded is not None:
+                matrix, chunk_ids = loaded
+            else:
+                rows = []
+                ids = []
+                for c in chunks:
+                    emb = np.asarray(c.embedding or [], dtype="float32")
+                    if emb.size == 0:
+                        continue
+                    rows.append(emb / (float(np.linalg.norm(emb)) or 1.0))
+                    ids.append(c.id)
+                if not rows:
+                    return [0.0] * len(chunks)
+                matrix = np.vstack(rows)
+                chunk_ids = ids
+                self._cache[kb_id] = (cache_key, matrix, chunk_ids)
+                self._persist(kb_id, cache_key, matrix, chunk_ids)
+                if len(self._cache) > 64:  # 防无界增长：超出即全清（下次检索重建）
+                    self._cache.clear()
 
         # 查询按缓存矩阵的 chunk 序对齐（chunks 顺序 = 矩阵行序）
         qn = q / q_norm
@@ -72,7 +120,7 @@ class LocalVectorStore:
         return [by_id.get(c.id, 0.0) for c in chunks]
 
     def upsert(self, kb_id: int, chunk_id: int, vector: list[float]) -> None:
-        self._cache.pop(kb_id, None)  # 摄入即失效（下次检索重建）
+        self._cache.pop(kb_id, None)  # 摄入即失效（下次检索重建+重落盘）
 
     def delete(self, chunk_ids: list[int]) -> None:
         pass  # 删除以 chunk 数/尾 id 变化体现，键失配自然重建
