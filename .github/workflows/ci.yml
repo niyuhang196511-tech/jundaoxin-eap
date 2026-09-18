@@ -57,6 +57,15 @@ jobs:
         run: pnpm typecheck
       - name: Unit tests (vitest)
         run: pnpm test
+      - name: E2E (Playwright)
+        run: |
+          pnpm exec playwright install chromium
+          cd ../ && uv run --no-sync python -m eap > /tmp/eap.log 2>&1 &
+          cd ../eap && sleep 8
+          cd ../frontend
+          npx playwright test
+        env:
+          E2E_NO_WEB_SERVER: ''
       - name: Build
         run: pnpm build
 
