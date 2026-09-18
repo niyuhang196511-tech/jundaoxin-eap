@@ -80,11 +80,11 @@ function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
       })
     })
   }
-  // 并行分支可视化（M15）：branches 首步骤展开为分支子节点，横排挂在 parallel 节点下方
+  // 并行分支可视化（M17）：branches 全部步骤展开为分支链，横列挂在 parallel 节点下方
   const { branchNodes } = expandParallelBranches(dsl.steps)
   const byParallel = new Map<string, { branch: number; index: number; step: Step }[]>()
   for (const b of branchNodes) {
-    byParallel.set(b.parallelId, [...(byParallel.get(b.parallelId) ?? []), { index: b.index, step: b.step }])
+    byParallel.set(b.parallelId, [...(byParallel.get(b.parallelId) ?? []), { branch: b.branch, index: b.index, step: b.step }])
   }
   for (const [pid, branches] of byParallel) {
     const pNode = nodes.find(n => n.id === pid)
