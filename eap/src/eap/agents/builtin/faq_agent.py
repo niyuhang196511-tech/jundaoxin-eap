@@ -74,7 +74,9 @@ class FaqAgent(AgentApp):
     async def on_invoke(self, request: InvokeRequest) -> InvokeResult:
         with self.ctx.db() as db:
             hits, messages, system = self._build_context(db, request)
-            completion = await self.ctx.chat(db, messages=messages, system=system)
+            # 结构化输出（v0.5）：请求级/配置版本声明 schema 时，回答携带校验通过的 JSON（data）
+            completion = await self.ctx.chat(db, messages=messages, system=system,
+                                             response_schema=self.ctx.output_schema())
             result, record = completion.result, completion.record
 
             self._log_turn(db, request, result.content or "")
@@ -86,6 +88,8 @@ class FaqAgent(AgentApp):
                        f"answer via {record.name}"],
                 usage={"tokens_in": result.tokens_in, "tokens_out": result.tokens_out,
                        "model": record.name},
+                data=result.data,
+                data_schema=self.ctx.output_schema() if result.data else None,
             )
 
     async def on_invoke_stream(self, request: InvokeRequest) -> AsyncIterator[tuple[str, dict]]:

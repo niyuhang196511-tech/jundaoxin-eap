@@ -241,10 +241,11 @@ class AgentRegistry:
                                "percent": release.canary_percent}
         except Exception:
             pass  # 灰度失败不阻断主流程
-        # 配置版本覆盖层（v0.5）：published 版本 config 在本次调用内对 SDK 消费点生效
+        # 配置版本覆盖层（v0.5）：published 版本 config 在本次调用内对 SDK 消费点生效；
+        # 请求级 output_schema 临时合并（优先于配置版本）
         from ..runtime import agent_config
 
-        config_version, overlay_cfg = agent_config.resolve_published_config(db, name)
+        config_version, overlay_cfg = agent_config.resolve_effective_overlay(db, name, request.output_schema)
         try:
             from ..observability.metrics import incr
             from ..observability.tracing import enabled as otel_enabled, tracer
@@ -285,6 +286,8 @@ class AgentRegistry:
             usage=result.usage,
             canary=canary_info,
             config_version=config_version,
+            data=result.data,
+            data_schema=result.data_schema,
         )
 
 

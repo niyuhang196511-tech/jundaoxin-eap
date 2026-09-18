@@ -52,6 +52,7 @@ class LLMResult:
     tokens_out: int = 0
     model: str = ""
     latency_ms: int = 0
+    data: dict | None = None  # 结构化输出（v0.5）：schema 校验通过的 JSON 对象
 
 
 def _bearer(stored: str | None) -> str | None:
@@ -68,8 +69,41 @@ class ProviderError(Exception):
 
 
 class Provider(Protocol):
-    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float) -> LLMResult: ...
+    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float,
+                       response_schema: dict | None = None) -> LLMResult: ...
     def stream_complete(self, *, record, messages: list[dict], temperature: float) -> AsyncIterator[str]: ...
+
+
+def synthesize_from_schema(schema: dict, depth: int = 0):
+    """按 JSON Schema 确定性合成最小合规值（离线 mock 的结构化输出合同）。
+
+    required 字段必出；enum/const 取首项；object 取全部属性（深度 ≤3）；
+    string → "mock-<名称>"，integer/number → 1，boolean → true，array → 单元素。
+    """
+    if depth > 3:
+        return None
+    if "const" in schema:
+        return schema["const"]
+    if "enum" in schema and schema["enum"]:
+        return schema["enum"][0]
+    t = schema.get("type")
+    if t == "object" or "properties" in schema:
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or props.keys())
+        return {k: synthesize_from_schema(v, depth + 1) for k, v in props.items()
+                if k in required or depth < 2}
+    if t == "array":
+        return [synthesize_from_schema(schema.get("items") or {"type": "string"}, depth + 1)]
+    if t == "integer":
+        return 1
+    if t == "number":
+        return 1.0
+    if t == "boolean":
+        return True
+    if t == "null":
+        return None
+    label = str(schema.get("title") or schema.get("description") or "value")
+    return "mock-" + "".join(ch if ch.isalnum() else "-" for ch in label.lower())[:24]
 
 
 class MockProvider:
@@ -80,7 +114,8 @@ class MockProvider:
     - 无工具 → 确定性回声回答
     """
 
-    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float) -> LLMResult:
+    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float,
+                       response_schema: dict | None = None) -> LLMResult:
         t0 = time.monotonic()
         has_tool_result = any(m.get("role") == "tool" for m in messages)
         last_user = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
@@ -103,6 +138,11 @@ class MockProvider:
             graph = {"entities": words,
                      "relations": [[words[i], words[i + 1], "co"] for i in range(len(words) - 1)]}
             return self._result(record, json.dumps(graph, ensure_ascii=False), [], messages, t0)
+
+        # 结构化输出（v0.5）：按 JSON Schema 确定性合成（离线测试的 mock 合同）
+        if response_schema is not None and (not tools or has_tool_result):
+            data = synthesize_from_schema(response_schema)
+            return self._result(record, json.dumps(data, ensure_ascii=False), [], messages, t0, data=data)
 
         if tools and not has_tool_result:
             fn = tools[0]["function"]
@@ -145,7 +185,7 @@ class MockProvider:
             yield piece
 
     @staticmethod
-    def _result(record, content, tool_calls, messages, t0) -> LLMResult:
+    def _result(record, content, tool_calls, messages, t0, data: dict | None = None) -> LLMResult:
         tin = sum(approx_tokens(str(m.get("content", ""))) for m in messages)
         return LLMResult(
             content=content,
@@ -154,6 +194,7 @@ class MockProvider:
             tokens_out=approx_tokens(content or "") + 10,
             model=record.name,
             latency_ms=int((time.monotonic() - t0) * 1000),
+            data=data,
         )
 
 
@@ -163,7 +204,8 @@ class OpenAICompatProvider:
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(timeout=60.0)
 
-    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float) -> LLMResult:
+    async def complete(self, *, record, messages: list[dict], tools: list[dict] | None, temperature: float,
+                       response_schema: dict | None = None) -> LLMResult:
         t0 = time.monotonic()
         payload: dict[str, Any] = {
             "model": record.remote_model or record.name,
@@ -172,6 +214,12 @@ class OpenAICompatProvider:
         }
         if tools:
             payload["tools"] = tools
+        if response_schema is not None and not tools:
+            # 结构化输出（v0.5）：优先结构化解码；供应商不支持时由 hub 的 prompt 注入路径兜底
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "eap_response", "strict": True, "schema": response_schema},
+            }
         try:
             resp = await self._client.post(
                 f"{record.base_url.rstrip('/')}/chat/completions",

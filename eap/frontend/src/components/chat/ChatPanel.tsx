@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { Button, Input } from '@/components/ui'
 import { Markdown } from '@/components/chat/Markdown'
+import { SchemaRenderer } from '@/components/chat/renderers/SchemaRenderer'
 import { api, conversationsApi, sseInvoke } from '@/lib/api'
 import { cn } from '@/lib/cn'
 
@@ -22,6 +23,8 @@ interface ChatMsg {
   streaming?: boolean
   citations?: Citation[]
   steps?: string[]
+  data?: Record<string, unknown>
+  data_schema?: Record<string, unknown>
 }
 
 /** 对话调试面板：左侧会话历史 + 中间消息流（打字机/Markdown/引用/步骤）+ 底部输入 */
@@ -117,6 +120,8 @@ export function ChatPanel({ agent }: { agent: string }) {
             content: data.content ?? '',
             citations: data.citations ?? [],
             steps: data.steps ?? steps,
+            data: data.data ?? undefined,
+            data_schema: data.data_schema ?? undefined,
           })
         } else if (event === 'error') {
           patchLast({ streaming: false, content: `⚠️ ${data.message ?? '调用失败'}` })
@@ -265,6 +270,9 @@ function MessageBubble({ msg, onRegenerate }: { msg: ChatMsg; onRegenerate?: () 
               : msg.streaming
                 ? <span className="flex gap-1 py-1"><i className="size-1.5 animate-bounce rounded-full bg-ink-3 [animation-delay:0ms]" /><i className="size-1.5 animate-bounce rounded-full bg-ink-3 [animation-delay:150ms]" /><i className="size-1.5 animate-bounce rounded-full bg-ink-3 [animation-delay:300ms]" /></span>
                 : null}
+          {!isUser && msg.data ? (
+            <SchemaRenderer data={msg.data} schema={msg.data_schema ?? null} />
+          ) : null}
         </div>
         {!isUser && (msg.steps?.length || msg.citations?.length) ? (
           <div className="mt-1 flex flex-wrap items-center gap-1.5">

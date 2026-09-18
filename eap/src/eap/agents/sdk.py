@@ -89,6 +89,11 @@ class PlatformContext:
         """角色提示词：配置版本的 system_prompt 优先，否则用代码默认。"""
         return self.overlay.get("system_prompt") or default
 
+    def output_schema(self, default: dict | None = None) -> dict | None:
+        """生效的结构化输出 schema（v0.5）：请求级 > 配置版本 > 代码默认（default 入参）。"""
+        schema = self.overlay.get("output_schema")
+        return schema if schema is not None else default
+
     def retriever(self, kb_name: str) -> Retriever:
         allowed = self.overlay.get("knowledge")
         if allowed and kb_name not in allowed:
@@ -96,10 +101,12 @@ class PlatformContext:
         return Retriever(kb_name)
 
     async def chat(self, db, messages: list[dict], *, system: str = "", capability: str = "chat",
-                   prefer: str | None = None, temperature: float | None = None):
+                   prefer: str | None = None, temperature: float | None = None,
+                   response_schema: dict | None = None):
         """走模型网关的完整对话（路由/降级/计量自动生效）。
 
-        prefer/temperature 未显式传入时应用配置版本的 model_prefer/temperature 覆盖。
+        prefer/temperature 未显式传入时应用配置版本的 model_prefer/temperature 覆盖；
+        response_schema（v0.5）触发结构化输出（LLMResult.data 携带校验通过的 JSON）。
         """
         overlay = self.overlay
         if prefer is None:
@@ -108,15 +115,16 @@ class PlatformContext:
             temperature = overlay.get("temperature", 0.7)
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
         return await self.hub.complete(db, msgs, capability=capability, prefer=prefer,
-                                       temperature=float(temperature))
+                                       temperature=float(temperature), response_schema=response_schema)
 
     async def run_loop(self, db, messages: list[dict], *, system: str, tools: list,
                        capability: str = "chat", prefer: str | None = None,
                        approval_gate=None, resume_messages: list[dict] | None = None,
-                       max_steps: int | None = None):
+                       max_steps: int | None = None, response_schema: dict | None = None):
         """完整 Agent Loop（工具调用循环 + HITL 审批门控，docs/03 §1）。
 
-        工具清单按配置版本 whitelist 过滤；prefer/max_steps 未显式传入时应用配置版本覆盖。
+        工具清单按配置版本 whitelist 过滤；prefer/max_steps 未显式传入时应用配置版本覆盖；
+        response_schema（v0.5）在最终回答后做结构化收尾（RunResult.data）。
         """
         from ..runtime.agent_config import filter_tools
         from ..runtime.loop import run_loop
@@ -130,6 +138,7 @@ class PlatformContext:
             self.hub, db, messages=messages, system=system, tools=tools,
             capability=capability, prefer=prefer, max_steps=steps,
             approval_gate=approval_gate, resume_messages=resume_messages,
+            response_schema=response_schema,
         )
 
     def skill_context(self, names: list[str]) -> str:

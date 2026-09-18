@@ -151,6 +151,8 @@ class InvokeRequest(BaseModel):
     stream: bool = False
     session_id: str | None = None  # 会话记忆键（多轮上下文，docs/03 §4）
     user_id: str | None = None  # 长期记忆归属
+    output_schema: dict | None = Field(
+        default=None, description="结构化输出 JSON Schema（v0.5，请求级，优先于配置版本/代码默认）")
 
 
 class InvokeResult(BaseModel):
@@ -160,6 +162,8 @@ class InvokeResult(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     usage: dict = Field(default_factory=dict)
+    data: dict | None = None  # 结构化输出（v0.5）：schema 校验通过的 JSON 对象
+    data_schema: dict | None = None  # 生成 data 所用的 schema（前端渲染提示）
 
 
 class InvokeResponse(BaseModel):
@@ -173,3 +177,5 @@ class InvokeResponse(BaseModel):
     usage: dict = Field(default_factory=dict)
     canary: dict | None = None  # 命中灰度时：{"release_id","version","percent"}（docs/06 §2）
     config_version: str | None = None  # 命中的配置版本（Agent 配置版本层，v0.5）
+    data: dict | None = None  # 结构化输出（v0.5）
+    data_schema: dict | None = None

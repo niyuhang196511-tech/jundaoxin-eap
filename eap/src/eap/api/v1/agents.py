@@ -161,7 +161,7 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
         agent = registered.instance
         if agent is not None and hasattr(agent, "on_invoke_stream"):
             # 配置版本覆盖层（v0.5）：流式路径与 registry.invoke 同语义
-            config_version, overlay_cfg = agent_config.resolve_published_config(db, name)
+            config_version, overlay_cfg = agent_config.resolve_effective_overlay(db, name, body.output_schema)
             with agent_config.apply_overlay(overlay_cfg):
                 async for event, data in agent.on_invoke_stream(body):
                     if event == "token":

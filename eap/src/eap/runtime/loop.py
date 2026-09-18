@@ -32,6 +32,8 @@ class RunResult:
     usage: dict = field(default_factory=dict)
     citations: list[dict] = field(default_factory=list)
     model: str = ""
+    data: dict | None = None  # 结构化输出（v0.5）：schema 校验通过的 JSON
+    data_schema: dict | None = None
 
 
 async def run_loop(
@@ -46,11 +48,14 @@ async def run_loop(
     max_steps: int = 4,
     approval_gate=None,
     resume_messages: list[dict] | None = None,
+    response_schema: dict | None = None,
 ) -> RunResult:
     """执行 Agent 循环。
 
     approval_gate(tool_name) -> True（执行）/ False（否决，注入拒绝结果）/ None（挂起等待人工）。
     resume_messages：HITL 恢复时传入挂起快照的完整消息历史（替代 system+messages 重建）。
+    response_schema（v0.5 结构化输出）：无工具时直接约束每次补全；带工具时在最终回答后
+    追加一次结构化补全（json_schema 与工具调用互斥，不能全程约束）。
     """
     usage = {"tokens_in": 0, "tokens_out": 0}
     steps: list[str] = []
@@ -62,9 +67,11 @@ async def run_loop(
     tool_schemas = [t.schema() for t in tools] or None
     last_model = ""
 
+    effective_schema = response_schema if not tools else None
     for step in range(1, max_steps + 1):
         completion = await hub.complete(
             db, msgs, capability=capability, tools=tool_schemas, prefer=prefer,
+            response_schema=effective_schema,
         )
         result, record = completion.result, completion.record
         last_model = record.name
@@ -117,12 +124,32 @@ async def run_loop(
 
         steps.append(f"step{step}({record.name}): 生成最终回答")
         usage["model"] = last_model
+        if response_schema is not None and tools:
+            # 结构化收尾：把最终回答整理为符合 schema 的 JSON（json_schema 与 tools 互斥）
+            struct = await hub.complete(
+                db, [*msgs, {"role": "user", "content": "请基于以上对话信息完成结构化输出。"}],
+                capability=capability, prefer=prefer, response_schema=response_schema,
+            )
+            usage["tokens_in"] += struct.result.tokens_in
+            usage["tokens_out"] += struct.result.tokens_out
+            steps.append(f"step{step}({record.name}): 结构化输出（schema 校验）")
+            return RunResult(
+                content=struct.result.content or "",
+                steps=steps,
+                usage=usage,
+                citations=citations,
+                model=last_model,
+                data=struct.result.data,
+                data_schema=response_schema,
+            )
         return RunResult(
             content=result.content or "",
             steps=steps,
             usage=usage,
             citations=citations,
             model=last_model,
+            data=result.data,
+            data_schema=response_schema,
         )
 
     return RunResult(

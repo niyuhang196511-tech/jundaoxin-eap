@@ -108,6 +108,18 @@ def resolve_published_config(db: Session, agent_name: str) -> tuple[str | None, 
     return version, row.config or {}
 
 
+def resolve_effective_overlay(db: Session, agent_name: str,
+                              request_schema: dict | None = None) -> tuple[str | None, dict | None]:
+    """registry/流式路径共用的覆盖层解析：published config + 请求级 output_schema 合并。
+
+    请求级 output_schema（InvokeRequest.output_schema）优先级最高，临时覆盖配置版本。
+    """
+    version, cfg = resolve_published_config(db, agent_name)
+    if request_schema is not None:
+        cfg = {**(cfg or {}), "output_schema": request_schema}
+    return version, cfg
+
+
 def filter_tools(tools: list, whitelist: list | None) -> list:
     """工具白名单过滤：overlay.tools 未设置/为空时原样返回。"""
     if not whitelist:
