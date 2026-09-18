@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import EvalDatasetRecord, EvalRunRecord
 from ...schemas import InvokeRequest
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/evals",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -37,7 +37,7 @@ class EvalRunRequest(BaseModel):
                        description="rule=关键词命中；llm=LLM-as-Judge 按评分标准裁判")
 
 
-@router.post("/datasets")
+@router.post("/datasets", dependencies=[fastapi.Depends(require_admin)])
 def create_dataset(body: EvalDatasetCreate, db: Session = fastapi.Depends(get_db)):
     for i, case in enumerate(body.cases):
         if "input" not in case or not ("expected_any" in case or "expectation" in case):
@@ -60,7 +60,7 @@ def list_datasets(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("/runs")
+@router.post("/runs", dependencies=[fastapi.Depends(require_admin)])
 async def run_evaluation(body: EvalRunRequest, db: Session = fastapi.Depends(get_db)):
     return await execute_evaluation(db, body.agent, body.dataset, body.min_pass_rate, body.judge)
 

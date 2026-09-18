@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import MCPServerRecord
 from ...runtime.mcp_client import load_mcp_tools, load_mcp_tools_stdio
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/mcp/servers",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -41,7 +41,7 @@ def list_servers(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def register_server(body: ServerCreate, db: Session = fastapi.Depends(get_db)):
     if body.transport == "http" and not body.url:
         raise fastapi.HTTPException(status_code=422, detail="http 传输需要 url")
@@ -84,7 +84,7 @@ async def validate_server(name: str, db: Session = fastapi.Depends(get_db)):
         return {"name": name, "status": "unreachable", "error": str(e)[:200]}
 
 
-@router.patch("/{name}")
+@router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
 def toggle_server(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == name))
     if record is None:

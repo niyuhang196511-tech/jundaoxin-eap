@@ -10,7 +10,7 @@ from ...db import get_db
 from ...models import WorkflowRecord, WorkflowRunRecord
 from ...runtime.workflow import WorkflowSpec
 from ...workflows import create_and_register, disable, load_enabled, test_run_async
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/workflows",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -26,7 +26,7 @@ def list_workflows(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 async def create_workflow(body: WorkflowSpec, db: Session = fastapi.Depends(get_db)):
     """DSL 创建即注册：工作流立刻成为可调用、可嵌入的智能体。"""
     try:
@@ -84,14 +84,14 @@ def list_runs(name: str, db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("/reload")
+@router.post("/reload", dependencies=[fastapi.Depends(require_admin)])
 async def reload_workflows():
     """从 DB 重新加载启用的 DSL 工作流（幂等注册）。"""
     count = await load_enabled()
     return {"reloaded": count}
 
 
-@router.delete("/{name}")
+@router.delete("/{name}", dependencies=[fastapi.Depends(require_admin)])
 async def disable_workflow(name: str):
     try:
         await disable(name)

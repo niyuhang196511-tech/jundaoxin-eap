@@ -19,12 +19,13 @@ from ...db import get_db
 from ...models import IMChannelRecord
 from ...runtime import im as im_rt
 from ...schemas import InvokeRequest
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/im", dependencies=[fastapi.Depends(get_db)])
 
 # 管理端点鉴权链：resolve_tenant 先解析凭证，require_api_key 再收紧到 API Key
 AUTH_DEP = [fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)]
+ADMIN_DEP = [fastapi.Depends(resolve_tenant), fastapi.Depends(require_admin)]
 
 
 class ChannelCreate(BaseModel):
@@ -51,7 +52,7 @@ def list_channels(db: Session = fastapi.Depends(get_db)):
             for c in db.scalars(select(IMChannelRecord)).all()]
 
 
-@router.post("/channels", dependencies=AUTH_DEP)
+@router.post("/channels", dependencies=ADMIN_DEP)
 def create_channel(body: ChannelCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(IMChannelRecord).where(IMChannelRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 IM 渠道 {body.name} 已存在")
@@ -66,7 +67,7 @@ def create_channel(body: ChannelCreate, db: Session = fastapi.Depends(get_db)):
             "webhook": f"/api/v1/im/{record.platform}/{record.name}/webhook"}
 
 
-@router.post("/channels/{name}/enabled", dependencies=AUTH_DEP)
+@router.post("/channels/{name}/enabled", dependencies=ADMIN_DEP)
 def toggle(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     record = _get(db, name)
     record.enabled = enabled
@@ -74,7 +75,7 @@ def toggle(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     return {"name": record.name, "enabled": record.enabled}
 
 
-@router.post("/channels/{name}/test", dependencies=AUTH_DEP)
+@router.post("/channels/{name}/test", dependencies=ADMIN_DEP)
 async def test_push(name: str, db: Session = fastapi.Depends(get_db)):
     """向群机器人 Webhook 推一条测试消息（连通性冒烟）。"""
     record = _get(db, name)

@@ -11,7 +11,7 @@ from ...config import get_settings
 from ...db import get_db
 from ...models import SkillRecord
 from ...runtime import skill_pkg
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/skills",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -34,7 +34,7 @@ def list_skills(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def create_skill(body: SkillCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(SkillRecord).where(SkillRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 技能 {body.name} 已存在")
@@ -60,7 +60,7 @@ class SkillImport(BaseModel):
     bundle: dict = Field(description="技能包 bundle（format/skill/signature）")
 
 
-@router.post("/import")
+@router.post("/import", dependencies=[fastapi.Depends(require_admin)])
 def import_skill(body: SkillImport, db: Session = fastapi.Depends(get_db)):
     """导入技能包：验签失败 401（EAP-8101）；导入后默认停用，人工审查后启用。"""
     try:
@@ -95,7 +95,7 @@ def get_skill(name: str, db: Session = fastapi.Depends(get_db)):
     }
 
 
-@router.patch("/{name}")
+@router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
 def toggle_skill(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     skill = db.scalar(select(SkillRecord).where(SkillRecord.name == name))
     if skill is None:

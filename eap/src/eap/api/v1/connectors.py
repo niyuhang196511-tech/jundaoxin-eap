@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import ConnectorRecord
 from ...runtime.connectors import load_connector_tools
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/connectors",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -50,7 +50,7 @@ def list_connectors(db: Session = fastapi.Depends(get_db)):
     return [_view(r) for r in db.scalars(select(ConnectorRecord)).all()]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def create_connector(body: ConnectorCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 连接器 {body.name} 已注册")
@@ -101,7 +101,7 @@ async def validate_connector(name: str, db: Session = fastapi.Depends(get_db)):
     return {"name": record.name, "status": record.status, "detail": detail}
 
 
-@router.post("/{name}/enabled")
+@router.post("/{name}/enabled", dependencies=[fastapi.Depends(require_admin)])
 def toggle(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == name))
     if record is None:

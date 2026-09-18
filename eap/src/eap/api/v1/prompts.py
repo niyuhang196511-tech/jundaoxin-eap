@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import PromptRecord
 from ...runtime.context import extract_prompt_variables, render_prompt
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/prompts",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -58,7 +58,7 @@ def list_prompts(db: Session = fastapi.Depends(get_db)):
     ]
 
 
-@router.post("")
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
 def create_prompt(body: PromptCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PromptRecord).where(PromptRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 Prompt {body.name} 已存在")
@@ -93,7 +93,7 @@ def render(name: str, body: PromptRenderRequest, db: Session = fastapi.Depends(g
     return {"name": name, "rendered": text, "version": version, "experiment": experiment}
 
 
-@router.patch("/{name}")
+@router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
 def toggle_prompt(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(PromptRecord).where(PromptRecord.name == name))
     if record is None:
@@ -105,7 +105,7 @@ def toggle_prompt(name: str, enabled: bool, db: Session = fastapi.Depends(get_db
 
 # ---------- 版本流水线（draft→published→archived，支持回滚） ----------
 
-@router.post("/{name}/versions")
+@router.post("/{name}/versions", dependencies=[fastapi.Depends(require_admin)])
 def create_version(name: str, body: VersionCreate, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PromptRecord).where(PromptRecord.name == name)) is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 Prompt {name} 不存在")
@@ -132,7 +132,7 @@ def list_versions(name: str, db: Session = fastapi.Depends(get_db)):
              "variables": r.variables, "created_at": str(r.created_at)} for r in rows]
 
 
-@router.post("/{name}/publish")
+@router.post("/{name}/publish", dependencies=[fastapi.Depends(require_admin)])
 def publish_version(name: str, body: VersionPublish, db: Session = fastapi.Depends(get_db)):
     from ...runtime import prompts as prompt_rt
 
@@ -146,7 +146,7 @@ def publish_version(name: str, body: VersionPublish, db: Session = fastapi.Depen
     return {"name": name, "version": record.version, "state": "published"}
 
 
-@router.post("/{name}/rollback")
+@router.post("/{name}/rollback", dependencies=[fastapi.Depends(require_admin)])
 def rollback_prompt(name: str, db: Session = fastapi.Depends(get_db)):
     from ...runtime import prompts as prompt_rt
 
@@ -172,7 +172,7 @@ def list_experiments(db: Session = fastapi.Depends(get_db)):
             for e in db.scalars(select(PromptExperimentRecord)).all()]
 
 
-@router.post("/experiments")
+@router.post("/experiments", dependencies=[fastapi.Depends(require_admin)])
 def create_experiment(body: ExperimentCreate, db: Session = fastapi.Depends(get_db)):
     from ...models import PromptExperimentRecord, PromptVersionRecord
 
@@ -196,7 +196,7 @@ def create_experiment(body: ExperimentCreate, db: Session = fastapi.Depends(get_
             "percent_b": record.percent_b}
 
 
-@router.patch("/experiments/{name}")
+@router.patch("/experiments/{name}", dependencies=[fastapi.Depends(require_admin)])
 def toggle_experiment(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
     from ...models import PromptExperimentRecord
 
