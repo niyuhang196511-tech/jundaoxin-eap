@@ -13,6 +13,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -20,6 +21,9 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import TaskRecord
 from .loop import TaskSuspended
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 Handler = Callable[[dict, dict], Awaitable[dict]]
 
