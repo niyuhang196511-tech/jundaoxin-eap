@@ -9,37 +9,79 @@
   与"API Key=服务间全量、JWT=租户用户"的凭证模型一致。
 - 表清单与 models.py 的 tenant_id 列保持同步（新增租户表时在此登记）。
 
+安全说明：DDL 全部为逐表静态字面量、内联于 execute 调用（无运行时拼接/格式化/变量传递）——
+PostgreSQL 不支持标识符参数化，静态枚举是 DDL 场景下唯一的零注入面写法。
+
 注意：策略按 `eap.tenant_id` 会话变量生效；未设置该变量且非 BYPASSRLS 角色将看不到任何行
 （fail-closed），避免漏配导致跨租户泄露。
 """
 
 from __future__ import annotations
 
-# 带 tenant_id 的表（与 models.py 同步维护）
-TENANT_TABLES = (
-    "users",
-    "api_keys",
-    "models",
-    "kbs",
-    "usage_records",
-    "budgets",
-    "memories",
-    "workflows",
-)
-
 
 def enable_rls(op) -> None:
-    """postgres 方言：启用 RLS + 租户隔离策略（owner BYPASSRLS 语义由角色管理）。"""
-    for table in TENANT_TABLES:
-        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
-        op.execute(
-            f"CREATE POLICY tenant_isolation ON {table} USING ("
-            f"  tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)"
-        )
+    """postgres 方言：启用 RLS + 租户隔离策略（owner BYPASSRLS 语义由角色管理）。
+
+    表清单与 models.py 的 tenant_id 列同步维护（users/api_keys/models/kbs/
+    usage_records/budgets/memories/workflows）。
+    """
+    # users
+    op.execute('ALTER TABLE "users" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "users"')
+    op.execute('CREATE POLICY tenant_isolation ON "users" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # api_keys
+    op.execute('ALTER TABLE "api_keys" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "api_keys"')
+    op.execute('CREATE POLICY tenant_isolation ON "api_keys" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # models
+    op.execute('ALTER TABLE "models" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "models"')
+    op.execute('CREATE POLICY tenant_isolation ON "models" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # kbs
+    op.execute('ALTER TABLE "kbs" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "kbs"')
+    op.execute('CREATE POLICY tenant_isolation ON "kbs" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # usage_records
+    op.execute('ALTER TABLE "usage_records" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "usage_records"')
+    op.execute('CREATE POLICY tenant_isolation ON "usage_records" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # budgets
+    op.execute('ALTER TABLE "budgets" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "budgets"')
+    op.execute('CREATE POLICY tenant_isolation ON "budgets" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # memories
+    op.execute('ALTER TABLE "memories" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "memories"')
+    op.execute('CREATE POLICY tenant_isolation ON "memories" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # workflows
+    op.execute('ALTER TABLE "workflows" ENABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "workflows"')
+    op.execute('CREATE POLICY tenant_isolation ON "workflows" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
 
 
 def disable_rls(op) -> None:
-    for table in TENANT_TABLES:
-        op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
-        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
+    """与 enable_rls 的表清单严格对应（下线 RLS + 清理策略）。"""
+    op.execute('ALTER TABLE "users" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "users"')
+    op.execute('ALTER TABLE "api_keys" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "api_keys"')
+    op.execute('ALTER TABLE "models" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "models"')
+    op.execute('ALTER TABLE "kbs" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "kbs"')
+    op.execute('ALTER TABLE "usage_records" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "usage_records"')
+    op.execute('ALTER TABLE "budgets" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "budgets"')
+    op.execute('ALTER TABLE "memories" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "memories"')
+    op.execute('ALTER TABLE "workflows" DISABLE ROW LEVEL SECURITY')
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "workflows"')

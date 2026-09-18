@@ -132,6 +132,9 @@ class AgentManifest(BaseModel):
     permissions: list[str] = Field(default_factory=list)
     embeddable: bool = False
     domains: list[str] = Field(default_factory=list)
+    # v0.5：结构化输出 / 交互 UI Schema 的代码级默认声明（DB 配置版本可覆盖）
+    output_schema: dict | None = None
+    interaction_schema: dict | None = None
 
     @field_validator("kind")
     @classmethod
@@ -169,3 +172,4 @@ class InvokeResponse(BaseModel):
     steps: list[str] = Field(default_factory=list)
     usage: dict = Field(default_factory=dict)
     canary: dict | None = None  # 命中灰度时：{"release_id","version","percent"}（docs/06 §2）
+    config_version: str | None = None  # 命中的配置版本（Agent 配置版本层，v0.5）

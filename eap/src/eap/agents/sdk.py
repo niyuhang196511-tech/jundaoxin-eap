@@ -37,6 +37,8 @@ class Retriever:
         from ..knowledge import service as kb_svc
         from ..models import KB
 
+        if not self.kb_name:
+            return []  # 配置版本白名单拦截：空检索器
         kb = db.query(KB).filter_by(name=self.kb_name).first()
         if kb is None:
             return []
@@ -72,29 +74,72 @@ class PlatformContext:
         finally:
             session.close()
 
+    @property
+    def overlay(self) -> dict:
+        """当前调用的配置版本覆盖层（v0.5 Agent 配置版本层；未发布版本为空 dict）。
+
+        由 registry.invoke 解析 published 版本后经 ContextVar 下发，
+        agent 代码一般无需直接读取——用 ctx.system_role / chat / run_loop 等缝即可。
+        """
+        from ..runtime.agent_config import current_overlay
+
+        return current_overlay()
+
+    def system_role(self, default: str) -> str:
+        """角色提示词：配置版本的 system_prompt 优先，否则用代码默认。"""
+        return self.overlay.get("system_prompt") or default
+
     def retriever(self, kb_name: str) -> Retriever:
+        allowed = self.overlay.get("knowledge")
+        if allowed and kb_name not in allowed:
+            return Retriever("")  # 配置版本白名单外的知识库不返回内容
         return Retriever(kb_name)
 
     async def chat(self, db, messages: list[dict], *, system: str = "", capability: str = "chat",
-                   prefer: str | None = None, temperature: float = 0.7):
-        """走模型网关的完整对话（路由/降级/计量自动生效）。"""
+                   prefer: str | None = None, temperature: float | None = None):
+        """走模型网关的完整对话（路由/降级/计量自动生效）。
+
+        prefer/temperature 未显式传入时应用配置版本的 model_prefer/temperature 覆盖。
+        """
+        overlay = self.overlay
+        if prefer is None:
+            prefer = overlay.get("model_prefer") or None
+        if temperature is None:
+            temperature = overlay.get("temperature", 0.7)
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
-        return await self.hub.complete(db, msgs, capability=capability, prefer=prefer, temperature=temperature)
+        return await self.hub.complete(db, msgs, capability=capability, prefer=prefer,
+                                       temperature=float(temperature))
 
     async def run_loop(self, db, messages: list[dict], *, system: str, tools: list,
                        capability: str = "chat", prefer: str | None = None,
-                       approval_gate=None, resume_messages: list[dict] | None = None):
-        """完整 Agent Loop（工具调用循环 + HITL 审批门控，docs/03 §1）。"""
+                       approval_gate=None, resume_messages: list[dict] | None = None,
+                       max_steps: int | None = None):
+        """完整 Agent Loop（工具调用循环 + HITL 审批门控，docs/03 §1）。
+
+        工具清单按配置版本 whitelist 过滤；prefer/max_steps 未显式传入时应用配置版本覆盖。
+        """
+        from ..runtime.agent_config import filter_tools
         from ..runtime.loop import run_loop
 
+        overlay = self.overlay
+        tools = filter_tools(tools, overlay.get("tools"))
+        if prefer is None:
+            prefer = overlay.get("model_prefer") or None
+        steps = max_steps or overlay.get("max_steps") or self.settings.agent_max_steps
         return await run_loop(
             self.hub, db, messages=messages, system=system, tools=tools,
-            capability=capability, prefer=prefer, max_steps=self.settings.agent_max_steps,
+            capability=capability, prefer=prefer, max_steps=steps,
             approval_gate=approval_gate, resume_messages=resume_messages,
         )
 
     def skill_context(self, names: list[str]) -> str:
-        """技能渐进披露（L2）：加载指定技能的完整指令文本（docs/04 §3）。"""
+        """技能渐进披露（L2）：加载指定技能的完整指令文本（docs/04 §3）。
+
+        配置版本设置 skills 白名单时，仅加载白名单内的技能。
+        """
+        allowed = self.overlay.get("skills")
+        if allowed:
+            names = [n for n in names if n in set(allowed)]
         if not names:
             return ""
         from sqlalchemy import select

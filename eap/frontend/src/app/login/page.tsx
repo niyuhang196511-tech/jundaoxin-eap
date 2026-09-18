@@ -25,7 +25,8 @@ export default function LoginPage() {
       return
     }
     // 探测 OIDC 是否已配置（501 = 未配置 → 隐藏 SSO 入口）
-    fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? ''}/api/v1/auth/oidc/login`, {
+    fetch(new URL('/api/v1/auth/oidc/login',
+      process.env.NEXT_PUBLIC_API_BASE_URL || window.location.origin), {
       method: 'GET', redirect: 'manual',
     })
       .then(r => setSsoReady(r.status === 307 || r.status === 302 || r.ok))

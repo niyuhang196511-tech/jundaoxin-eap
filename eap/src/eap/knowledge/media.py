@@ -25,17 +25,25 @@ def _digest_dir(data: bytes) -> str:
 
 
 def save_image(data: bytes, suffix: str = ".png") -> str:
-    """图片字节 → 落盘，返回 web 路径（/media/<hash>/image<suffix>）。同内容去重。"""
+    """图片字节 → 落盘，返回 web 路径（/media/<hash>/image<suffix>）。同内容去重。
+
+    suffix 来自解析产物中的图片文件名（不可信）：仅接受 .字母数字 形式，
+    其余一律归一化为 .png，杜绝经后缀拼接的路径穿越。
+    """
+    import re
+
     root = media_root()
     digest = _digest_dir(data)
     target_dir = os.path.join(root, digest)
     os.makedirs(target_dir, exist_ok=True)
-    filename = f"image{suffix if suffix.startswith('.') else '.' + suffix}"
-    path = os.path.join(target_dir, filename)
+    suffix = suffix if suffix.startswith(".") else "." + suffix
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,8}", suffix):
+        suffix = ".png"
+    path = os.path.join(target_dir, f"image{suffix}")
     if not os.path.exists(path):
         with open(path, "wb") as f:
             f.write(data)
-    return f"/media/{digest}/{filename}"
+    return f"/media/{digest}/image{suffix}"
 
 
 _IMG_RE = re.compile(r"(!\[[^\]]*\]\()([^)]+)(\))")

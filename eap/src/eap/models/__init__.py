@@ -76,7 +76,11 @@ class ModelRecord(Base):
 
 
 class AgentRecord(Base):
-    """Agent Registry：注册钩子纳管的智能体（生命周期状态见 docs/03 §7）。"""
+    """Agent Registry：注册钩子纳管的智能体（生命周期状态见 docs/03 §7）。
+
+    published_version 为配置版本发布指针（v0.5 Agent 配置版本层）：
+    指向 agent_versions 中 state=published 的版本，运行时作为 config 覆盖层生效。
+    """
 
     __tablename__ = "agents"
 
@@ -89,6 +93,31 @@ class AgentRecord(Base):
     module: Mapped[str] = mapped_column(String(200), default="")
     status: Mapped[str] = mapped_column(String(16), default="registered")  # registered|started|unhealthy
     health: Mapped[dict] = mapped_column(JSON, default=dict)
+    published_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AgentVersionRecord(Base):
+    """Agent 配置版本层（docs/unfinished v0.5-①）：代码为实现载体，运行配置进 DB 版本化。
+
+    - config 为代码 manifest 的运行时覆盖层：system_prompt / model_prefer / temperature /
+      tools / knowledge / skills / max_steps / output_schema / interaction_schema
+    - 流水线：draft → published（旧版自动 archived）→ archived；deprecated 为下线过渡态；
+      rollback = 重发布最近归档版（语义同 Prompt 版本流水线）
+    - 已发布版本 config 不可变（PATCH 仅限 draft），运行时按 (agent_name, version) 安全缓存
+    """
+
+    __tablename__ = "agent_versions"
+    __table_args__ = (UniqueConstraint("agent_name", "version", name="uq_agentver_name_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_name: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # draft | published | archived | deprecated
+    notes: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 

@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Bot, Network, Search } from 'lucide-react'
+import { Bot, GitBranch, Network, Search } from 'lucide-react'
 import { Badge, Input } from '@/components/ui'
 import { api } from '@/lib/api'
 import { ChatPanel } from '@/components/chat/ChatPanel'
+import { VersionDrawer } from '@/components/agents/VersionDrawer'
 import { cn } from '@/lib/cn'
 
 interface AgentItem {
@@ -13,6 +14,7 @@ interface AgentItem {
   version: string
   source: string
   embeddable: boolean
+  published_version?: string | null
   [key: string]: unknown
 }
 
@@ -40,6 +42,12 @@ export default function AgentsPage() {
   const [keyword, setKeyword] = useState('')
   const [active, setActive] = useState('')
   const [loading, setLoading] = useState(true)
+  const [versionAgent, setVersionAgent] = useState('')
+
+  const refresh = () =>
+    api<AgentItem[]>('GET', '/api/v1/agents')
+      .then(list => setAgents(list))
+      .catch(() => setAgents([]))
 
   useEffect(() => {
     api<AgentItem[]>('GET', '/api/v1/agents')
@@ -85,8 +93,18 @@ export default function AgentsPage() {
                   {a.embeddable ? <Badge tone="blue">可嵌入</Badge> : null}
                 </div>
                 <p className="mt-0.5 line-clamp-2 text-[11px] text-ink-3">{a.description || '（无描述）'}</p>
-                <p className="mt-1 text-[10px] text-ink-3">v{a.version}</p>
+                <p className="mt-1 text-[10px] text-ink-3">
+                  v{a.version}{a.published_version ? ` · 配置 v${a.published_version}` : ''}
+                </p>
               </div>
+              <button
+                type="button"
+                title="配置版本"
+                onClick={e => { e.stopPropagation(); setVersionAgent(a.name) }}
+                className="cursor-pointer rounded-md p-1.5 text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+              >
+                <GitBranch className="size-3.5" />
+              </button>
             </div>
           ))}
         </div>
@@ -98,6 +116,14 @@ export default function AgentsPage() {
           ? <ChatPanel key={current.name} agent={current.name} />
           : <div className="flex h-full items-center justify-center text-sm text-ink-3">选择左侧应用开始调试对话</div>}
       </div>
+
+      {versionAgent && (
+        <VersionDrawer
+          agent={versionAgent}
+          open={!!versionAgent}
+          onOpenChange={o => { if (!o) { setVersionAgent(''); refresh() } }}
+        />
+      )}
     </div>
   )
 }

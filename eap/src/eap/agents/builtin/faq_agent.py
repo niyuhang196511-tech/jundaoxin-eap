@@ -43,7 +43,8 @@ class FaqAgent(AgentApp):
             style = self.ctx.prompt("faq-answer-style", {"question": request.input}, key=key)
         except ValueError:
             pass  # 未配置 Prompt 或变量不匹配 → 回退内置角色
-        role = SYSTEM_ROLE + (f"\n\n{style}" if style else "")
+        # 角色提示词：配置版本 system_prompt 覆盖优先（v0.5 Agent 配置版本层），否则内置角色
+        role = self.ctx.system_role(SYSTEM_ROLE) + (f"\n\n{style}" if style else "")
         system = build_system(
             role=role + (f"\n\n{skill_ctx}" if skill_ctx else ""),
             knowledge_context=retriever.render(hits),

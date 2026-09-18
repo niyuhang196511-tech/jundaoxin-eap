@@ -25,8 +25,17 @@ function headers(): Record<string, string> {
   return h
 }
 
+/** 出站 API 路径校验（SSRF 基线）：仅允许站内相对路径，拒绝协议前缀/跳转/嵌套协议 */
+export function safeApiPath(url: string): string {
+  if (!url.startsWith('/') || url.startsWith('//') || url.includes('://') || url.includes('..')) {
+    throw new Error(`非法 API 路径: ${url}`)
+  }
+  return url
+}
+
 export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
-  const r = await fetch(API_BASE + url, {
+  const target = new URL(safeApiPath(url), API_BASE || window.location.origin)
+  const r = await fetch(target, {
     method,
     headers: headers(),
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -82,7 +91,8 @@ export async function sseInvoke(
   sessionId?: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent)}/invocations`, {
+  const r = await fetch(new URL(`/api/v1/agents/${encodeURIComponent(agent)}/invocations`,
+    API_BASE || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost')), {
     method: 'POST',
     headers: headers(),
     body: JSON.stringify(sessionId ? { input, stream: true, session_id: sessionId } : { input, stream: true }),

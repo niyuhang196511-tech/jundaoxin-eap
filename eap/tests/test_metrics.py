@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
@@ -43,7 +45,7 @@ def test_audit_log_records_admin_ops(client: TestClient):
     # 策略创建（含敏感形态 config 验证脱敏）
     r = client.post("/api/v1/policies", headers=AUTH, json={
         "name": "audit-test-policy", "tenant_id": 0, "kind": "model-allowlist",
-        "config": {"models": ["mock-llm"], "api_key": "should-be-masked"},
+        "config": {"models": ["mock-llm"], "api_key": "mask-" + uuid.uuid4().hex[:8]},
     })
     assert r.status_code == 200, r.text
     r2 = client.post("/api/v1/policies/audit-test-policy/enabled?enabled=false", headers=AUTH)

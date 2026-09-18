@@ -167,7 +167,10 @@ def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
         raise SystemExit(f"未知扩展类型 {kind}（可选：agent / tool / rag / mcp）")
     if not name.replace("_", "").replace("-", "").isalnum():
         raise SystemExit("名称仅允许字母/数字/连字符/下划线")
-    target = os.path.join(base_dir, name)
+    target = os.path.abspath(os.path.join(base_dir, name))
+    base = os.path.abspath(base_dir)
+    if os.path.commonpath([base, target]) != base:
+        raise SystemExit(f"目标目录越界：{target}")
     if os.path.exists(target):
         raise SystemExit(f"目录已存在：{target}")
     os.makedirs(target)

@@ -2,13 +2,10 @@
 
 import uvicorn
 
-from .config import get_settings
+from .config import Settings, get_settings
 
-# 生产必改项：默认值只用于离线开发；命中即打警告（不阻断，开发体验优先）
-_INSECURE_DEFAULTS = {
-    "dev_api_key": "dev-key-1",
-    "session_secret": "dev-session-secret-change-me",
-}
+# 生产必改项：与 config.py 字段默认值同源比较（命中即打警告，不阻断，开发体验优先）
+_INSECURE_DEFAULT_ATTRS = ("dev_api_key", "session_secret")
 
 
 def _warn_insecure_defaults() -> None:
@@ -16,8 +13,8 @@ def _warn_insecure_defaults() -> None:
 
     s = get_settings()
     log = logging.getLogger("eap.boot")
-    for attr, default in _INSECURE_DEFAULTS.items():
-        if getattr(s, attr, None) == default:
+    for attr in _INSECURE_DEFAULT_ATTRS:
+        if getattr(s, attr, None) == Settings.model_fields[attr].default:
             log.warning("EAP_%s 仍为开发默认值——生产部署必须更换！", attr.upper())
     if s.cors_origins.strip() == "*":
         log.warning("EAP_CORS_ORIGINS='*' 全放行——仅限本地开发！")

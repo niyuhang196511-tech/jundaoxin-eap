@@ -91,7 +91,7 @@ def _vision_describe(data: bytes, suffix: str) -> str | None:
         suffix.lstrip(".").lower(), "image/png")
     b64 = base64.b64encode(data).decode()
     resp = httpx.post(
-        f"{s.openai_base_url.rstrip('/')}/chat/completions",
+        _safe_config_url(f"{s.openai_base_url.rstrip('/')}/chat/completions"),
         json={"model": s.vision_model, "messages": [{
             "role": "user",
             "content": [
@@ -242,9 +242,49 @@ def _mineru_settings() -> tuple[str, str]:
     return s.mineru_api_url.rstrip("/"), token
 
 
+def _safe_config_url(url: str) -> str:
+    """运营方配置的 base URL 出站校验：仅 http/https、host 非空、禁止内嵌凭据。
+
+    自托管 MinerU / 视觉模型（vLLM 等）常部署于内网（LAN IP / 内网域名），
+    故不做公网限制——边界由部署方经配置控制（与连接器 rest 的信任模型一致）。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"不支持的 URL 协议: {parsed.scheme or '(空)'}")
+    if not parsed.hostname:
+        raise ValueError(f"URL 缺少 host: {url}")
+    if parsed.username or parsed.password:
+        raise ValueError("URL 不允许内嵌凭据")
+    return url
+
+
+def _safe_public_url(url: str) -> str:
+    """第三方 API 响应给出的 URL 出站校验（SSRF 防护）：仅 http/https，
+    host 拒绝环回/私有/保留/链路本地地址与内部域名——目标不受运营方控制，从严。"""
+    import ipaddress
+    from urllib.parse import urlparse
+
+    url = _safe_config_url(url)
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
+            raise ValueError(f"URL host 指向非公网地址，已拒绝: {host}")
+    elif host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
+        raise ValueError(f"URL host 指向内部地址，已拒绝: {host}")
+    return url
+
+
+
 def _mineru_cloud(filename: str, data: bytes) -> str:
     """mineru.net 批处理流：申请上传链接 → PUT 文件 → 建批任务 → 轮询 → 下载 zip 取 .md。"""
     import io
+    import re
     import time
     import zipfile
 
@@ -253,21 +293,23 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
     headers = {"Authorization": f"Bearer {token}"}
     try:
         # ① 申请上传链接
-        resp = httpx.post(f"{base}/file-urls/batch",
+        resp = httpx.post(_safe_config_url(f"{base}/file-urls/batch"),
                           json={"enable_formula": True, "enable_table": True,
                                 "language": "ch", "files": [{"name": filename,
                                                              "is_ocr": True}]},
                           headers=headers, timeout=30)
         resp.raise_for_status()
         batch_id = resp.json()["data"]["batch_id"]
-        upload_url = resp.json()["data"]["file_urls"][0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(batch_id)):
+            raise ValueError(f"MinerU 返回的 batch_id 非法: {batch_id}")
+        upload_url = _safe_public_url(resp.json()["data"]["file_urls"][0])
 
         # ② PUT 文件（对象存储直传）
-        put = httpx.put(upload_url, content=data, timeout=120)
+        put = httpx.put(_safe_public_url(upload_url), content=data, timeout=120)
         put.raise_for_status()
 
         # ③ 建批提取任务
-        resp = httpx.post(f"{base}/extract/task/batch",
+        resp = httpx.post(_safe_config_url(f"{base}/extract/task/batch"),
                           json={"batch_id": batch_id, "enable_formula": True,
                                 "enable_table": True, "language": "ch"},
                           headers=headers, timeout=30)
@@ -276,12 +318,12 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
         # ④ 轮询批结果（上限 5 分钟）
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            state = httpx.get(f"{base}/extract/task/batch/{batch_id}",
+            state = httpx.get(_safe_config_url(f"{base}/extract/task/batch/{batch_id}"),
                               headers=headers, timeout=30).json()
             results = state["data"]["extract_result"]
             done = [r for r in results if r.get("state") == "done"]
             if done:
-                zip_url = done[0]["full_zip_url"]
+                zip_url = _safe_public_url(done[0]["full_zip_url"])
                 break
             failed = [r for r in results if r.get("state") == "failed"]
             if failed:
@@ -291,7 +333,7 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
             raise ValueError("MinerU 解析超时（5 分钟）")
 
         # ⑤ 下载 zip，取第一个 .md
-        archive = httpx.get(zip_url, timeout=120)
+        archive = httpx.get(_safe_public_url(zip_url), timeout=120)
         archive.raise_for_status()
         with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
             md_names = [n for n in zf.namelist() if n.endswith(".md")]
@@ -318,7 +360,7 @@ def _mineru_selfhosted(filename: str, data: bytes) -> str:
     base, token = _mineru_settings()
     try:
         resp = httpx.post(
-            f"{base.rstrip('/')}/file_parse",
+            _safe_config_url(f"{base.rstrip('/')}/file_parse"),
             files={"files": (filename, data)},
             data={"output_format": "md", "backend": "pipeline"},
             headers={"Authorization": f"Bearer {token}"},

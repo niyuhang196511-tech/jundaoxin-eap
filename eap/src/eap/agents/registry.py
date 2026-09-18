@@ -241,6 +241,10 @@ class AgentRegistry:
                                "percent": release.canary_percent}
         except Exception:
             pass  # 灰度失败不阻断主流程
+        # 配置版本覆盖层（v0.5）：published 版本 config 在本次调用内对 SDK 消费点生效
+        from ..runtime import agent_config
+
+        config_version, overlay_cfg = agent_config.resolve_published_config(db, name)
         try:
             from ..observability.metrics import incr
             from ..observability.tracing import enabled as otel_enabled, tracer
@@ -253,7 +257,8 @@ class AgentRegistry:
                     span.set_attribute("eap.agent", name)
                     span.set_attribute("eap.trace_id", trace_id or "")
             try:
-                result: InvokeResult = await agent.instance.on_invoke(request)
+                with agent_config.apply_overlay(overlay_cfg):
+                    result: InvokeResult = await agent.instance.on_invoke(request)
             except Exception as e:
                 if span_cm is not None and span is not None:
                     span.record_exception(e)
@@ -279,6 +284,7 @@ class AgentRegistry:
             steps=result.steps,
             usage=result.usage,
             canary=canary_info,
+            config_version=config_version,
         )
 
 

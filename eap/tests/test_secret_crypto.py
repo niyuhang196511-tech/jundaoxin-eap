@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
@@ -53,14 +55,14 @@ def test_model_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
         resp = client.post("/api/v1/models", headers=AUTH, json={
             "name": "enc-test-model", "capabilities": ["chat"],
             "provider": "openai_compat", "base_url": "https://api.example.com/v1",
-            "api_key": "sk-live-999", "priority": 90,
+            "api_key": (live_key := "sk-unit-" + uuid.uuid4().hex[:12]), "priority": 90,
         })
         assert resp.status_code == 200, resp.text
 
         with SessionLocal() as db:
             record = db.query(ModelRecord).filter_by(name="enc-test-model").one()
             assert record.api_key.startswith("enc1:")
-            assert security_crypto.decrypt_secret(record.api_key) == "sk-live-999"
+            assert security_crypto.decrypt_secret(record.api_key) == live_key
         # 列表接口不回显 key
         listed = client.get("/api/v1/models", headers=AUTH).json()
         model = next(m for m in listed if m["name"] == "enc-test-model")
@@ -81,7 +83,7 @@ def test_connector_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
     try:
         resp = client.post("/api/v1/connectors", headers=AUTH, json={
             "name": "enc-conn", "kind": "rest", "base_url": "https://erp.example.com/api",
-            "api_key": "conn-secret-1",
+            "api_key": (conn_key := "conn-unit-" + uuid.uuid4().hex[:12]),
             "endpoints": [{"name": "ping", "tool_name": "erp.ping", "method": "GET", "path": "/"}],
         })
         assert resp.status_code == 200, resp.text
@@ -89,6 +91,6 @@ def test_connector_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
         with SessionLocal() as db:
             record = db.query(ConnectorRecord).filter_by(name="enc-conn").one()
             assert record.api_key.startswith("enc1:")
-            assert security_crypto.decrypt_secret(record.api_key) == "conn-secret-1"
+            assert security_crypto.decrypt_secret(record.api_key) == conn_key
     finally:
         get_settings.cache_clear()
