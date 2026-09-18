@@ -82,7 +82,7 @@ function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
   }
   // 并行分支可视化（M15）：branches 首步骤展开为分支子节点，横排挂在 parallel 节点下方
   const { branchNodes } = expandParallelBranches(dsl.steps)
-  const byParallel = new Map<string, { index: number; step: Step }[]>()
+  const byParallel = new Map<string, { branch: number; index: number; step: Step }[]>()
   for (const b of branchNodes) {
     byParallel.set(b.parallelId, [...(byParallel.get(b.parallelId) ?? []), { index: b.index, step: b.step }])
   }
