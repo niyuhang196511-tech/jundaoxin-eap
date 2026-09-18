@@ -88,22 +88,32 @@ function dslToFlow(dsl: WorkflowDsl): { nodes: Node[]; edges: Edge[] } {
   }
   for (const [pid, branches] of byParallel) {
     const pNode = nodes.find(n => n.id === pid)
-    const baseX = (pNode?.position.x ?? 0) - ((branches.length - 1) * 120) / 2
-    branches.sort((a, b) => a.index - b.index).forEach((b, i) => {
-      nodes.push({
+    // 每分支一列纵排（M17：分支的全部步骤上画布，链式串联）
+    const maxBranch = Math.max(...branches.map(b => b.branch), 0)
+    branches.sort((a, b) => a.branch - b.branch || a.index - b.index)
+    let prevNode: Node | null = null
+    let prevBranch = -1
+    branches.forEach(b => {
+      const colX = (pNode?.position.x ?? 0) + (b.branch - maxBranch / 2) * 240
+      const colY = (pNode?.position.y ?? 0) + 120 +
+        (b.branch === prevBranch ? (prevNode!.position.y - (pNode?.position.y ?? 0)) + 130 : 0)
+      const node: Node = {
         id: b.step.id,
         type: 'wf',
-        position: { x: baseX + i * 240, y: (pNode?.position.y ?? 0) + 120 },
+        position: { x: colX, y: colY },
         data: { stepId: b.step.id, stepType: b.step.type, title: b.step.title || '', status: 'idle' } satisfies WfNodeData,
-      })
+      }
+      nodes.push(node)
       edges.push({
-        id: `branch-edge-${pid}-${i}`,
-        source: pid,
+        id: `branch-edge-${pid}-${b.branch}-${b.index}`,
+        source: b.branch !== prevBranch ? pid : prevNode!.id,
         target: b.step.id,
-        label: `分支 ${i + 1}`,
+        label: b.index === 0 ? `分支 ${b.branch + 1}` : undefined,
         style: { stroke: '#db2777', strokeDasharray: '4 2' },
         markerEnd: { type: 'arrowclosed' as const },
       })
+      prevNode = node
+      prevBranch = b.branch
     })
   }
   return { nodes, edges }

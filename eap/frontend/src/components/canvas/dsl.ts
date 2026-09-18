@@ -194,38 +194,54 @@ export function collapseLoopBodies(steps: Step[], nodes: Node[]): Step[] {
 }
 
 /**
- * 并行分支可视化（M15）：branches 的首步骤展开为分支子节点（同 loop 展开模式）。
- * 子节点 id 规则 `${parallelId}__branch__${i}`；保存时按前缀回收进 branches[i].steps[0]。
- * 分支的多步骤体仍在配置抽屉编辑（画布展开首步以表达拓扑）。
+ * 并行分支可视化（M17）：branches 每个分支的**全部步骤**展开为分支链子节点。
+ * 子节点 id 规则 `${parallelId}__branch__${i}__${j}`；保存时按前缀回收 branches[i].steps。
+ * 执行引擎仍按 branches[i].steps 线性跑——展开是纯视图层语义。
  */
 export const BRANCH_PREFIX = '__branch__'
 
-export function expandParallelBranches(steps: Step[]): { steps: Step[]; branchNodes: { parallelId: string; index: number; step: Step }[] } {
-  const branchNodes: { parallelId: string; index: number; step: Step }[] = []
-  const expanded = steps.map(s => s)  // branches 不动，仅生成视图节点
+export function expandParallelBranches(steps: Step[]): { steps: Step[]; branchNodes: { parallelId: string; branch: number; index: number; step: Step }[] } {
+  const branchNodes: { parallelId: string; branch: number; index: number; step: Step }[] = []
+  const expanded = steps.map(s => s)
   steps.forEach(s => {
     if (s.type !== 'parallel') return
     ;(s.branches ?? []).forEach((b, i) => {
-      const head = b.steps[0] ?? { id: `${s.id}${BRANCH_PREFIX}${i}`, type: 'llm' as const, system: '' }
-      branchNodes.push({
-        parallelId: s.id, index: i,
-        step: { ...head, id: `${s.id}${BRANCH_PREFIX}${i}` },
+      b.steps.forEach((st, j) => {
+        branchNodes.push({
+          parallelId: s.id, branch: i, index: j,
+          step: { ...st, id: `${s.id}${BRANCH_PREFIX}${i}${BODY_PREFIX}${j}` },
+        })
       })
+      if (!b.steps.length) {
+        branchNodes.push({
+          parallelId: s.id, branch: i, index: 0,
+          step: { id: `${s.id}${BRANCH_PREFIX}${i}${BODY_PREFIX}0`, type: 'llm', system: '' },
+        })
+      }
     })
   })
   return { steps: expanded, branchNodes }
 }
 
-/** 保存时：分支子节点的类型回填进 branches[i].steps[0]（首步骤），后续步骤保持抽屉编辑值 */
+/** 保存时：分支子节点按序回收进 branches[i].steps */
 export function collapseParallelBranches(steps: Step[], nodes: Node[]): Step[] {
   return steps.map(s => {
     if (s.type !== 'parallel') return s
     const branches = (s.branches ?? []).map((b, i) => {
-      const viewId = `${s.id}${BRANCH_PREFIX}${i}`
-      const node = nodes.find(n => n.id === viewId)
-      if (!node || !b.steps.length) return b
-      const d = node.data as { stepType?: string }
-      return { ...b, steps: [{ ...b.steps[0], type: (d.stepType as 'llm' | 'tool' | 'retrieve') ?? b.steps[0].type }] }
+      const bodyNodes = nodes
+        .filter(n => n.id.startsWith(`${s.id}${BRANCH_PREFIX}${i}${BODY_PREFIX}`))
+        .sort((x, y) => x.id.localeCompare(y.id))
+      if (!bodyNodes.length) return b
+      const stepsOut = bodyNodes.map(n => {
+        const d = n.data as { stepType?: string }
+        const seq = parseInt(n.id.split(BODY_PREFIX).pop() ?? '0', 10)
+        const prev = b.steps[seq] ?? { id: n.id.replace(BRANCH_PREFIX, '.'), type: 'llm' as const }
+        return {
+          ...prev,
+          type: (d.stepType as 'llm' | 'tool' | 'retrieve') ?? prev.type,
+        }
+      })
+      return { ...b, steps: stepsOut }
     })
     return { ...s, branches }
   })

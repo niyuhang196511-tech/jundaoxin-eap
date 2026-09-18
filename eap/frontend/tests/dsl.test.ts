@@ -62,7 +62,7 @@ describe('parallel 分支可视化往返', () => {
     }]
     const { branchNodes } = expandParallelBranches(steps)
     expect(branchNodes).toHaveLength(2)
-    expect(branchNodes[0].step.id).toBe('par__branch__0')
+    expect(branchNodes[0].step.id).toBe('par__branch__0__body__0')
 
     const nodes = branchNodes.map(b => ({
       id: b.step.id, position: { x: 0, y: 0 }, data: { stepType: b.step.type },
