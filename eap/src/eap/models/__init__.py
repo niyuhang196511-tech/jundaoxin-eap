@@ -455,13 +455,14 @@ class PromptExperimentRecord(Base):
 
 
 class EvalDatasetRecord(Base):
-    """评测数据集：规则裁判用例（input + expected_any 关键词）。"""
+    """评测数据集：kind=agent（问答用例）| rag（检索标注用例，v0.6）。"""
 
     __tablename__ = "eval_datasets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     description: Mapped[str] = mapped_column(String(256), default="")
+    kind: Mapped[str] = mapped_column(String(8), default="agent")  # agent | rag
     cases: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -469,7 +470,8 @@ class EvalDatasetRecord(Base):
 class EvalRunRecord(Base):
     """评测运行：逐用例结果 + 通过率 + 门禁结论（docs/08 §3）。
 
-    judge=rule：expected_any 关键词命中；judge=llm：LLM-as-Judge 按评分标准裁判。
+    judge=rule：expected_any 关键词命中；judge=llm：LLM-as-Judge 多维评分（v0.6）。
+    kind=rag：metrics 存 HitRate@K/Recall@K/MRR/NDCG（v0.6 RAG 评测）。
     """
 
     __tablename__ = "eval_runs"
@@ -481,6 +483,9 @@ class EvalRunRecord(Base):
     min_pass_rate: Mapped[float] = mapped_column(default=0.8)
     judge: Mapped[str] = mapped_column(String(8), default="rule")  # rule | llm
     scores: Mapped[list] = mapped_column(JSON, default=list)
+    kind: Mapped[str] = mapped_column(String(8), default="agent")  # agent | rag
+    pass_rate: Mapped[float | None] = mapped_column(nullable=True)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

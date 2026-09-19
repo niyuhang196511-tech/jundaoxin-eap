@@ -80,6 +80,7 @@ class Settings(BaseSettings):
 
     # 图谱实体抽取（docs/04 §1）：lexical=词元共现（离线）；llm=模型结构化抽取（失败回退共现）
     graph_extraction: str = "lexical"
+    judge_model: str = ""  # LLM-as-Judge 使用的模型（空 = 按 chat 能力路由）
 
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True

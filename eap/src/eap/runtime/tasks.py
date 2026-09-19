@@ -504,6 +504,69 @@ class TaskEngine:
             return {"status": "ok", "document_id": doc.id, "title": title,
                     "chunks": chunk_count}
 
+    async def _h_eval_run(self, payload: dict, prev_result: dict) -> dict:
+        """评测后台执行（v0.6-③④）：agent 数据集走问答评测；rag 数据集走检索指标。"""
+        from sqlalchemy import select as _select
+
+        from ..knowledge import service as kb_svc
+        from ..models import KB, EvalDatasetRecord, EvalRunRecord
+        from .rag_eval import aggregate, evaluate_retrieval
+
+        run_id = payload["run_id"]
+        dataset_name = payload["dataset"]
+        top_k = int(payload.get("top_k") or 5)
+        min_rate = float(payload.get("min_pass_rate") or 0.8)
+        judge = payload.get("judge") or "rule"
+
+        with SessionLocal() as db:
+            run = db.get(EvalRunRecord, run_id)
+            dataset = db.scalar(_select(EvalDatasetRecord)
+                                .where(EvalDatasetRecord.name == dataset_name))
+            if run is None or dataset is None:
+                return {"status": "failed", "error": "运行或数据集不存在"}
+            if dataset.kind != "rag":
+                from ..api.v1.evals import execute_evaluation
+
+                result = await execute_evaluation(db, payload["agent"], dataset_name,
+                                                  min_rate, judge)
+                run = db.get(EvalRunRecord, run_id)
+                run.verdict = result["verdict"]
+                run.pass_rate = result["pass_rate"]
+                run.scores = result["scores"]
+                db.commit()
+                return {"status": "ok", "run_id": run_id, "verdict": result["verdict"]}
+            kb = db.scalar(_select(KB).where(KB.name == payload["agent"]))
+            if kb is None:
+                run.verdict = "FAIL"
+                run.metrics = {"error": f"知识库 {payload['agent']} 不存在"}
+                db.commit()
+                return {"status": "failed", "error": run.metrics["error"]}
+
+            case_metrics = []
+            scores = []
+            for case in dataset.cases:
+                try:
+                    hits = kb_svc.retrieve(db, kb, case["query"], top_k=top_k)
+                    ranked = [h["citation"]["chunk_id"] for h in hits]
+                    m = evaluate_retrieval(ranked, case.get("relevant_chunk_ids", []), top_k)
+                except Exception as e:
+                    m = {"hit_rate": 0.0, "recall": 0.0, "mrr": 0.0, "ndcg": 0.0}
+                    scores.append({"query": case.get("query", ""), "error": str(e)[:200]})
+                    case_metrics.append(m)
+                    continue
+                case_metrics.append(m)
+                scores.append({"query": case["query"], "ranked": ranked[:top_k],
+                               "relevant": case.get("relevant_chunk_ids", []), **m})
+
+            metrics = aggregate(case_metrics)
+            rate = metrics.get("hit_rate", 0.0)
+            run.verdict = "PASS" if rate >= min_rate else "FAIL"
+            run.pass_rate = rate
+            run.metrics = metrics
+            run.scores = scores
+            db.commit()
+        return {"status": "ok", "run_id": run_id, "metrics": metrics}
+
     async def _h_agent_invoke(self, payload: dict, prev_result: dict) -> dict:
         """异步执行一次智能体调用（长任务/批量场景）。payload._tenant_id 携带租户时启用策略上下文。"""
         from ..agents.registry import registry
@@ -564,4 +627,5 @@ def create_task_engine(queue_backend=None) -> TaskEngine:
     engine.register_handler("agent.invoke", engine._h_agent_invoke)
     engine.register_handler("agent.hitl", engine._h_agent_hitl)
     engine.register_handler("kb.ingest", engine._h_kb_ingest)
+    engine.register_handler("eval.run", engine._h_eval_run)
     return engine

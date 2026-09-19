@@ -7,6 +7,7 @@ import {
   Textarea, toast,
 } from '@/components/ui'
 import { api } from '@/lib/api'
+import { cn } from '@/lib/cn'
 
 interface KbItem {
   id: number
@@ -26,7 +27,7 @@ interface DocItem {
 interface Hit {
   content: string
   score: number
-  citation: { kb?: string; document?: string; chunk_index?: number }
+  citation: { kb?: string; document?: string; chunk_index?: number; chunk_id?: number }
 }
 
 /** 知识库页（RAGFlow/MaxKB 体验）：库卡片 → 库详情（文档 + 摄入 + 召回测试） */
@@ -143,6 +144,8 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [previewDoc, setPreviewDoc] = useState<{ id: number; title: string } | null>(null)
+  const [labels, setLabels] = useState<Record<number, boolean>>({})
+  const [savingDataset, setSavingDataset] = useState(false)
 
   const loadDocs = useCallback(async () => {
     try {
@@ -230,10 +233,35 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
       const r = await api<{ hits: Hit[] }>('POST', `/api/v1/kb/${encodeURIComponent(name)}/retrieve`,
         { query, top_k: 5 })
       setHits(r.hits)
+      setLabels({})
     } catch (e) {
       toast.error(`检索失败：${(e as Error).message}`)
     } finally {
       setSearching(false)
+    }
+  }
+
+  // RAG 标注（v0.6）：勾选相关 chunk → 存为 RAG 评测数据集
+  const saveLabeledDataset = async () => {
+    const relevant = Object.entries(labels).filter(([, v]) => v).map(([k]) => Number(k))
+    if (!relevant.length || !query.trim()) {
+      toast.error('请先检索并勾选相关 chunk')
+      return
+    }
+    setSavingDataset(true)
+    try {
+      const stamp = new Date().toISOString().slice(5, 16).replace(/[-:T]/g, '').toLowerCase()
+      await api('POST', '/api/v1/evals/datasets', {
+        name: `rag-${name.slice(0, 16)}-${stamp}`,
+        kind: 'rag',
+        description: `标注来源：${name} · 查询「${query.slice(0, 40)}」`,
+        cases: [{ query, relevant_chunk_ids: relevant }],
+      })
+      toast.success(`已存为 RAG 数据集（${relevant.length} 个相关 chunk）`)
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`)
+    } finally {
+      setSavingDataset(false)
     }
   }
 
@@ -320,8 +348,28 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
                       <span className="text-[11px] text-ink-3">score {h.score.toFixed(3)}</span>
                     </div>
                     <p className="line-clamp-3 text-[12px] text-ink-2">{h.content}</p>
+                    <div className="mt-1.5 flex items-center gap-1.5">
+                      <span className="text-[10px] text-ink-3">标注：</span>
+                      <button onClick={() => setLabels(l => ({ ...l, [h.citation.chunk_id ?? -1]: true }))}
+                        className={cn('cursor-pointer rounded px-1.5 py-0.5 text-[10px] border transition-colors',
+                          labels[h.citation.chunk_id ?? -1] === true
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300'
+                            : 'border-line text-ink-3 hover:text-ink')}>相关</button>
+                      <button onClick={() => setLabels(l => ({ ...l, [h.citation.chunk_id ?? -1]: false }))}
+                        className={cn('cursor-pointer rounded px-1.5 py-0.5 text-[10px] border transition-colors',
+                          labels[h.citation.chunk_id ?? -1] === false
+                            ? 'border-red-400 bg-red-50 text-red-500 dark:bg-red-900/30'
+                            : 'border-line text-ink-3 hover:text-ink')}>不相关</button>
+                      <span className="text-[10px] text-ink-3">chunk_id: {h.citation.chunk_id}</span>
+                    </div>
                   </div>
                 ))}
+                {hits.length > 0 && Object.keys(labels).length > 0 && (
+                  <Button variant="secondary" className="w-full" loading={savingDataset}
+                    onClick={saveLabeledDataset}>
+                    存为 RAG 评测数据集（标注 {Object.values(labels).filter(Boolean).length} 条相关）
+                  </Button>
+                )}
               </div>
             )}
           </CardBody>

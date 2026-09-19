@@ -54,24 +54,38 @@ def test_eval_dataset_and_run_gate(client: TestClient):
     datasets = client.get("/api/v1/evals/datasets", headers=AUTH).json()
     assert "faq-smoke" in [d["name"] for d in datasets]
 
-    # 运行评测：mock 回答引用了检索内容 → 规则裁判通过
+    # 运行评测（异步）：提交任务 → 轮询至终态（mock 回答引用检索内容 → 规则裁判通过）
+    import time
+
     resp = client.post("/api/v1/evals/runs", headers=AUTH, json={
         "agent": "faq-agent", "dataset": "faq-smoke", "min_pass_rate": 0.8})
     assert resp.status_code == 200, resp.text
-    run = resp.json()
+    run_id = resp.json()["run_id"]
+    for _ in range(50):
+        run = client.get(f"/api/v1/evals/runs/{run_id}", headers=AUTH).json()
+        if run["verdict"] != "PENDING":
+            break
+        time.sleep(0.2)
     assert run["verdict"] == "PASS", run["scores"]
     assert run["pass_rate"] >= 0.8
 
     # 运行记录可查
-    detail = client.get(f"/api/v1/evals/runs/{run['run_id']}", headers=AUTH).json()
+    detail = client.get(f"/api/v1/evals/runs/{run_id}", headers=AUTH).json()
     assert detail["verdict"] == "PASS"
     assert len(detail["scores"]) == 2
 
     # 高门禁 → FAIL
     resp = client.post("/api/v1/evals/runs", headers=AUTH, json={
-        "agent": "faq-agent", "dataset": "faq-smoke", "min_pass_rate": 1.01 if False else 0.99})
+        "agent": "faq-agent", "dataset": "faq-smoke", "min_pass_rate": 0.99})
+    assert resp.status_code == 200, resp.text
+    run_id2 = resp.json()["run_id"]
+    for _ in range(50):
+        run = client.get(f"/api/v1/evals/runs/{run_id2}", headers=AUTH).json()
+        if run["verdict"] != "PENDING":
+            break
+        time.sleep(0.2)
     # mock 输出包含关键词的概率取决于检索注入；宽松断言两种结论均可接受，但字段必须存在
-    assert resp.json()["verdict"] in ("PASS", "FAIL")
+    assert run["verdict"] in ("PASS", "FAIL")
 
     # 新建数据集校验
     resp = client.post("/api/v1/evals/datasets", headers=AUTH,
