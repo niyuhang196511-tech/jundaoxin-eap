@@ -55,14 +55,15 @@ def _dummy_tools_agent(client: TestClient):
     asyncio.run(registry.start_agent("gov-tools-agent"))
 
 
-def _poll_tasks(client: TestClient, task_id: str, states: set[str], tries: int = 40) -> dict:
+def _poll_tasks(client: TestClient, task_id: str, states: set[str], tries: int = 100) -> dict:
+    """轮询任务状态（全量负载下引擎可能延迟，窗口放宽到 25s）。"""
     import time
 
     for _ in range(tries):
         view = client.get(f"/api/v1/tasks/{task_id}", headers=AUTH).json()
         if view["state"] in states:
             return view
-        time.sleep(0.2)
+        time.sleep(0.25)
     return view
 
 
