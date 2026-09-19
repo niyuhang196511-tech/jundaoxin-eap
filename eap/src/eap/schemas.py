@@ -89,6 +89,8 @@ class ModelRegister(BaseModel):
     api_key: str | None = None
     remote_model: str | None = None
     priority: int = 100
+    price_in: float | None = Field(default=None, description="每百万输入 token 单价（v0.6 成本计量）")
+    price_out: float | None = Field(default=None, description="每百万输出 token 单价")
     notes: str = ""
 
     @field_validator("capabilities")

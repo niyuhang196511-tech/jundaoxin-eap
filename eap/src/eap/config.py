@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     # 图谱实体抽取（docs/04 §1）：lexical=词元共现（离线）；llm=模型结构化抽取（失败回退共现）
     graph_extraction: str = "lexical"
     judge_model: str = ""  # LLM-as-Judge 使用的模型（空 = 按 chat 能力路由）
+    chat_rate_limit: int = 120  # 每分钟对话调用上限（/v1/chat 与 agents invocations，按凭证）
+    memory_retention_days: int = 180  # 记忆保留期（天），超期可由 /memory/purge 清理
 
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True

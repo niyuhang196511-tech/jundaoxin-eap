@@ -109,6 +109,15 @@ async def invoke(
     embed_agent = getattr(request.state, "embed_agent", None)
     if embed_agent and embed_agent != name:
         raise fastapi.HTTPException(status_code=403, detail=f"EAP-3002 会话令牌仅限智能体 {embed_agent}")
+    # 限流（v0.6-⑤）：按凭证每分钟上限
+    from ...api.security import get_limiter
+
+    credential = getattr(request.state, "auth_kind", "") + ":" + str(
+        getattr(request.state, "user", "") or getattr(request.state, "tenant_id", 0))
+    limiter = get_limiter("chat")
+    if not await limiter.allow_async(credential):
+        raise fastapi.HTTPException(status_code=429, detail="EAP-2001 请求过于频繁",
+                                    headers={"Retry-After": str(limiter.retry_after(credential))})
     # 成本中心熔断：token 预算超限 → 429（docs/08 §4）
     try:
         budget.guard(db, getattr(request.state, "tenant_id", 0))

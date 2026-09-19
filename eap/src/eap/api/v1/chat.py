@@ -33,6 +33,15 @@ async def chat_completions(
 ):
     trace_id = getattr(request.state, "trace_id", uuid.uuid4().hex)
     tenant_id = getattr(request.state, "tenant_id", 0)
+    # 限流（v0.6-⑤）：按凭证每分钟上限（EAP_CHAT_RATE_LIMIT），429 带 Retry-After
+    from ...api.security import get_limiter
+
+    credential = getattr(request.state, "auth_kind", "") + ":" + str(
+        getattr(request.state, "user", "") or getattr(request.state, "tenant_id", 0))
+    limiter = get_limiter("chat")
+    if not await limiter.allow_async(credential):
+        raise fastapi.HTTPException(status_code=429, detail="EAP-2001 请求过于频繁",
+                                    headers={"Retry-After": str(limiter.retry_after(credential))})
     # 成本中心熔断：token 预算超限 → 429（docs/08 §4）
     try:
         budget.guard(db, tenant_id)
@@ -110,8 +119,10 @@ async def chat_completions(
         return StreamingResponse(sse_fallback(), media_type="text/event-stream")
 
     async def sse():
+        emitted = 0
         try:
             async for text in hub.stream(db, messages, prefer=prefer, temperature=body.temperature):
+                emitted += len(text)
                 chunk = {
                     "id": completion_id, "object": "chat.completion.chunk", "created": _now_ts(),
                     "model": record.name,
@@ -132,5 +143,10 @@ async def chat_completions(
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }
         yield f"data: {json.dumps(done, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
+        if emitted:
+            # 计量修复（v0.6）：流式对话按真实租户/模型记录（此前 hub.stream 记在 tenant 0）
+            record_usage(trace_id, tenant_id, kind="chat", model=record.name,
+                         tokens_in=0, tokens_out=max(1, emitted // 4),
+                         latency_ms=0)
 
     return StreamingResponse(sse(), media_type="text/event-stream")

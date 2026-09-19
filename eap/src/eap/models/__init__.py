@@ -71,6 +71,8 @@ class ModelRecord(Base):
     remote_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=100)  # 小者优先
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    price_in: Mapped[float | None] = mapped_column(nullable=True)  # 每百万输入 token 单价（v0.6 成本计量）
+    price_out: Mapped[float | None] = mapped_column(nullable=True)  # 每百万输出 token 单价
     notes: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -179,7 +181,7 @@ class TaskRecord(Base):
 
 
 class UsageRecord(Base):
-    """成本中心计量事实表（docs/08 §4）。"""
+    """成本中心计量事实表（docs/08 §4）。v0.6：agent 归属 + 成本金额（按模型定价计得）。"""
 
     __tablename__ = "usage_records"
 
@@ -188,8 +190,10 @@ class UsageRecord(Base):
     tenant_id: Mapped[int] = mapped_column(Integer, index=True)
     kind: Mapped[str] = mapped_column(String(16), default="chat")  # chat | agent | embed
     model: Mapped[str] = mapped_column(String(64), default="")
+    agent: Mapped[str] = mapped_column(String(64), default="", index=True)  # 智能体归属（v0.6）
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    cost: Mapped[float] = mapped_column(default=0.0)  # 计得成本（金额单位与定价一致）
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

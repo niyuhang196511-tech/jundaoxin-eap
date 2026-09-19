@@ -149,3 +149,19 @@ class SlidingWindow:
 
 
 rate_limiter = SlidingWindow(limit=get_settings().embed_rate_limit)
+
+# 多作用域限流注册表（v0.6-⑤）：scope 名 → SlidingWindow 实例
+_limiters: dict[str, SlidingWindow] = {"embed": rate_limiter}
+
+
+def get_limiter(scope: str) -> SlidingWindow:
+    """按作用域取限流器（首次访问按配置实例化并缓存）。"""
+    if scope not in _limiters:
+        from ..config import get_settings
+
+        settings = get_settings()
+        limit = getattr(settings, f"{scope}_rate_limit", None)
+        if limit is None:
+            limit = settings.embed_rate_limit
+        _limiters[scope] = SlidingWindow(limit=int(limit))
+    return _limiters[scope]

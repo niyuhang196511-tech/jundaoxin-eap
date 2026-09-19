@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import {
+import { FileClock,
   Blocks, BookOpen, Bot, ClipboardCheck, FlaskConical, Network, Plug, Puzzle, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
@@ -29,6 +29,7 @@ const GROUPS: { label: string; items: { href: string; label: string; icon: React
       { href: '/tasks', label: 'nav.tasks', icon: <ClipboardCheck className="size-4" /> },
       { href: '/evals', label: 'nav.evals', icon: <FlaskConical className="size-4" /> },
       { href: '/gov', label: 'nav.gov', icon: <ShieldCheck className="size-4" /> },
+      { href: '/audit', label: 'nav.audit', icon: <FileClock className="size-4" /> },
       { href: '/models', label: 'nav.models', icon: <Network className="size-4" /> },
       { href: '/conn', label: 'nav.conn', icon: <Plug className="size-4" /> },
     ],

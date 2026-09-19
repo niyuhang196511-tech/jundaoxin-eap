@@ -18,6 +18,18 @@ JUDGE_DATASET = {
 }
 
 
+
+
+def _poll_run(client, run_id, tries=60):
+    import time
+
+    for _ in range(tries):
+        body = client.get(f"/api/v1/evals/runs/{run_id}", headers=HEADERS).json()
+        if body["verdict"] != "PENDING":
+            return body
+        time.sleep(0.2)
+    return body
+
 def test_llm_judge_run_pass_and_fail(client):
     assert client.post("/api/v1/evals/datasets", headers=HEADERS, json=JUDGE_DATASET).status_code == 200
 
@@ -25,7 +37,7 @@ def test_llm_judge_run_pass_and_fail(client):
     r = client.post("/api/v1/evals/runs", headers=HEADERS,
                     json={"agent": "faq-agent", "dataset": "llm-judge-ds",
                           "min_pass_rate": 0.5, "judge": "llm"})
-    body = r.json()
+    body = _poll_run(client, r.json()["run_id"])
     assert body["judge"] == "llm" and body["verdict"] == "PASS" and body["pass_rate"] == 0.5
     verdicts = {s["input"]: s for s in body["scores"]}
     assert verdicts["如何创建知识库？"]["passed"] is True
@@ -39,7 +51,7 @@ def test_llm_judge_run_pass_and_fail(client):
     r = client.post("/api/v1/evals/runs", headers=HEADERS,
                     json={"agent": "faq-agent", "dataset": "llm-judge-ds",
                           "min_pass_rate": 0.8, "judge": "llm"})
-    assert r.json()["verdict"] == "FAIL"
+    assert _poll_run(client, r.json()["run_id"])["verdict"] == "FAIL"
 
 
 def test_llm_judge_release_gate(client):

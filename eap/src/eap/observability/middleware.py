@@ -72,15 +72,21 @@ class TraceMiddleware(BaseHTTPMiddleware):
 
 
 def record_usage(trace_id: str, tenant_id: int, *, kind: str, model: str,
-                 tokens_in: int, tokens_out: int, latency_ms: int) -> None:
-    """计量事实入库（成本中心数据源）+ token 计数器。失败不影响主流程。"""
+                 tokens_in: int, tokens_out: int, latency_ms: int,
+                 agent: str = "") -> None:
+    """计量事实入库（成本中心数据源）+ token 计数器。失败不影响主流程。
+
+    v0.6：按模型定价计得 cost（模型未配价格则 0），支持 agent 归属。
+    """
     from .metrics import incr
 
+    cost = _cost_of(model, tokens_in, tokens_out)
     try:
         with SessionLocal() as db:
             db.add(UsageRecord(
                 trace_id=trace_id, tenant_id=tenant_id, kind=kind, model=model,
-                tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency_ms,
+                agent=agent, tokens_in=tokens_in, tokens_out=tokens_out,
+                cost=cost, latency_ms=latency_ms,
             ))
             db.commit()
     except Exception:
@@ -92,3 +98,25 @@ def record_usage(trace_id: str, tenant_id: int, *, kind: str, model: str,
             incr("eap_tokens_total", {"direction": "out"}, tokens_out)
     except Exception:
         pass
+
+
+def _cost_of(model: str, tokens_in: int, tokens_out: int) -> float:
+    """按模型定价计得成本（单价 = 每百万 token；未配价格 → 0）。"""
+    try:
+        from sqlalchemy import select
+
+        from ..db import SessionLocal
+        from ..models import ModelRecord
+
+        with SessionLocal() as db:
+            record = db.scalar(select(ModelRecord).where(ModelRecord.name == model))
+            if record is None or (record.price_in is None and record.price_out is None):
+                return 0.0
+            cost = 0.0
+            if record.price_in is not None:
+                cost += tokens_in / 1_000_000 * record.price_in
+            if record.price_out is not None:
+                cost += tokens_out / 1_000_000 * record.price_out
+            return round(cost, 6)
+    except Exception:
+        return 0.0

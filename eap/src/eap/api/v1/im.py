@@ -19,6 +19,7 @@ from ...db import get_db
 from ...models import IMChannelRecord
 from ...runtime import im as im_rt
 from ...schemas import InvokeRequest
+from ...security_crypto import decrypt_secret, encrypt_secret
 from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/im", dependencies=[fastapi.Depends(get_db)])
@@ -59,7 +60,8 @@ def create_channel(body: ChannelCreate, db: Session = fastapi.Depends(get_db)):
     if body.agent not in registry.names():
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 智能体 {body.agent} 未注册")
     record = IMChannelRecord(name=body.name, platform=body.platform, agent=body.agent,
-                             webhook_url=body.webhook_url, secret=body.secret,
+                             webhook_url=body.webhook_url,
+                             secret=encrypt_secret(body.secret) if body.secret else None,
                              extra=body.extra, note=body.note)
     db.add(record)
     db.commit()
@@ -112,7 +114,7 @@ async def feishu_webhook(name: str, payload: dict, request: fastapi.Request,
     challenge = im_rt.feishu_challenge(payload)
     if challenge is not None:
         return challenge
-    if not im_rt.feishu_verify_token(payload, record.secret):
+    if not im_rt.feishu_verify_token(payload, decrypt_secret(record.secret)):
         raise fastapi.HTTPException(status_code=401, detail="EAP-7205 Verification Token 校验失败")
     text, sender = im_rt.feishu_parse_message(payload)
     if text:
@@ -129,7 +131,7 @@ async def dingtalk_webhook(name: str, payload: dict, request: fastapi.Request,
     if record.secret:
         timestamp = request.headers.get("timestamp", "")
         sign = request.headers.get("sign", "")
-        if not timestamp or not im_rt.dingtalk_verify(record.secret, timestamp, sign):
+        if not timestamp or not im_rt.dingtalk_verify(decrypt_secret(record.secret), timestamp, sign):
             raise fastapi.HTTPException(status_code=401, detail="EAP-7205 加签校验失败")
     text, sender, session_webhook = im_rt.parse_inbound("dingtalk", payload)
     if text and session_webhook:

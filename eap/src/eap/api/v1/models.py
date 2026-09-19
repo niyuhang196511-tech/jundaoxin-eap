@@ -45,7 +45,8 @@ def register_model(body: ModelRegister, request: fastapi.Request, db: Session = 
         name=body.name, capabilities=body.capabilities, provider=body.provider,
         base_url=body.base_url, api_key=encrypt_secret(body.api_key),
         remote_model=body.remote_model,
-        priority=body.priority, notes=body.notes,
+        priority=body.priority, price_in=body.price_in, price_out=body.price_out,
+        notes=body.notes,
     )
     db.add(model_record)
     db.commit()
@@ -58,8 +59,10 @@ def toggle_model(name: str, enabled: bool, request: fastapi.Request, db: Session
     record = db.scalar(select(ModelRecord).where(ModelRecord.name == name))
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 模型 {name} 不存在")
+    from ...observability import audit as _audit
+
     record.enabled = enabled
     db.commit()
-    audit.record("model.toggle", actor=audit.actor_of(request), target=name,
+    _audit.record("model.toggle", actor=_audit.actor_of(request), target=name,
                  detail={"enabled": enabled}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "enabled": enabled}
