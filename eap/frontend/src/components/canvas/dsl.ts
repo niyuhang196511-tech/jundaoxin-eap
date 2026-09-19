@@ -3,7 +3,7 @@
 export type Condition = { left?: string | null; op: string; right?: string | null }
 export type Position = { x: number; y: number }
 
-export type StepType = 'llm' | 'tool' | 'retrieve' | 'branch' | 'parallel' | 'subflow' | 'loop'
+export type StepType = 'llm' | 'tool' | 'retrieve' | 'branch' | 'parallel' | 'subflow' | 'loop' | 'interaction'
 
 export interface BodyStep {
   id: string
@@ -45,6 +45,9 @@ export interface Step {
   item_var?: string
   max_iterations?: number
   body?: BodyStep[]
+  // interaction（v0.5-⑤）：暂停执行向用户请求结构化输入，提交后从本节点续跑
+  ui_schema?: { type: 'form'; title?: string; description?: string; fields: Record<string, unknown>[] }
+  interaction_key?: string
 }
 
 export interface DslEdge {
@@ -70,6 +73,7 @@ export const NODE_TYPES: { type: StepType; label: string; color: string; desc: s
   { type: 'parallel', label: '并行', color: '#db2777', desc: '多分支并发执行后拼接' },
   { type: 'loop', label: '循环', color: '#0891b2', desc: '对数组变量逐项执行' },
   { type: 'subflow', label: '子工作流', color: '#475569', desc: '调用另一个已注册工作流' },
+  { type: 'interaction', label: '用户交互', color: '#e11d48', desc: '暂停执行，向用户请求表单输入后继续' },
 ]
 
 export function typeColor(type: string): string {
@@ -266,9 +270,10 @@ export interface WorkflowRun {
   version: string
   input: string
   output: string
-  status: 'running' | 'succeeded' | 'failed'
+  status: 'running' | 'succeeded' | 'failed' | 'waiting_input'
   error: string
   node_runs: NodeRun[]
   elapsed_ms: number
   created_at: string
+  pending_interaction?: { interaction_id: string; ui_schema: Record<string, unknown> } | null
 }

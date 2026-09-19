@@ -1,13 +1,15 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Badge, Button, Input } from '@/components/ui'
+import { Badge, Button, Input, toast } from '@/components/ui'
 import { CircleX, Play } from 'lucide-react'
 import { api } from '@/lib/api'
 import { type NodeRun, type WorkflowRun } from './dsl'
+import { UISchemaRenderer, type UISchema } from '@/components/chat/UISchemaRenderer'
 import { cn } from '@/lib/cn'
 
-/** 试运行面板：发起运行 → 轮询运行记录 → onStatus 把节点状态映射到画布 */
+/** 试运行面板：发起运行 → 轮询运行记录 → onStatus 把节点状态映射到画布；
+ *  waiting_input（v0.5-⑤）时内联渲染交互表单，提交后继续轮询 */
 export function RunPanel({
   workflowName,
   onStatus,
@@ -24,6 +26,22 @@ export function RunPanel({
 
   useEffect(() => () => { if (timer.current) clearInterval(timer.current) }, [])
 
+  const poll = (runId: string) => {
+    timer.current = setInterval(async () => {
+      try {
+        const d = await api<WorkflowRun>('GET', `/api/v1/workflows/runs/${runId}`)
+        setRun(d)
+        onStatus(d.node_runs ?? [])
+        if (d.status !== 'running') {
+          if (timer.current) clearInterval(timer.current)
+          setRunning(false)
+        }
+      } catch {
+        /* 轮询失败下一轮重试 */
+      }
+    }, 500)
+  }
+
   const start = async () => {
     if (!workflowName || running) return
     try {
@@ -31,26 +49,26 @@ export function RunPanel({
       setRun(null)
       const { run_id } = await api<{ run_id: string }>('POST',
         `/api/v1/workflows/${encodeURIComponent(workflowName)}/test-run`, { input })
-      timer.current = setInterval(async () => {
-        try {
-          const d = await api<WorkflowRun>('GET', `/api/v1/workflows/runs/${run_id}`)
-          setRun(d)
-          onStatus(d.node_runs ?? [])
-          if (d.status !== 'running') {
-            if (timer.current) clearInterval(timer.current)
-            setRunning(false)
-          }
-        } catch {
-          /* 轮询失败下一轮重试 */
-        }
-      }, 500)
+      poll(run_id)
     } catch (e) {
       setRunning(false)
       throw e
     }
   }
 
+  const submitInteraction = async (values: Record<string, unknown>) => {
+    if (!run) return
+    try {
+      await api('POST', `/api/v1/workflows/runs/${run.id}/submit`, { values })
+      setRunning(true)
+      poll(run.id)
+    } catch (e) {
+      toast.error(`提交失败：${(e as Error).message}`)
+    }
+  }
+
   if (!enabled) return null
+  const pending = run?.status === 'waiting_input' ? run.pending_interaction ?? null : null
   return (
     <div className="flex flex-col gap-2">
       <Input value={input} onChange={e => setInput(e.target.value)}
@@ -62,8 +80,10 @@ export function RunPanel({
       {run && (
         <div className="rounded-lg border border-line bg-surface-2 p-2.5">
           <div className="mb-1.5 flex items-center gap-2">
-            <Badge tone={run.status === 'succeeded' ? 'green' : run.status === 'failed' ? 'red' : 'brand'}>
-              {run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败' : '运行中'}
+            <Badge tone={run.status === 'succeeded' ? 'green' : run.status === 'failed' ? 'red'
+              : run.status === 'waiting_input' ? 'amber' : 'brand'}>
+              {run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败'
+                : run.status === 'waiting_input' ? '等待输入' : '运行中'}
             </Badge>
             <span className="text-[11px] text-ink-3">{run.elapsed_ms}ms</span>
           </div>
@@ -73,6 +93,15 @@ export function RunPanel({
             </p>
           )}
           <NodeRunList nodeRuns={run.node_runs ?? []} />
+          {pending && (
+            <UISchemaRenderer
+              agent=""
+              interactionId={pending.interaction_id}
+              schema={pending.ui_schema as unknown as UISchema}
+              onSubmit={submitInteraction}
+              busy={running}
+            />
+          )}
           {run.output && (
             <div className="mt-2 border-t border-line pt-2">
               <p className="mb-1 text-[11px] font-medium text-ink-3">工作流输出</p>

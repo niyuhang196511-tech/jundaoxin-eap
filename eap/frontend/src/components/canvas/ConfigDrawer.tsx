@@ -175,6 +175,35 @@ function StepForm({ step, allIds, onChange }: { step: Step; allIds: string[]; on
         </>
       )}
 
+      {step.type === 'interaction' && (
+        <>
+          <div>
+            <Label>表单标题</Label>
+            <Input value={step.ui_schema?.title ?? ''} placeholder="补货信息"
+              onChange={e => onChange({ ui_schema: { type: 'form', fields: step.ui_schema?.fields ?? [], ...step.ui_schema, title: e.target.value } })} />
+          </div>
+          <div>
+            <Label>表单字段（JSON 数组：type/id/label/required/options）</Label>
+            <Textarea rows={6} className="font-mono text-xs"
+              value={JSON.stringify(step.ui_schema?.fields ?? [], null, 2)}
+              onChange={e => {
+                try {
+                  const fields = JSON.parse(e.target.value || '[]')
+                  onChange({ ui_schema: { type: 'form', ...(step.ui_schema ?? {}), fields } })
+                } catch { /* 编辑中允许暂态非法 JSON */ }
+              }} />
+            <p className="mt-1 text-[11px] text-ink-3">
+              控件：text / textarea / number / select / multiselect / radio / checkbox / confirmation
+            </p>
+          </div>
+          <div>
+            <Label>提交值变量名（默认 input）</Label>
+            <Input value={step.input_var ?? 'input'}
+              onChange={e => onChange({ input_var: e.target.value })} />
+          </div>
+        </>
+      )}
+
       {step.when && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/50 dark:bg-amber-950/20">
           <p className="mb-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">执行条件（不满足则跳过本节点）</p>

@@ -135,23 +135,6 @@ class PlatformContext:
 
         return _ArtifactsFacade(artifacts_rt)
 
-
-class _ArtifactsFacade:
-    """ctx.artifacts 的轻封装：create 自动带 trace 上下文。"""
-
-    def __init__(self, rt) -> None:
-        self._rt = rt
-
-    def create(self, db, *, name: str, type: str, content, mime: str | None = None,
-               agent: str | None = None, session_id: str | None = None,
-               task_id: str | None = None, ttl_hours: int | None = None,
-               trace_id: str = ""):
-        return self._rt.create_artifact(
-            db, name=name, type=type, content=content, mime=mime,
-            agent=agent, session_id=session_id, task_id=task_id,
-            ttl_hours=ttl_hours, trace_id=trace_id,
-        )
-
     def retriever(self, kb_name: str) -> Retriever:
         allowed = self.overlay.get("knowledge")
         if allowed and kb_name not in allowed:
@@ -262,6 +245,23 @@ class _ArtifactsFacade:
         with SessionLocal() as db:
             record = db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == name))
             return load_connector_tools(record) if record else []
+
+
+class _ArtifactsFacade:
+    """ctx.artifacts 的轻封装：create 透传 Artifact Center 运行时。"""
+
+    def __init__(self, rt) -> None:
+        self._rt = rt
+
+    def create(self, db, *, name: str, type: str, content, mime: str | None = None,
+               agent: str | None = None, session_id: str | None = None,
+               task_id: str | None = None, ttl_hours: int | None = None,
+               trace_id: str = ""):
+        return self._rt.create_artifact(
+            db, name=name, type=type, content=content, mime=mime,
+            agent=agent, session_id=session_id, task_id=task_id,
+            ttl_hours=ttl_hours, trace_id=trace_id,
+        )
 
 
 def register_agent(manifest: AgentManifest, source: str = "sdk"):

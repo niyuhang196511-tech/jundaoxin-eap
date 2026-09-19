@@ -318,7 +318,11 @@ class WorkflowRecord(Base):
 
 
 class WorkflowRunRecord(Base):
-    """工作流运行记录（DSL v2）：试运行/调用的逐节点执行历史，画布状态可视化数据源。"""
+    """工作流运行记录（DSL v2）：试运行/调用的逐节点执行历史，画布状态可视化数据源。
+
+    v0.5-⑤ 挂起语义：interaction 节点触发时 status=waiting_input，
+    variables（变量上下文快照）与 pending_node 落库，提交后续跑。
+    """
 
     __tablename__ = "workflow_runs"
 
@@ -327,11 +331,14 @@ class WorkflowRunRecord(Base):
     version: Mapped[str] = mapped_column(String(32), default="")
     input: Mapped[str] = mapped_column(Text, default="")
     output: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default="running", index=True)  # running/succeeded/failed
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    # running/succeeded/failed/waiting_input
     error: Mapped[str] = mapped_column(Text, default="")
     node_runs: Mapped[list] = mapped_column(JSON, default=list)
     # [{id, type, status: running|ok|error, output, error, elapsed_ms}]
     elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    variables: Mapped[dict] = mapped_column(JSON, default=dict)  # 挂起时变量上下文快照
+    pending_node: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 挂起节点
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

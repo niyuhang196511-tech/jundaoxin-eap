@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import uuid
 import time
 from typing import Any, Awaitable, Callable, Literal
 
@@ -43,7 +44,7 @@ class NodePosition(BaseModel):
 
 class Step(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,40}$")
-    type: Literal["llm", "tool", "retrieve", "branch", "parallel", "subflow", "loop"]
+    type: Literal["llm", "tool", "retrieve", "branch", "parallel", "subflow", "loop", "interaction"]
     when: Condition | None = None  # 条件不满足则跳过本节点
     title: str = ""  # 画布节点显示名（空则用 id）
     position: NodePosition | None = None  # 画布布局
@@ -83,6 +84,11 @@ class Step(BaseModel):
     item_var: str = "item"  # 迭代变量写入上下文名
     max_iterations: int = Field(default=20, ge=1, le=200)
     body: list["Step"] = Field(default_factory=list)
+
+    # interaction（v0.5-⑤）：暂停执行向用户请求结构化输入，提交后从本节点续跑
+    ui_schema: dict = Field(default_factory=dict)  # 内联 AI UI Schema（{type:"form",fields:[...]}）
+    input_var: str = "input"  # 提交值写入上下文的变量名（值 = {"__interaction__": id, **values}）
+    interaction_key: str = "values"  # 提交值包一层后的上下文键（context[input_var] = {interaction_key: values}）
 
     @model_validator(mode="after")
     def _validate_node(self) -> "Step":
@@ -218,7 +224,7 @@ def resolve_tool(name: str) -> Tool:
 
     m = re.match(r"^kb\.([a-z0-9-]+)\.search$", name)
     if m:
-        from .agents.runtime_tools import retriever_tool
+        from ..agents.runtime_tools import retriever_tool
 
         return retriever_tool(m.group(1))
     if name in _WORKFLOW_TOOLS:
@@ -242,6 +248,23 @@ def resolve_tool(name: str) -> Tool:
 
 # ---------- 执行引擎 ----------
 
+
+class WorkflowSuspended(Exception):
+    """interaction 节点挂起（v0.5-⑤）：携带节点/变量快照，提交后续跑。
+
+    variables 全量落库（而非重放），避免 LLM 节点重跑（成本与确定性）。
+    """
+
+    def __init__(self, node_id: str, schema: dict, input_var: str, interaction_key: str,
+                 variables: dict):
+        self.node_id = node_id
+        self.schema = schema
+        self.input_var = input_var
+        self.interaction_key = interaction_key
+        self.variables = variables
+        super().__init__(f"工作流在节点 {node_id} 等待用户输入")
+
+
 WorkflowEvent = dict  # {node, node_type, type: start|end, status, output, error, elapsed_ms}
 EventSink = Callable[[WorkflowEvent], Awaitable[None]]
 
@@ -254,6 +277,7 @@ class _RunState:
         self.citations: list[dict] = []
         self.trace: list[str] = []
         self.output = ""
+        self.skip_interaction: dict | None = None  # 聊天通道恢复：交互节点直接产出提交值
 
 
 async def _emit(on_event: EventSink | None, **ev: Any) -> None:
@@ -267,20 +291,50 @@ async def _emit(on_event: EventSink | None, **ev: Any) -> None:
 
 async def execute_workflow(
     spec: WorkflowSpec, ctx, db, invoke_input: str, on_event: EventSink | None = None,
+    *, resume_node: str | None = None, resume_variables: dict | None = None,
+    resume_values: dict | None = None, resume_skip_interaction: dict | None = None,
 ) -> dict:
-    """确定性执行：返回 {output, citations, steps}。edges 非空走图遍历，否则线性。"""
+    """确定性执行：返回 {output, citations, steps}。edges 非空走图遍历，否则线性。
+
+    resume_node/resume_variables（v0.5-⑤）：从 interaction 挂起快照续跑——
+    变量上下文原样恢复，提交值按 input_var/interaction_key 写入后从该节点重新执行。
+    """
     state = _RunState(invoke_input)
+    state.skip_interaction = resume_skip_interaction
+    if resume_node is not None:
+        # 恢复：变量快照原样还原，提交值写入 input_var，交互节点视为已满足
+        # （从其后续节点继续，不再重跑该节点——否则会再次挂起）
+        state.variables = dict(resume_variables or {})
+        steps_by_id = {s.id: s for s in spec.steps}
+        step = steps_by_id.get(resume_node)
+        if step is None or step.type != "interaction":
+            raise ValueError(f"恢复节点 {resume_node} 不是 interaction 节点")
+        state.variables[step.input_var] = {
+            "__interaction__": "resume", step.interaction_key: dict(resume_values or {}),
+        }
+        state.output = json.dumps(dict(resume_values or {}), ensure_ascii=False)
+        if spec.edges:
+            resume_node = next((e.target for e in spec.edges if e.source == resume_node), None)
+        else:
+            idx = next((i for i, s in enumerate(spec.steps) if s.id == resume_node), None)
+            resume_node = spec.steps[idx + 1].id if idx is not None and idx + 1 < len(spec.steps) else None
+            if resume_node is None:
+                return {"output": state.output, "citations": state.citations, "steps": state.trace}
     if spec.edges:
-        await _execute_graph(spec, ctx, db, invoke_input, state, on_event)
+        await _execute_graph(spec, ctx, db, invoke_input, state, on_event,
+                             start_node=resume_node)
     else:
-        await _execute_linear(spec, ctx, db, invoke_input, state, on_event)
+        start_index = next((i for i, s in enumerate(spec.steps) if s.id == resume_node), 0)             if resume_node else 0
+        await _execute_linear(spec, ctx, db, invoke_input, state, on_event,
+                              start_index=start_index)
     return {"output": state.output, "citations": state.citations, "steps": state.trace}
 
 
 async def _execute_linear(
     spec: WorkflowSpec, ctx, db, invoke_input: str, state: _RunState, on_event: EventSink | None,
+    *, start_index: int = 0,
 ) -> None:
-    index = 0
+    index = start_index
     steps_by_id = {s.id: i for i, s in enumerate(spec.steps)}
     while index < len(spec.steps):
         step = spec.steps[index]
@@ -313,6 +367,7 @@ async def _execute_linear(
 
 async def _execute_graph(
     spec: WorkflowSpec, ctx, db, invoke_input: str, state: _RunState, on_event: EventSink | None,
+    *, start_node: str | None = None,
 ) -> None:
     steps_by_id = {s.id: s for s in spec.steps}
     outgoing: dict[str, list[WorkflowEdge]] = {}
@@ -321,8 +376,8 @@ async def _execute_graph(
         outgoing.setdefault(e.source, []).append(e)
         incoming.add(e.target)
 
-    # 起点：无入边节点（多条取声明序首个）；全成环时退回首个声明节点
-    start = next((s.id for s in spec.steps if s.id not in incoming), None)
+    # 起点：恢复模式用指定节点；否则取无入边节点（多条取声明序首个）；全成环时退回首个声明节点
+    start = start_node or next((s.id for s in spec.steps if s.id not in incoming), None)
     if start is None:
         raise ValueError("工作流图存在全环：没有可用的起始节点")
 
@@ -375,6 +430,21 @@ async def _execute_graph(
 async def _execute_node(step: Step, ctx, db, state: _RunState, invoke_input: str) -> str:
     """单节点执行（llm/tool/retrieve/parallel/subflow/loop），返回节点输出。"""
     variables, citations, trace = state.variables, state.citations, state.trace
+
+    if step.type == "interaction":
+        # v0.5-⑤：向用户请求结构化输入——抛挂起异常（variables 已在 state，由调用方落库）；
+        # 跳过模式（聊天通道恢复）：提交值直接作为节点输出，不挂起
+        if state.skip_interaction is not None:
+            out = json.dumps({step.input_var: state.skip_interaction}, ensure_ascii=False)
+            variables[step.input_var] = {step.interaction_key: dict(state.skip_interaction)}
+            return out
+        from .interaction import validate_interaction_schema
+
+        schema = validate_interaction_schema(step.ui_schema or {})
+        raise WorkflowSuspended(node_id=step.id, schema=schema,
+                                input_var=step.input_var,
+                                interaction_key=step.interaction_key,
+                                variables=dict(state.variables))
 
     if step.type == "parallel":
         if not step.branches:
@@ -535,8 +605,54 @@ def create_workflow_agent_class(spec: WorkflowSpec) -> type:
     class WorkflowAgent(AgentApp):
         async def on_invoke(self, request: InvokeRequest) -> InvokeResult:
             with self.ctx.db() as db:
+                # 交互恢复协议（v0.5-⑤）：input 为交互提交 JSON 且关联 run 时从快照续跑
+                submitted = self.ctx.interaction_values(request)
+                resume = None
+                if submitted is not None:
+                    from ..models import InteractionRecord, WorkflowRunRecord
+
+                    itx_id = json.loads(request.input)["__interaction__"]
+                    itx = db.get(InteractionRecord, itx_id)
+                    if itx is not None and itx.run_id:
+                        run = db.get(WorkflowRunRecord, itx.run_id)
+                        if run is not None and run.status == "waiting_input":
+                            resume = (itx.run_id, run.pending_node, dict(run.variables or {}))
                 try:
-                    result = await execute_workflow(spec, self.ctx, db, request.input)
+                    if resume is not None:
+                        result = await execute_workflow(spec, self.ctx, db, "",
+                                                        resume_node=resume[1],
+                                                        resume_variables=resume[2],
+                                                        resume_values=submitted)
+                    elif submitted is not None:
+                        # 聊天通道挂起（无 run）：提交值经跳过标志从头执行，
+                        # interaction 节点检测 __skip__ 后产出提交值并继续
+                        result = await execute_workflow(
+                            spec, self.ctx, db, request.input,
+                            resume_skip_interaction=submitted)
+                    else:
+                        result = await execute_workflow(spec, self.ctx, db, request.input)
+                except WorkflowSuspended as sus:
+                    # 交互引擎（v0.5-⑤）：挂起 → interactions 表 + result 帧携带交互请求
+                    from ..models import InteractionRecord
+                    from ..schemas import InteractionPayload
+
+                    record = InteractionRecord(
+                        id="itx-" + uuid.uuid4().hex[:12], agent=spec.name,
+                        session_id=request.session_id, run_id=None,
+                        schema=sus.schema, values={}, state="waiting",
+                    )
+                    db.add(record)
+                    db.commit()
+                    return InvokeResult(
+                        content=sus.schema.get("title", "等待用户输入"),
+                        steps=[f"interaction: workflow suspended at {sus.node_id}"],
+                        interaction=InteractionPayload(
+                            id=record.id, key=sus.input_var,
+                            title=sus.schema.get("title", ""),
+                            description=sus.schema.get("description", ""),
+                            ui_schema=sus.schema,
+                        ),
+                    )
                 except ValueError as e:
                     # DSL 错误（subflow 目标缺失等）→ RuntimeError → 端点统一映射 503 EAP-4005
                     raise RuntimeError(f"EAP-4005 {e}") from e

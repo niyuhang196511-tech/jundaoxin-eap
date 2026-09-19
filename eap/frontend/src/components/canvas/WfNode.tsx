@@ -1,7 +1,7 @@
 'use client'
 
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { Braces, GitFork, Loader2, Network, Repeat, Search, Sparkles, Split, XCircle } from 'lucide-react'
+import { Braces, GitFork, Loader2, MessageCircleQuestionMark, Network, Repeat, Search, Sparkles, Split, XCircle } from 'lucide-react'
 import { typeColor, typeLabel } from './dsl'
 import { cn } from '@/lib/cn'
 
@@ -26,6 +26,7 @@ function TypeIcon({ type }: { type: string }) {
     case 'parallel': return <GitFork {...props} />
     case 'loop': return <Repeat {...props} />
     case 'subflow': return <Network {...props} />
+    case 'interaction': return <MessageCircleQuestionMark {...props} />
     default: return <Braces {...props} />
   }
 }

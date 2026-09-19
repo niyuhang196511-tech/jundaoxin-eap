@@ -322,6 +322,7 @@ class AgentRegistry:
             config_version=config_version,
             data=result.data,
             data_schema=result.data_schema,
+            interaction=result.interaction,
         )
 
 
