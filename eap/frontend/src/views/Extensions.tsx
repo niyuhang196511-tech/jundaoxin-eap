@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   Braces, CircleCheck, CircleX, Plug, RefreshCw, Server, Wrench,
 } from 'lucide-react'
-import { Badge, Button, DialogContent, Input, Label, PageHeader, TabBar, Table, toast } from '@/components/ui'
+import { Badge, Button, DialogContent, Input, Label, PageHeader, TabBar, Table, toast,
+  type BadgeTone } from '@/components/ui'
 import { api } from '@/lib/api'
 
 interface ToolItem {
@@ -46,7 +47,26 @@ interface McpServer {
   tools: string[]
 }
 
+export interface ExtensionItem {
+  name: string
+  type: string
+  version: string
+  title: string
+  description: string
+  state: string
+  source: string
+  exposes: string[]
+  error: string
+  [key: string]: unknown
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  agent: '智能体', tool: '工具', rag: 'RAG 组件', workflow_node: '工作流节点',
+  connector: '连接器', ui: 'UI 组件', model_provider: '模型供应商', package: '包',
+}
+
 export default function ExtensionsPage() {
+  const [extensions, setExtensions] = useState<ExtensionItem[]>([])
   const [tools, setTools] = useState<ToolItem[]>([])
   const [plugins, setPlugins] = useState<PluginItem[]>([])
   const [rag, setRag] = useState<RagComponent[]>([])
@@ -55,16 +75,18 @@ export default function ExtensionsPage() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [t, p, r, s] = await Promise.all([
+      const [t, p, r, s, ext] = await Promise.all([
         api<ToolItem[]>('GET', '/api/v1/extensions/tools'),
         api<PluginItem[]>('GET', '/api/v1/extensions/plugins'),
         api<RagComponent[]>('GET', '/api/v1/extensions/rag-components'),
         api<McpServer[]>('GET', '/api/v1/mcp/servers'),
+        api<ExtensionItem[]>('GET', '/api/v1/extensions/registry'),
       ])
       setTools(t)
       setPlugins(p)
       setRag(r)
       setServers(s)
+      setExtensions(ext)
     } catch (e) {
       toast.error(`加载扩展数据失败：${(e as Error).message}`)
     }
@@ -81,6 +103,8 @@ export default function ExtensionsPage() {
     }
   }
 
+  const reloadAll = () => setReloadTick(v => v + 1)
+  const registryTab = <RegistryPanel extensions={extensions} onChanged={reloadAll} />
   const toolsTab = <ToolsPanel tools={tools} />
   const pluginsTab = <PluginsPanel plugins={plugins} onReload={reloadPlugins} />
   const ragTab = (
@@ -108,6 +132,7 @@ export default function ExtensionsPage() {
         actions={<Button variant="secondary" onClick={loadAll}><RefreshCw className="size-3.5" />刷新</Button>}
       />
       <TabBar items={[
+        { key: 'registry', label: `扩展目录 (${extensions.length})`, content: registryTab },
         { key: 'tools', label: `工具 (${tools.length})`, content: toolsTab },
         { key: 'plugins', label: `插件 (${plugins.length})`, content: pluginsTab },
         { key: 'rag', label: `RAG 组件 (${rag.length})`, content: ragTab },
@@ -374,5 +399,66 @@ function McpPanel({ servers, onChanged }: { servers: McpServer[]; onChanged: () 
           </div>
         </DialogContent>
           </div>
+  )
+}
+
+
+/** 扩展目录（v0.7-⑨）：统一注册表，按类型展示 + 启用/停用 */
+function RegistryPanel({ extensions, onChanged }: {
+  extensions: ExtensionItem[]
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState('')
+  const toggle = async (name: string, enable: boolean) => {
+    setBusy(name)
+    try {
+      await api('POST', `/api/v1/extensions/registry/${encodeURIComponent(name)}/${enable ? 'enable' : 'disable'}`)
+      toast.success(`${name} 已${enable ? '启用' : '停用'}`)
+      onChanged()
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+  const stateTone = (st: string): BadgeTone =>
+    st === 'enabled' ? 'green' : st === 'disabled' ? 'gray' : st === 'failed' ? 'red' : 'blue'
+  const stateLabel = (st: string) =>
+    st === 'enabled' ? '已启用' : st === 'disabled' ? '已停用' : st === 'failed' ? '加载失败' : '已登记'
+  return (
+    <div className="rounded-[--radius-card] border border-line bg-surface">
+      <Table<ExtensionItem>
+        rowKey={e => e.name}
+        data={extensions}
+        columns={[
+          { key: 'name', title: '名称', render: e => (
+            <div className="min-w-0">
+              <span className="font-medium">{e.name}</span>
+              <span className="ml-1.5 text-[11px] text-ink-3">v{e.version}</span>
+            </div>
+          ) },
+          { key: 'type', title: '类型', render: e => <Badge tone="brand">{TYPE_LABEL[e.type] ?? e.type}</Badge> },
+          { key: 'description', title: '说明', className: 'max-w-xs truncate' },
+          { key: 'exposes', title: '注册项', render: e => (
+            <span className="text-[11px] text-ink-3">{(e.exposes ?? []).join('、') || '—'}</span>
+          ) },
+          { key: 'state', title: '状态', render: e => (
+            <div className="flex items-center gap-1.5">
+              <Badge tone={stateTone(e.state)}>{stateLabel(e.state)}</Badge>
+              {e.error && <span className="truncate text-[10px] text-red-500" title={e.error}>{e.error}</span>}
+            </div>
+          ) },
+          { key: 'actions', title: '操作', render: e => (
+            e.state === 'failed' ? null : (
+              <Button size="xs" variant="secondary" disabled={busy === e.name}
+                onClick={() => toggle(e.name, e.state !== 'enabled')}>
+                {e.state === 'enabled' ? '停用' : '启用'}
+              </Button>
+            )
+          ) },
+        ]}
+        empty="暂无扩展（plugins/ 目录下的插件与安装的 bundle 会出现在这里）"
+      />
+    </div>
   )
 }

@@ -576,7 +576,7 @@ class AgentReleaseRecord(Base):
 
 
 class AuditLog(Base):
-    """审计日志（M11）：管理操作追踪（谁在何时对什么做了什么）。
+    """审计日志（M11）：管理面操作追踪（谁在何时对什么做了什么）。
 
     管理面写操作经 observability.audit.record 落库；查询端点限 admin 语义
     （当前=API Key 通道，多租户 RBAC 后按角色收敛）。
@@ -591,6 +591,33 @@ class AuditLog(Base):
     detail: Mapped[dict] = mapped_column(JSON, default=dict)  # 脱敏后的变更摘要
     trace_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ExtensionRecord(Base):
+    """扩展注册表（docs/unfinished v0.7-⑨）：所有类型扩展的持久登记。
+
+    - source：plugin_dir（目录热载）| bundle（.eapext 安装）| builtin | entrypoint
+    - state：registered（已登记未启用）| enabled | disabled | failed（加载失败）
+    - manifest 为统一 ExtensionManifest（runtime/extension_manifest.py）；exposes
+      为该扩展注册到各注册表的具体组件/工具名（供目录展示与启停参照）。
+    """
+
+    __tablename__ = "extension_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    type: Mapped[str] = mapped_column(String(20), index=True)
+    version: Mapped[str] = mapped_column(String(32), default="0.0.0")
+    title: Mapped[str] = mapped_column(String(128), default="")
+    description: Mapped[str] = mapped_column(String(256), default="")
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    source: Mapped[str] = mapped_column(String(16), default="plugin_dir")
+    module: Mapped[str] = mapped_column(String(200), default="")
+    state: Mapped[str] = mapped_column(String(16), default="registered", index=True)
+    exposes: Mapped[list] = mapped_column(JSON, default=list)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    installed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class InteractionRecord(Base):

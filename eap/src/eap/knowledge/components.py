@@ -73,6 +73,20 @@ def get_reranker(name: str | None, params: dict[str, Any] | None = None):
     return lexical_rerank
 
 
+def unregister(kind: str, name: str) -> bool:
+    """注销组件（v0.7 插件停用/卸载用）；内置组件不允许注销。"""
+    registry = _REGISTRIES.get(kind)
+    if registry is None:
+        return False
+    info = registry.get(name)
+    if info is None:
+        return False
+    if info[1].source == "builtin":
+        return False
+    registry.pop(name, None)
+    return True
+
+
 def list_components() -> list[ComponentInfo]:
     """全部已注册组件（扩展中心页数据源）。"""
     out: list[ComponentInfo] = []
