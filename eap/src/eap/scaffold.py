@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 import sys
 
 TEMPLATES: dict[str, dict[str, str]] = {
@@ -167,19 +168,18 @@ def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
         raise SystemExit(f"未知扩展类型 {kind}（可选：agent / tool / rag / mcp）")
     if not name.replace("_", "").replace("-", "").isalnum():
         raise SystemExit("名称仅允许字母/数字/连字符/下划线")
-    target = os.path.abspath(os.path.join(base_dir, name))
-    base = os.path.abspath(base_dir)
-    if os.path.commonpath([base, target]) != base:
+    base = Path(base_dir).resolve()
+    target = (base / name).resolve()
+    if not target.is_relative_to(base):
         raise SystemExit(f"目标目录越界：{target}")
-    if os.path.exists(target):
+    if target.exists():
         raise SystemExit(f"目录已存在：{target}")
-    os.makedirs(target)
+    target.mkdir(parents=True)
     written = []
     for filename, template in TEMPLATES[kind].items():
-        path = os.path.join(target, filename)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(_render(template, name))
-        written.append(path)
+        path = target / filename
+        path.write_text(_render(template, name), encoding="utf-8", newline="\n")
+        written.append(str(path))
     print(f"✅ 已生成 {kind} 扩展模板：")
     for p in written:
         print(f"   {p}")

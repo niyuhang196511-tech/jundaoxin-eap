@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 import re
 
 
@@ -28,21 +29,21 @@ def save_image(data: bytes, suffix: str = ".png") -> str:
     """图片字节 → 落盘，返回 web 路径（/media/<hash>/image<suffix>）。同内容去重。
 
     suffix 来自解析产物中的图片文件名（不可信）：仅接受 .字母数字 形式，
-    其余一律归一化为 .png，杜绝经后缀拼接的路径穿越。
+    其余一律归一化为 .png；落盘路径规范化后必须位于 media 根目录之内（防穿越）。
     """
     import re
 
-    root = media_root()
-    digest = _digest_dir(data)
-    target_dir = os.path.join(root, digest)
-    os.makedirs(target_dir, exist_ok=True)
     suffix = suffix if suffix.startswith(".") else "." + suffix
     if not re.fullmatch(r"\.[A-Za-z0-9]{1,8}", suffix):
         suffix = ".png"
-    path = os.path.join(target_dir, f"image{suffix}")
-    if not os.path.exists(path):
-        with open(path, "wb") as f:
-            f.write(data)
+    root = Path(media_root()).resolve()
+    digest = _digest_dir(data)
+    target = (root / digest / f"image{suffix}").resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("媒体路径越界，已拒绝")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(data)
     return f"/media/{digest}/image{suffix}"
 
 

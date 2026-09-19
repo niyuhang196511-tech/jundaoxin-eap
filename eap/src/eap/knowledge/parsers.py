@@ -90,8 +90,9 @@ def _vision_describe(data: bytes, suffix: str) -> str | None:
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
         suffix.lstrip(".").lower(), "image/png")
     b64 = base64.b64encode(data).decode()
+    endpoint = sanitize_url(s.openai_base_url + "/chat/completions")
     resp = httpx.post(
-        sanitize_url(f"{s.openai_base_url.rstrip('/')}/chat/completions"),
+        endpoint,
         json={"model": s.vision_model, "messages": [{
             "role": "user",
             "content": [
@@ -271,7 +272,11 @@ def sanitize_url(url: str, *, public_only: bool = False) -> str:
                 raise ValueError(f"URL host 指向非公网地址，已拒绝: {host}")
         elif host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
             raise ValueError(f"URL host 指向内部地址，已拒绝: {host}")
-    return url
+    # 重建：仅由校验后的组件拼装（丢弃内嵌凭据与 fragment），杜绝未校验部分回流
+    rebuilt = parsed.scheme + "://" + parsed.netloc + parsed.path
+    if parsed.query:
+        rebuilt = rebuilt + "?" + parsed.query
+    return rebuilt
 
 
 
@@ -281,13 +286,15 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
     import re
     import time
     import zipfile
+    from urllib.parse import urlparse
 
 
     base, token = _mineru_settings()
     headers = {"Authorization": f"Bearer {token}"}
     try:
         # ① 申请上传链接
-        resp = httpx.post(sanitize_url(f"{base}/file-urls/batch"),
+        endpoint = sanitize_url(base + "/file-urls/batch")
+        resp = httpx.post(endpoint,
                           json={"enable_formula": True, "enable_table": True,
                                 "language": "ch", "files": [{"name": filename,
                                                              "is_ocr": True}]},
@@ -296,14 +303,16 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
         batch_id = resp.json()["data"]["batch_id"]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(batch_id)):
             raise ValueError(f"MinerU 返回的 batch_id 非法: {batch_id}")
-        upload_url = sanitize_url(resp.json()["data"]["file_urls"][0], public_only=True)
+        upload = urlparse(sanitize_url(resp.json()["data"]["file_urls"][0], public_only=True))
+        upload_url = upload.scheme + "://" + upload.netloc + upload.path
 
         # ② PUT 文件（对象存储直传）
-        put = httpx.put(sanitize_url(upload_url, public_only=True), content=data, timeout=120)
+        put = httpx.put(upload_url, content=data, timeout=120)
         put.raise_for_status()
 
         # ③ 建批提取任务
-        resp = httpx.post(sanitize_url(f"{base}/extract/task/batch"),
+        endpoint = sanitize_url(base + "/extract/task/batch")
+        resp = httpx.post(endpoint,
                           json={"batch_id": batch_id, "enable_formula": True,
                                 "enable_table": True, "language": "ch"},
                           headers=headers, timeout=30)
@@ -312,12 +321,15 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
         # ④ 轮询批结果（上限 5 分钟）
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            state = httpx.get(sanitize_url(f"{base}/extract/task/batch/{batch_id}"),
-                              headers=headers, timeout=30).json()
+            poll_url = sanitize_url(base + "/extract/task/batch/" + str(batch_id))
+            state = httpx.get(poll_url, headers=headers, timeout=30).json()
             results = state["data"]["extract_result"]
             done = [r for r in results if r.get("state") == "done"]
             if done:
-                zip_url = sanitize_url(done[0]["full_zip_url"], public_only=True)
+                zparsed = urlparse(sanitize_url(done[0]["full_zip_url"], public_only=True))
+                zip_url = zparsed.scheme + "://" + zparsed.netloc + zparsed.path
+                if zparsed.query:
+                    zip_url = zip_url + "?" + zparsed.query
                 break
             failed = [r for r in results if r.get("state") == "failed"]
             if failed:
@@ -327,7 +339,7 @@ def _mineru_cloud(filename: str, data: bytes) -> str:
             raise ValueError("MinerU 解析超时（5 分钟）")
 
         # ⑤ 下载 zip，取第一个 .md
-        archive = httpx.get(sanitize_url(zip_url, public_only=True), timeout=120)
+        archive = httpx.get(zip_url, timeout=120)
         archive.raise_for_status()
         with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
             md_names = [n for n in zf.namelist() if n.endswith(".md")]
@@ -353,8 +365,9 @@ def _mineru_selfhosted(filename: str, data: bytes) -> str:
 
     base, token = _mineru_settings()
     try:
+        endpoint = sanitize_url(base + "/file_parse")
         resp = httpx.post(
-            sanitize_url(f"{base.rstrip('/')}/file_parse"),
+            endpoint,
             files={"files": (filename, data)},
             data={"output_format": "md", "backend": "pipeline"},
             headers={"Authorization": f"Bearer {token}"},
