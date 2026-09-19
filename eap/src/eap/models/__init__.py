@@ -122,7 +122,10 @@ class AgentVersionRecord(Base):
 
 
 class KB(Base):
-    """知识库实例（多 KB 模型，docs/04 §1）。pipeline 为扩展开发体系的组件选型。"""
+    """知识库实例（多 KB 模型，docs/04 §1）。pipeline 为扩展开发体系的组件选型。
+
+    tenant_id：可空 = 平台共享（所有租户可见）；JWT 通道检索/列表按租户过滤（v0.6）。
+    """
 
     __tablename__ = "kbs"
 
@@ -131,6 +134,7 @@ class KB(Base):
     title: Mapped[str] = mapped_column(String(128), default="")
     template: Mapped[str] = mapped_column(String(16), default="doc")  # doc | faq
     embedding_provider: Mapped[str] = mapped_column(String(16), default="hash")
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # RAG pipeline 组件选型：{"chunker": {"name": str, "params": {}}, "reranker": {...}}；
     # 空/缺省走内置默认（components.get_*）
     pipeline: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -305,7 +309,10 @@ class SkillRecord(Base):
 
 
 class WorkflowRecord(Base):
-    """工作流 DSL 存储（docs/03 §6 Workflow Engine）：启停 + 版本，启动时注册为智能体。"""
+    """工作流 DSL 存储（docs/03 §6 Workflow Engine）：启停 + 版本，启动时注册为智能体。
+
+    tenant_id：可空 = 平台共享（v0.6 与 rls.py 清单对齐）。
+    """
 
     __tablename__ = "workflows"
 
@@ -313,6 +320,7 @@ class WorkflowRecord(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
     dsl: Mapped[dict] = mapped_column(JSON, default=dict)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

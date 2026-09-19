@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
+from ...observability import audit
 from ...models import MCPServerRecord
 from ...runtime.mcp_client import load_mcp_tools, load_mcp_tools_stdio
 from ..deps import require_admin, require_api_key, resolve_tenant
@@ -42,7 +43,7 @@ def list_servers(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("", dependencies=[fastapi.Depends(require_admin)])
-def register_server(body: ServerCreate, db: Session = fastapi.Depends(get_db)):
+def register_server(body: ServerCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if body.transport == "http" and not body.url:
         raise fastapi.HTTPException(status_code=422, detail="http 传输需要 url")
     if body.transport == "stdio" and not body.command:
@@ -56,6 +57,8 @@ def register_server(body: ServerCreate, db: Session = fastapi.Depends(get_db)):
     )
     db.add(record)
     db.commit()
+    audit.record("mcp.register", actor=audit.actor_of(request), target=record.name,
+                 detail={"transport": record.transport}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "transport": record.transport, "status": record.status}
 
 
@@ -85,10 +88,12 @@ async def validate_server(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
-def toggle_server(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
+def toggle_server(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == name))
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 MCP Server {name} 不存在")
     record.enabled = enabled
     db.commit()
+    audit.record("mcp.toggle", actor=audit.actor_of(request), target=name,
+                 detail={"enabled": enabled}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "enabled": enabled}

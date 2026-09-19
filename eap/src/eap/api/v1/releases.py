@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from ...agents.registry import registry
 from ...db import get_db
 from ...models import AgentReleaseRecord
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
+from ...observability import audit
 from .evals import execute_evaluation
 
 router = fastapi.APIRouter(prefix="/api/v1/releases",
@@ -59,8 +60,8 @@ def _current_prod(db: Session, agent: str) -> AgentReleaseRecord | None:
                      .order_by(AgentReleaseRecord.updated_at.desc()))
 
 
-@router.post("")
-def create_release(body: ReleaseCreate, db: Session = fastapi.Depends(get_db)):
+@router.post("", dependencies=[fastapi.Depends(require_admin)])
+def create_release(body: ReleaseCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """登记一个发布草案；agent 必须已在 Agent Registry 纳管。"""
     if body.agent not in registry.names():
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 智能体 {body.agent} 未注册")
@@ -73,6 +74,8 @@ def create_release(body: ReleaseCreate, db: Session = fastapi.Depends(get_db)):
                                 version=body.version, notes=body.notes)
     db.add(record)
     db.commit()
+    audit.record("release.create", actor=audit.actor_of(request),
+                 target=record.id, trace_id=getattr(request.state, "trace_id", ""))
     return _view(record)
 
 
@@ -91,8 +94,8 @@ def current_release(agent: str, db: Session = fastapi.Depends(get_db)):
     return _view(record) if record else None
 
 
-@router.post("/{release_id}/eval")
-async def run_gate(release_id: str, body: EvalGateRequest, db: Session = fastapi.Depends(get_db)):
+@router.post("/{release_id}/eval", dependencies=[fastapi.Depends(require_admin)])
+async def run_gate(release_id: str, body: EvalGateRequest, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """对发布目标 agent 执行规则裁判评测，把运行结果绑定为该发布的门禁证据。"""
     record = _get(db, release_id)
     if record.state not in ("draft", "review"):
@@ -102,16 +105,21 @@ async def run_gate(release_id: str, body: EvalGateRequest, db: Session = fastapi
     record.eval_run_id = result["run_id"]
     record.eval_verdict = result["verdict"]
     db.commit()
+    audit.record("release.eval", actor=audit.actor_of(request), target=release_id,
+                 detail={"dataset": body.dataset, "verdict": result["verdict"]},
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {**_view(record), "pass_rate": result["pass_rate"], "scores": result["scores"]}
 
 
-@router.post("/{release_id}/promote")
-def promote(release_id: str, db: Session = fastapi.Depends(get_db)):
+@router.post("/{release_id}/promote", dependencies=[fastapi.Depends(require_admin)])
+def promote(release_id: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """推进状态：draft→review；review→prod（需评测 PASS 门禁，旧 prod 自动退役）；canary→prod。"""
     record = _get(db, release_id)
     if record.state == "draft":
         record.state = "review"
         db.commit()
+        audit.record("release.promote", actor=audit.actor_of(request), target=release_id,
+                     detail={"to": "review"}, trace_id=getattr(request.state, "trace_id", ""))
         return _view(record)
     if record.state == "review":
         if record.eval_verdict != "PASS":
@@ -121,6 +129,8 @@ def promote(release_id: str, db: Session = fastapi.Depends(get_db)):
         if old and old.id != record.id:
             old.state = "retired"
         db.commit()
+        audit.record("release.promote", actor=audit.actor_of(request), target=release_id,
+                     detail={"to": "prod"}, trace_id=getattr(request.state, "trace_id", ""))
         return _view(record)
     if record.state == "canary":
         if record.eval_verdict != "PASS":
@@ -131,6 +141,8 @@ def promote(release_id: str, db: Session = fastapi.Depends(get_db)):
         if old and old.id != record.id:
             old.state = "retired"
         db.commit()
+        audit.record("release.promote", actor=audit.actor_of(request), target=release_id,
+                     detail={"to": "prod"}, trace_id=getattr(request.state, "trace_id", ""))
         return _view(record)
     raise fastapi.HTTPException(status_code=409, detail=f"EAP-6002 状态 {record.state} 不允许提升")
 
@@ -141,8 +153,8 @@ class CanarySet(BaseModel):
                             description='灰度覆盖配置，MVP: {"model": "模型名"}')
 
 
-@router.post("/{release_id}/canary")
-def set_canary(release_id: str, body: CanarySet, db: Session = fastapi.Depends(get_db)):
+@router.post("/{release_id}/canary", dependencies=[fastapi.Depends(require_admin)])
+def set_canary(release_id: str, body: CanarySet, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """进入/调整灰度：review→canary（需评测 PASS），设置流量百分比与覆盖配置。"""
     record = _get(db, release_id)
     if record.state == "canary":
@@ -150,6 +162,8 @@ def set_canary(release_id: str, body: CanarySet, db: Session = fastapi.Depends(g
         if body.overrides:
             record.overrides = body.overrides
         db.commit()
+        audit.record("release.canary", actor=audit.actor_of(request), target=release_id,
+                     detail={"percent": body.percent}, trace_id=getattr(request.state, "trace_id", ""))
         return _view(record)
     if record.state == "review":
         if record.eval_verdict != "PASS":
@@ -158,12 +172,14 @@ def set_canary(release_id: str, body: CanarySet, db: Session = fastapi.Depends(g
         record.canary_percent = body.percent
         record.overrides = body.overrides
         db.commit()
+        audit.record("release.canary", actor=audit.actor_of(request), target=release_id,
+                     detail={"percent": body.percent}, trace_id=getattr(request.state, "trace_id", ""))
         return _view(record)
     raise fastapi.HTTPException(status_code=409, detail=f"EAP-6002 状态 {record.state} 不允许灰度")
 
 
-@router.post("/{release_id}/rollback")
-def rollback(release_id: str, db: Session = fastapi.Depends(get_db)):
+@router.post("/{release_id}/rollback", dependencies=[fastapi.Depends(require_admin)])
+def rollback(release_id: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """回滚：prod 退役为 rolled_back 并恢复上一个 retired 版本；canary 直接下线。"""
     record = _get(db, release_id)
     if record.state not in ("prod", "canary"):
@@ -182,4 +198,7 @@ def rollback(release_id: str, db: Session = fastapi.Depends(get_db)):
     if previous:
         previous.state = "prod"
     db.commit()
+    audit.record("release.rollback", actor=audit.actor_of(request), target=release_id,
+                 detail={"restored": previous.version if previous else None},
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"rolled_back": _view(record), "restored": _view(previous) if previous else None}

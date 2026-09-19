@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db import get_db
+from ...observability import audit
 from ...models import SkillRecord
 from ...runtime import skill_pkg
 from ..deps import require_admin, require_api_key, resolve_tenant
@@ -35,7 +36,7 @@ def list_skills(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("", dependencies=[fastapi.Depends(require_admin)])
-def create_skill(body: SkillCreate, db: Session = fastapi.Depends(get_db)):
+def create_skill(body: SkillCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(SkillRecord).where(SkillRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 技能 {body.name} 已存在")
     skill = SkillRecord(
@@ -44,6 +45,8 @@ def create_skill(body: SkillCreate, db: Session = fastapi.Depends(get_db)):
     )
     db.add(skill)
     db.commit()
+    audit.record("skill.create", actor=audit.actor_of(request), target=skill.name,
+                 detail={"version": skill.version}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": skill.name, "version": skill.version, "status": "registered"}
 
 
@@ -61,7 +64,7 @@ class SkillImport(BaseModel):
 
 
 @router.post("/import", dependencies=[fastapi.Depends(require_admin)])
-def import_skill(body: SkillImport, db: Session = fastapi.Depends(get_db)):
+def import_skill(body: SkillImport, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """导入技能包：验签失败 401（EAP-8101）；导入后默认停用，人工审查后启用。"""
     try:
         skill = skill_pkg.verify_bundle(body.bundle, get_settings().skill_signing_key)
@@ -96,12 +99,14 @@ def get_skill(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
-def toggle_skill(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
+def toggle_skill(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     skill = db.scalar(select(SkillRecord).where(SkillRecord.name == name))
     if skill is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 技能 {name} 不存在")
     skill.enabled = enabled
     db.commit()
+    audit.record("skill.toggle", actor=audit.actor_of(request), target=name,
+                 detail={"enabled": enabled}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "enabled": enabled}
 
 

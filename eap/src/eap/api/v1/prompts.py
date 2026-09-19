@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
+from ...observability import audit
 from ...models import PromptRecord
 from ...runtime.context import extract_prompt_variables, render_prompt
 from ..deps import require_admin, require_api_key, resolve_tenant
@@ -59,7 +60,7 @@ def list_prompts(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("", dependencies=[fastapi.Depends(require_admin)])
-def create_prompt(body: PromptCreate, db: Session = fastapi.Depends(get_db)):
+def create_prompt(body: PromptCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(PromptRecord).where(PromptRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 Prompt {body.name} 已存在")
     from ...runtime import prompts as prompt_rt
@@ -74,6 +75,8 @@ def create_prompt(body: PromptCreate, db: Session = fastapi.Depends(get_db)):
     prompt_rt.publish_version(db, body.name, body.version,
                               {v: "" for v in record.variables})
     db.commit()
+    audit.record("prompt.create", actor=audit.actor_of(request), target=body.name,
+                 detail={"version": body.version}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "variables": record.variables, "status": "registered"}
 
 
@@ -133,7 +136,7 @@ def list_versions(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("/{name}/publish", dependencies=[fastapi.Depends(require_admin)])
-def publish_version(name: str, body: VersionPublish, db: Session = fastapi.Depends(get_db)):
+def publish_version(name: str, body: VersionPublish, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     from ...runtime import prompts as prompt_rt
 
     try:
@@ -143,11 +146,13 @@ def publish_version(name: str, body: VersionPublish, db: Session = fastapi.Depen
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    audit.record("prompt.publish", actor=audit.actor_of(request), target=f"{name}@{body.version}",
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "version": record.version, "state": "published"}
 
 
 @router.post("/{name}/rollback", dependencies=[fastapi.Depends(require_admin)])
-def rollback_prompt(name: str, db: Session = fastapi.Depends(get_db)):
+def rollback_prompt(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     from ...runtime import prompts as prompt_rt
 
     try:
@@ -158,6 +163,8 @@ def rollback_prompt(name: str, db: Session = fastapi.Depends(get_db)):
     if record is None:
         raise fastapi.HTTPException(status_code=409,
                                     detail="EAP-6002 无可回滚的归档版本")
+    audit.record("prompt.rollback", actor=audit.actor_of(request), target=name,
+                 detail={"version": record.version}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "version": record.version, "state": "published"}
 
 

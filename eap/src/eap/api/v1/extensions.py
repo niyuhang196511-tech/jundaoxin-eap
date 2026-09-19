@@ -14,7 +14,7 @@ from ...db import get_db
 from ...knowledge.components import list_components as list_rag_components
 from ...plugins import loaded_plugins, load_plugins, reload_plugins
 from ...runtime.workflow import _WORKFLOW_TOOLS, resolve_tool
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/extensions",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -93,7 +93,7 @@ def list_plugins():
     ]
 
 
-@router.post("/plugins/reload")
+@router.post("/plugins/reload", dependencies=[fastapi.Depends(require_admin)])
 def reload_all_plugins():
     plugins = reload_plugins()
     failed = [p.name for p in plugins if p.status == "failed"]

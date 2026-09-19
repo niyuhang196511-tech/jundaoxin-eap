@@ -58,7 +58,7 @@ export default function EvalsPage() {
     setResult(null)
     try {
       const r = await api<RunResult>('POST', '/api/v1/evals/runs', {
-        agent, dataset, pass_threshold: parseFloat(rate) || 0.8,
+        agent, dataset, min_pass_rate: parseFloat(rate) || 0.8,
       })
       setResult(r)
       toast.success(`评测完成：通过率 ${(r.pass_rate * 100).toFixed(0)}%`)

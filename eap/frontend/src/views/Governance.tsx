@@ -202,10 +202,16 @@ function BudgetsTab() {
   )
 }
 
+const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
+  'model-allowlist': { models: ['mock-llm'] },
+  'provider-allowlist': { providers: ['mock'] },
+  'max-prompt-tokens': { limit: 4000 },
+}
+
 function PoliciesTab() {
   const [list, setList] = useState<Policy[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ name: '', tenantId: 1, kind: 'model_whitelist', config: '{}', priority: 10 })
+  const [form, setForm] = useState({ name: '', tenantId: 1, kind: 'model-allowlist', config: '{}', priority: 10 })
 
   const load = useCallback(async () => {
     try {
@@ -221,10 +227,10 @@ function PoliciesTab() {
       await api('POST', '/api/v1/policies', {
         name: form.name.trim(), tenant_id: form.tenantId, kind: form.kind,
         config: JSON.parse(form.config), priority: form.priority,
-      })
+      }).catch(e => { throw new Error((e as Error).message) })
       toast.success('策略已创建')
       setOpen(false)
-      setForm({ name: '', tenantId: 1, kind: 'model_whitelist', config: '{}', priority: 10 })
+      setForm({ name: '', tenantId: 1, kind: 'model-allowlist', config: '{}', priority: 10 })
       load()
     } catch (e) {
       toast.error(`创建失败：${(e as Error).message}`)
@@ -278,10 +284,14 @@ function PoliciesTab() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>类型</Label>
-              <Select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value })}>
-                <option value="model_whitelist">model_whitelist</option>
-                <option value="provider_whitelist">provider_whitelist</option>
-                <option value="prompt_limit">prompt_limit</option>
+              <Select value={form.kind} onChange={e => setForm({
+                ...form,
+                kind: e.target.value,
+                config: JSON.stringify(POLICY_TEMPLATES[e.target.value] ?? {}, null, 2),
+              })}>
+                <option value="model-allowlist">model-allowlist（模型白名单）</option>
+                <option value="provider-allowlist">provider-allowlist（供应商白名单）</option>
+                <option value="max-prompt-tokens">max-prompt-tokens（prompt 上限）</option>
               </Select>
             </div>
             <div>

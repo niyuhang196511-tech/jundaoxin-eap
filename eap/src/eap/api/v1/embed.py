@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ...api.security import PREFIX_EMBED, domain_allowed, rate_limiter, sign_session
 from ...db import get_db
+from ...observability import audit
 from ...models import EmbedChannel
 from ..deps import resolve_tenant
 
@@ -31,12 +32,16 @@ class EmbedSessionRequest(BaseModel):
 
 
 @router.post("/agents/{name}/embed")
-def create_embed_channel(name: str, body: EmbedCreate, db: Session = fastapi.Depends(get_db)):
+def create_embed_channel(name: str, body: EmbedCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """为智能体创建嵌入渠道 → 返回 EmbedToken（第三方页面据此换取会话）。"""
     token = PREFIX_EMBED + secrets.token_urlsafe(24)
     channel = EmbedChannel(agent_name=name, token=token, domains=body.domains, note=body.note)
     db.add(channel)
     db.commit()
+    from ...observability import audit
+
+    audit.record("embed.create", actor=audit.actor_of(request), target=f"{name}/{channel.id}",
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {
         "channel_id": channel.id, "agent": name, "token": token,
         "domains": channel.domains, "status": channel.status,
@@ -54,12 +59,16 @@ def list_embed_channels(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.delete("/embed/{channel_id}")
-def disable_embed_channel(channel_id: int, db: Session = fastapi.Depends(get_db)):
+def disable_embed_channel(channel_id: int, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     channel = db.get(EmbedChannel, channel_id)
     if channel is None:
         raise fastapi.HTTPException(status_code=404, detail="EAP-4004 渠道不存在")
     channel.status = "disabled"
     db.commit()
+    from ...observability import audit
+
+    audit.record("embed.disable", actor=audit.actor_of(request), target=str(channel_id),
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"channel_id": channel_id, "status": "disabled"}
 
 

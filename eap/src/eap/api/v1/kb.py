@@ -44,10 +44,14 @@ def list_kbs(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("")
-def create_kb(body: KBCreate, db: Session = fastapi.Depends(get_db)):
+def create_kb(body: KBCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(KB).where(KB.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 知识库 {body.name} 已存在")
-    kb = KB(name=body.name, title=body.title, template=body.template, pipeline=body.pipeline)
+    # JWT 通道创建的知识库归属该租户；API Key 通道 = 平台共享（NULL）
+    tenant_id = getattr(request.state, "tenant_id", None) \
+        if getattr(request.state, "auth_kind", "") == "jwt" else None
+    kb = KB(name=body.name, title=body.title, template=body.template,
+            pipeline=body.pipeline, tenant_id=tenant_id)
     db.add(kb)
     db.commit()
     return {"name": kb.name, "title": kb.title, "template": kb.template}

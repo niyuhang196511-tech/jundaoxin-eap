@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
+from ...observability import audit
 from ...models import EvalDatasetRecord, EvalRunRecord
 from ...schemas import InvokeRequest
 from ..deps import require_admin, require_api_key, resolve_tenant
@@ -38,7 +39,7 @@ class EvalRunRequest(BaseModel):
 
 
 @router.post("/datasets", dependencies=[fastapi.Depends(require_admin)])
-def create_dataset(body: EvalDatasetCreate, db: Session = fastapi.Depends(get_db)):
+def create_dataset(body: EvalDatasetCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     for i, case in enumerate(body.cases):
         if "input" not in case or not ("expected_any" in case or "expectation" in case):
             raise fastapi.HTTPException(
@@ -49,6 +50,8 @@ def create_dataset(body: EvalDatasetCreate, db: Session = fastapi.Depends(get_db
     record = EvalDatasetRecord(name=body.name, description=body.description, cases=body.cases)
     db.add(record)
     db.commit()
+    audit.record("eval.dataset.create", actor=audit.actor_of(request), target=body.name,
+                 detail={"cases": len(record.cases)}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "cases": len(record.cases)}
 
 
@@ -61,8 +64,12 @@ def list_datasets(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("/runs", dependencies=[fastapi.Depends(require_admin)])
-async def run_evaluation(body: EvalRunRequest, db: Session = fastapi.Depends(get_db)):
-    return await execute_evaluation(db, body.agent, body.dataset, body.min_pass_rate, body.judge)
+async def run_evaluation(body: EvalRunRequest, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    result = await execute_evaluation(db, body.agent, body.dataset, body.min_pass_rate, body.judge)
+    audit.record("eval.run", actor=audit.actor_of(request), target=result.get("run_id", ""),
+                 detail={"agent": body.agent, "dataset": body.dataset, "verdict": result.get("verdict")},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return result
 
 
 async def execute_evaluation(db: Session, agent: str, dataset_name: str,

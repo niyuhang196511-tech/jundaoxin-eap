@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
+from ...observability import audit
 from ...models import ConnectorRecord
 from ...runtime.connectors import load_connector_tools
 from ..deps import require_admin, require_api_key, resolve_tenant
@@ -51,7 +52,7 @@ def list_connectors(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("", dependencies=[fastapi.Depends(require_admin)])
-def create_connector(body: ConnectorCreate, db: Session = fastapi.Depends(get_db)):
+def create_connector(body: ConnectorCreate, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     if db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 连接器 {body.name} 已注册")
     if body.kind == "rest" and not body.base_url.lower().startswith(("http://", "https://")):
@@ -66,6 +67,8 @@ def create_connector(body: ConnectorCreate, db: Session = fastapi.Depends(get_db
     )
     db.add(record)
     db.commit()
+    audit.record("connector.create", actor=audit.actor_of(request), target=body.name,
+                 detail={"kind": body.kind}, trace_id=getattr(request.state, "trace_id", ""))
     return _view(record)
 
 
@@ -102,12 +105,14 @@ async def validate_connector(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("/{name}/enabled", dependencies=[fastapi.Depends(require_admin)])
-def toggle(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
+def toggle(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(ConnectorRecord).where(ConnectorRecord.name == name))
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 连接器 {name} 不存在")
     record.enabled = enabled
     db.commit()
+    audit.record("connector.toggle", actor=audit.actor_of(request), target=name,
+                 detail={"enabled": enabled}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "enabled": record.enabled}
 
 

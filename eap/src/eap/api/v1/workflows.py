@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
+from ...observability import audit
 from ...models import WorkflowRecord, WorkflowRunRecord
 from ...runtime.workflow import WorkflowSpec
 from ...workflows import (create_and_register, disable, load_enabled, resume_run_async,
@@ -31,12 +32,15 @@ def list_workflows(db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("", dependencies=[fastapi.Depends(require_admin)])
-async def create_workflow(body: WorkflowSpec, db: Session = fastapi.Depends(get_db)):
+async def create_workflow(body: WorkflowSpec, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     """DSL 创建即注册：工作流立刻成为可调用、可嵌入的智能体。"""
     try:
         record = await create_and_register(db, body)
     except ValueError as e:
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 {e}") from e
+    audit.record("workflow.create", actor=audit.actor_of(request), target=record.name,
+                 detail={"steps": len(body.steps), "edges": len(body.edges)},
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "version": record.version, "steps": len(body.steps),
             "invoke": f"/api/v1/agents/{record.name}/invocations"}
 
@@ -128,16 +132,20 @@ def list_runs(name: str, db: Session = fastapi.Depends(get_db)):
 
 
 @router.post("/reload", dependencies=[fastapi.Depends(require_admin)])
-async def reload_workflows():
+async def reload_workflows(request: fastapi.Request):
     """从 DB 重新加载启用的 DSL 工作流（幂等注册）。"""
     count = await load_enabled()
+    audit.record("workflow.reload", actor=audit.actor_of(request), target="*",
+                 detail={"reloaded": count}, trace_id=getattr(request.state, "trace_id", ""))
     return {"reloaded": count}
 
 
 @router.delete("/{name}", dependencies=[fastapi.Depends(require_admin)])
-async def disable_workflow(name: str):
+async def disable_workflow(name: str, request: fastapi.Request):
     try:
         await disable(name)
     except KeyError as e:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    audit.record("workflow.disable", actor=audit.actor_of(request), target=name,
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "enabled": False}

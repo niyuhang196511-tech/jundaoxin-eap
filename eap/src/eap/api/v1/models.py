@@ -54,10 +54,12 @@ def register_model(body: ModelRegister, request: fastapi.Request, db: Session = 
 
 
 @router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
-def toggle_model(name: str, enabled: bool, db: Session = fastapi.Depends(get_db)):
+def toggle_model(name: str, enabled: bool, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
     record = db.scalar(select(ModelRecord).where(ModelRecord.name == name))
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 模型 {name} 不存在")
     record.enabled = enabled
     db.commit()
+    audit.record("model.toggle", actor=audit.actor_of(request), target=name,
+                 detail={"enabled": enabled}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": name, "enabled": enabled}

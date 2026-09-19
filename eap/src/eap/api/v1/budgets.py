@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...runtime import budget
-from ..deps import require_api_key, resolve_tenant
+from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/budgets",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
@@ -21,11 +21,16 @@ class BudgetSet(BaseModel):
     note: str = Field(default="", max_length=128)
 
 
-@router.put("")
-def upsert_budget(body: BudgetSet, db: Session = fastapi.Depends(get_db)):
+@router.put("", dependencies=[fastapi.Depends(require_admin)])
+def upsert_budget(body: BudgetSet, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    from ...observability import audit
+
     record = budget.set_budget(db, body.tenant_id, body.monthly_token_budget,
                                enabled=body.enabled, note=body.note)
     db.commit()
+    audit.record("budget.set", actor=audit.actor_of(request), target=str(body.tenant_id),
+                 detail={"monthly_token_budget": body.monthly_token_budget, "enabled": body.enabled},
+                 trace_id=getattr(request.state, "trace_id", ""))
     return {"tenant_id": record.tenant_id, "monthly_token_budget": record.monthly_token_budget,
             "enabled": record.enabled, "note": record.note}
 
