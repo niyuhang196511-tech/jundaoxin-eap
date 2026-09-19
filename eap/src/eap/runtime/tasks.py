@@ -505,22 +505,39 @@ class TaskEngine:
                     "chunks": chunk_count}
 
     async def _h_agent_invoke(self, payload: dict, prev_result: dict) -> dict:
-        """异步执行一次智能体调用（长任务/批量场景）。"""
+        """异步执行一次智能体调用（长任务/批量场景）。payload._tenant_id 携带租户时启用策略上下文。"""
         from ..agents.registry import registry
         from ..schemas import InvokeRequest
+        from .policy import reset_tenant, set_tenant
 
-        with SessionLocal() as db:
-            resp = await registry.invoke(db, payload["agent"],
-                                         InvokeRequest(input=payload["input"]))
-            return {"output": resp.output, "agent_version": resp.agent_version,
-                    "citations": [c.model_dump() for c in resp.citations],
-                    "steps": resp.steps, "usage": resp.usage}
+        tenant = payload.get("_tenant_id")
+        token = set_tenant(int(tenant)) if tenant else None
+        from .policy import agent_scope
+
+        agent_token = agent_scope.set(payload["agent"])
+        try:
+            with SessionLocal() as db:
+                resp = await registry.invoke(db, payload["agent"],
+                                             InvokeRequest(input=payload["input"]))
+                return {"output": resp.output, "agent_version": resp.agent_version,
+                        "citations": [c.model_dump() for c in resp.citations],
+                        "steps": resp.steps, "usage": resp.usage}
+        finally:
+            if token is not None:
+                reset_tenant(token)
+            agent_scope.reset(agent_token)
 
     async def _h_agent_hitl(self, payload: dict, prev_result: dict) -> dict:
         """带审批门控的智能体执行：审批工具触发 TaskSuspended → WAITING_HUMAN。"""
         from ..agents.registry import registry
         from ..schemas import InvokeRequest
+        from .policy import reset_tenant, set_tenant
 
+        tenant = payload.get("_tenant_id")
+        tenant_token = set_tenant(int(tenant)) if tenant else None
+        from .policy import agent_scope
+
+        agent_token = agent_scope.set(payload["agent"])
         app = registry.get(payload["agent"]).instance
         if app is None:
             raise RuntimeError(f"智能体 {payload['agent']} 未启动")
@@ -530,8 +547,13 @@ class TaskEngine:
             return approvals.get(tool_name)  # True/False/None
 
         resume = prev_result or None
-        result = await app.on_invoke_task(InvokeRequest(input=payload["input"]),
-                                          gate=gate, resume=resume)
+        try:
+            result = await app.on_invoke_task(InvokeRequest(input=payload["input"]),
+                                              gate=gate, resume=resume)
+        finally:
+            if tenant_token is not None:
+                reset_tenant(tenant_token)
+            agent_scope.reset(agent_token)
         return {"output": result.content, "citations": [c.model_dump() for c in result.citations],
                 "steps": result.steps, "usage": result.usage}
 

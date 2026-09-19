@@ -158,6 +158,11 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
                 {t.origin}
               </Badge>
             ) },
+            { key: 'governance', title: '治理', render: t => (
+              <div className="flex gap-1">
+                {t.requires_approval ? <Badge tone="amber">需审批</Badge> : null}
+              </div>
+            ) },
             { key: 'description', title: '说明', className: 'max-w-xs truncate' },
           ]}
           empty="暂无工具（内置智能体不声明工具时可经 plugins 目录注册）"

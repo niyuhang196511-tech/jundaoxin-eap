@@ -18,6 +18,8 @@ from ..models import ModelRecord, PolicyRecord
 tenant_scope: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "eap_policy_tenant", default=None)
 
+agent_scope: contextvars.ContextVar[str] = contextvars.ContextVar("eap_agent_scope", default="")
+
 
 class PolicyDenied(RuntimeError):
     """策略拒绝（EAP-7101）：调用方应映射为 403。"""
@@ -76,3 +78,45 @@ def check_prompt(db: Session, messages: list[dict]) -> None:
                     raise PolicyDenied(
                         f"EAP-7101 prompt 约 {used} tokens 超过租户 {tenant_id} "
                         f"单次调用上限 {limit}（策略 {policy.name}）")
+
+
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def check_tool(db: Session, tool_name: str, risk_level: str) -> None:
+    """工具调用策略（v0.6-①）：tool-allowlist 白名单外拒绝（EAP-7102）。"""
+    tenant_id = tenant_scope.get()
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind == "tool-allowlist":
+            allow = set((policy.config or {}).get("tools") or [])
+            if allow and tool_name not in allow:
+                raise PolicyDenied(
+                    f"EAP-7102 工具 {tool_name} 不在租户 {tenant_id} 的工具白名单内"
+                    f"（策略 {policy.name}）")
+
+
+def requires_tool_approval(db: Session, tool_name: str, risk_level: str) -> bool:
+    """工具风险审批策略（v0.6-①）：tool-risk-approval 的 threshold ≥ 工具风险 → 强制审批。
+
+    与工具自带 requires_approval 的关系：任一为真即走审批门。
+    """
+    tenant_id = tenant_scope.get()
+    tool_risk = _RISK_ORDER.get(risk_level, 0)
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind == "tool-risk-approval":
+            threshold = _RISK_ORDER.get(str((policy.config or {}).get("threshold") or "high"), 2)
+            if tool_risk >= threshold:
+                return True
+    return False
+
+
+def check_agent_delegation(db: Session, target_agent: str) -> None:
+    """多智能体委派边界（v0.6-①）：agent-allowlist 限制可委派的下级智能体。"""
+    tenant_id = tenant_scope.get()
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind == "agent-allowlist":
+            allow = set((policy.config or {}).get("agents") or [])
+            if allow and target_agent not in allow:
+                raise PolicyDenied(
+                    f"EAP-7102 智能体 {target_agent} 不在租户 {tenant_id} 的可委派名单内"
+                    f"（策略 {policy.name}）")

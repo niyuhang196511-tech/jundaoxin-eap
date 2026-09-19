@@ -206,6 +206,9 @@ const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
   'model-allowlist': { models: ['mock-llm'] },
   'provider-allowlist': { providers: ['mock'] },
   'max-prompt-tokens': { limit: 4000 },
+  'tool-allowlist': { tools: ['erp.inventory.query'] },
+  'tool-risk-approval': { threshold: 'high' },
+  'agent-allowlist': { agents: ['faq-agent'] },
 }
 
 function PoliciesTab() {
@@ -292,6 +295,9 @@ function PoliciesTab() {
                 <option value="model-allowlist">model-allowlist（模型白名单）</option>
                 <option value="provider-allowlist">provider-allowlist（供应商白名单）</option>
                 <option value="max-prompt-tokens">max-prompt-tokens（prompt 上限）</option>
+                <option value="tool-allowlist">tool-allowlist（工具白名单）</option>
+                <option value="tool-risk-approval">tool-risk-approval（风险审批阈值）</option>
+                <option value="agent-allowlist">agent-allowlist（可委派智能体）</option>
               </Select>
             </div>
             <div>

@@ -182,6 +182,15 @@ class PlatformContext:
             response_schema=response_schema,
         )
 
+    async def delegated_invoke(self, db, target_agent: str, input: str) -> "InvokeResult":
+        """多智能体委派（带 agent-allowlist 策略边界，v0.6-①）。"""
+        from ..runtime.policy import check_agent_delegation
+
+        check_agent_delegation(db, target_agent)
+        from ..schemas import InvokeRequest
+
+        return await registry.invoke(db, target_agent, InvokeRequest(input=input))
+
     def skill_context(self, names: list[str]) -> str:
         """技能渐进披露（L2）：加载指定技能的完整指令文本（docs/04 §3）。
 

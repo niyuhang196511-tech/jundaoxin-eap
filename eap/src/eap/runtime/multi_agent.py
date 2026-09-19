@@ -39,10 +39,12 @@ def delegate_tool(target_agent: str, description: str = "") -> Tool:
         from ..agents.registry import registry
         from ..schemas import InvokeRequest
         from ..db import SessionLocal
+        from .policy import PolicyDenied, check_agent_delegation
 
         token = _depth.set(depth + 1)
         try:
             with SessionLocal() as db:
+                check_agent_delegation(db, target_agent)  # v0.6-①：agent-allowlist 委派边界
                 resp = await registry.invoke(db, target_agent, InvokeRequest(input=text))
             return json.dumps({
                 "agent": target_agent,

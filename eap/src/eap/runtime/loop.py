@@ -49,6 +49,7 @@ async def run_loop(
     approval_gate=None,
     resume_messages: list[dict] | None = None,
     response_schema: dict | None = None,
+    agent_name: str = "",
 ) -> RunResult:
     """执行 Agent 循环。
 
@@ -60,6 +61,10 @@ async def run_loop(
     usage = {"tokens_in": 0, "tokens_out": 0}
     steps: list[str] = []
     citations: list[dict] = []
+    if not agent_name:
+        from .policy import agent_scope
+
+        agent_name = agent_scope.get()
     if resume_messages:
         msgs = [dict(m) for m in resume_messages]
     else:
@@ -92,8 +97,23 @@ async def run_loop(
             for tc in result.tool_calls:
                 tool = find_tool(tools, tc.name)
 
+                # 工具治理（v0.6-①）：策略白名单/风险审批 + 每次调用审计与指标
+                from .policy import PolicyDenied, check_tool, requires_tool_approval
+
+                risk = getattr(tool, "risk_level", "low") if tool is not None else "low"
+                try:
+                    check_tool(db, tc.name, risk)
+                except PolicyDenied as e:
+                    out = json.dumps({"error": f"工具被策略拒绝: {e}"}, ensure_ascii=False)
+                    if tool is not None and tool.emits_citations:
+                        pass
+                    msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
+                    continue
+
                 decision = True
-                if tool is not None and tool.requires_approval and approval_gate is not None:
+                needs_approval = tool is not None and approval_gate is not None and (
+                    tool.requires_approval or requires_tool_approval(db, tc.name, risk))
+                if needs_approval:
                     decision = approval_gate(tool.name)
                     if decision is None:
                         # HITL 挂起：快照包含未执行的 assistant tool_calls 消息
@@ -107,10 +127,31 @@ async def run_loop(
                                       "message": f"工具 {tc.name} 已被人工否决，禁止执行。"
                                                  "请向用户说明该操作未执行。"}, ensure_ascii=False)
                 else:
+                    import time as _time
+
+                    _t0 = _time.monotonic()
+                    _status = "ok"
                     try:
-                        out = await tool.handler(tc.arguments)
-                    except Exception as e:  # 工具失败回注给模型而非崩溃
+                        import asyncio as _asyncio
+
+                        out = await _asyncio.wait_for(tool.handler(tc.arguments),
+                                                      timeout=getattr(tool, "timeout_s", 30.0))
+                    except Exception as e:  # 工具失败（含超时）回注给模型而非崩溃
+                        _status = "error"
                         out = json.dumps({"error": f"工具执行失败: {e}"}, ensure_ascii=False)
+                    finally:
+                        try:
+                            from ..observability.audit import record as _audit_record
+                            from ..observability.metrics import incr as _incr
+
+                            _elapsed = int((_time.monotonic() - _t0) * 1000)
+                            _audit_record("tool.call", actor="system", target=tc.name,
+                                          detail={"agent": agent_name, "status": _status,
+                                                  "elapsed_ms": _elapsed,
+                                                  "args": tc.arguments[:500]})
+                            _incr("eap_tool_calls_total", {"tool": tc.name, "status": _status})
+                        except Exception:
+                            pass  # 治理观测失败不影响工具结果回注
 
                 if tool is not None and tool.emits_citations:
                     try:

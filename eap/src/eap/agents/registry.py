@@ -19,6 +19,18 @@ from ..config import get_settings
 from ..db import SessionLocal
 from ..models import AgentRecord
 from ..schemas import InteractionPayload, InvokeRequest, InvokeResponse, InvokeResult
+
+
+def policy_agent_scope_set(name: str):
+    from ..runtime.policy import agent_scope
+
+    return agent_scope.set(name)
+
+
+def policy_agent_scope_reset(token) -> None:
+    from ..runtime.policy import agent_scope
+
+    agent_scope.reset(token)
 from .app import AgentApp
 from .manifest import AgentManifest
 
@@ -248,6 +260,7 @@ class AgentRegistry:
         from ..runtime import agent_config
 
         config_version, overlay_cfg = agent_config.resolve_effective_overlay(db, name, request.output_schema)
+        _scope_token = policy_agent_scope_set(name)
         try:
             from ..observability.metrics import incr
             from ..observability.tracing import enabled as otel_enabled, tracer
@@ -309,6 +322,7 @@ class AgentRegistry:
                 from ..runtime.canary import reset_override
 
                 reset_override(token)
+            policy_agent_scope_reset(_scope_token)
         return InvokeResponse(
             invocation_id=uuid.uuid4().hex,
             agent=agent.manifest.name,
