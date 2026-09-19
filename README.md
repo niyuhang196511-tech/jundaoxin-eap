@@ -4,7 +4,7 @@
 
 ## 代码工程（可运行）
 
-[eap/](eap/) —— **v0.4.0：全量测试 130+ 通过**。模型中心（能力路由+降级链+真流式）、知识中心（三路混合检索+Citation+可插拔 RAG 组件）、Agent Runtime（Loop+HITL+任务恢复）、**Workflow 图编排（拖拽画布 + 图执行引擎 + 运行历史）**、扩展开发体系（**手写 Agent/工具/RAG 组件/MCP Server**，插件目录热载 + 脚手架）、多租户（OIDC/SSO + 外部 JWT 资源服务器 + 可选 PostgreSQL RLS）、可观测性（结构化日志 + /metrics + OTel tracing）、运维（Alembic 迁移、API Key 哈希、秘密加密、备份恢复 runbook）。控制台为 Next.js 16 + Tailwind 4 全新前端（Dify 风格画布/对话/扩展中心）。
+[eap/](eap/) —— **v0.5.0：全量测试 160+ 通过**。模型中心（能力路由+降级链+真流式）、知识中心（三路混合检索+Citation+可插拔 RAG 组件）、Agent Runtime（Loop+HITL+任务恢复）、**Workflow 图编排（拖拽画布 + 图执行引擎 + 运行历史）**、扩展开发体系（**手写 Agent/工具/RAG 组件/MCP Server**，插件目录热载 + 脚手架）、多租户（OIDC/SSO + 外部 JWT 资源服务器 + 可选 PostgreSQL RLS）、可观测性（结构化日志 + /metrics + OTel tracing）、运维（Alembic 迁移、API Key 哈希、秘密加密、备份恢复 runbook）。控制台为 Next.js 16 + Tailwind 4 全新前端（Dify 风格画布/对话/扩展中心）。v0.5 新增：**Agent 配置版本层**（draft→publish→rollback 配置覆盖）、**Structured Output**（JSON Schema 约束 + 校验重试 + 前端渲染器）、**交互引擎**（AI UI Schema 9 控件 + 任务/聊天双通道挂起恢复 + 动态选项级联）、**Action**（UI 动作按钮 → 工具统一解析/审批转办/审计）与 **Artifact Center**（产物存储/预览/下载）、**工作流 User Interaction 节点**（变量快照挂起续跑）。
 
 ```bash
 cd eap
