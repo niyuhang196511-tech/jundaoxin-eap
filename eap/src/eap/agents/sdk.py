@@ -128,6 +128,30 @@ class PlatformContext:
             return {k: v for k, v in parsed.items() if k != "__interaction__"}
         return None
 
+    @property
+    def artifacts(self):
+        """Artifact Center（v0.5-⑦）：ctx.artifacts.create(name, type, content) → 产物记录。"""
+        from ..runtime import artifacts as artifacts_rt
+
+        return _ArtifactsFacade(artifacts_rt)
+
+
+class _ArtifactsFacade:
+    """ctx.artifacts 的轻封装：create 自动带 trace 上下文。"""
+
+    def __init__(self, rt) -> None:
+        self._rt = rt
+
+    def create(self, db, *, name: str, type: str, content, mime: str | None = None,
+               agent: str | None = None, session_id: str | None = None,
+               task_id: str | None = None, ttl_hours: int | None = None,
+               trace_id: str = ""):
+        return self._rt.create_artifact(
+            db, name=name, type=type, content=content, mime=mime,
+            agent=agent, session_id=session_id, task_id=task_id,
+            ttl_hours=ttl_hours, trace_id=trace_id,
+        )
+
     def retriever(self, kb_name: str) -> Retriever:
         allowed = self.overlay.get("knowledge")
         if allowed and kb_name not in allowed:

@@ -1,7 +1,56 @@
 'use client'
 
-import { Table } from '@/components/ui'
+import { useState } from 'react'
+import { Play } from 'lucide-react'
+import { Button, Table, toast } from '@/components/ui'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
+
+export interface ActionSpec {
+  label: string
+  action: string
+  tool: string
+  args?: Record<string, unknown>
+  confirmation?: boolean
+  [key: string]: unknown
+}
+
+/** 动作按钮（v0.5-⑥）：点击 → 可选确认 → /actions/invoke → 结果 toast + 回调 */
+function ActionButton({ action, onDone }: {
+  action: ActionSpec
+  onDone?: (result: Record<string, unknown>) => void
+}) {
+  const [pending, setPending] = useState(false)
+  const run = () => {
+    const exec = async () => {
+      setPending(true)
+      try {
+        const r = await api<Record<string, unknown>>('POST', '/api/v1/actions/invoke', {
+          action: action.action, tool: action.tool, args: action.args ?? {},
+        })
+        if (r.status === 'approval_required') {
+          toast.info(String(r.message ?? '已转入人工审批'))
+        } else {
+          toast.success(`${action.label} 已执行`)
+        }
+        onDone?.(r)
+      } catch (e) {
+        toast.error(`动作失败：${(e as Error).message}`)
+      } finally {
+        setPending(false)
+      }
+    }
+    void exec()
+  }
+  return (
+    <Button size="xs" variant="secondary" disabled={pending}
+      onClick={action.confirmation
+        ? () => { if (window.confirm(`确认执行「${action.label}」？`)) run() }
+        : run}>
+      <Play className="size-3" />{pending ? '执行中…' : action.label}
+    </Button>
+  )
+}
 
 export type RendererKind = 'table' | 'chart' | 'card' | 'tree'
 
@@ -111,9 +160,17 @@ export function SchemaRenderer({ data, schema, className }: {
       </pre>
     )
   }
+  const actions = (schema?.['x-actions'] as ActionSpec[] | undefined) ?? []
   return (
     <div className={cn('mt-2 rounded-xl border border-line bg-surface p-3', className)}>
       {body}
+      {actions.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-line pt-2.5">
+          {actions.map(a => (
+            <ActionButton key={a.action} action={a} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

@@ -155,6 +155,16 @@ class InvokeRequest(BaseModel):
         default=None, description="结构化输出 JSON Schema（v0.5，请求级，优先于配置版本/代码默认）")
 
 
+class ArtifactRef(BaseModel):
+    """产物引用（v0.5-⑦）：result 帧内返回，前端凭 id 预览/下载。"""
+
+    id: str
+    name: str = ""
+    type: str = "md"
+    mime: str = "text/markdown"
+    size: int = 0
+
+
 class InteractionPayload(BaseModel):
     """挂起的交互请求（v0.5 交互引擎）：result 帧内返回给前端渲染表单。"""
 
@@ -176,6 +186,7 @@ class InvokeResult(BaseModel):
     data: dict | None = None  # 结构化输出（v0.5）：schema 校验通过的 JSON 对象
     data_schema: dict | None = None  # 生成 data 所用的 schema（前端渲染提示）
     interaction: InteractionPayload | None = None  # 挂起的交互请求（v0.5）
+    artifacts: list[ArtifactRef] = Field(default_factory=list)  # 产物引用（v0.5-⑦）
 
 
 class InvokeResponse(BaseModel):
@@ -192,3 +203,4 @@ class InvokeResponse(BaseModel):
     data: dict | None = None  # 结构化输出（v0.5）
     data_schema: dict | None = None
     interaction: InteractionPayload | None = None  # 挂起的交互请求（v0.5）
+    artifacts: list[ArtifactRef] = Field(default_factory=list)

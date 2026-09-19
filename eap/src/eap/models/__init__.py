@@ -590,3 +590,27 @@ class InteractionRecord(Base):
     trace_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ArtifactRecord(Base):
+    """Artifact / File Center（docs/unfinished v0.5-⑦）：Agent 产物的存储记录。
+
+    文件落 EAP_MEDIA_DIR/artifacts/<id>/<filename>（storage_path 相对 artifacts 根）；
+    过期（expires_at）产物由查询端点惰性剔除。前端凭 id 预览/下载，不接受客户端路径。
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # art-<hex>
+    name: Mapped[str] = mapped_column(String(128), default="")
+    type: Mapped[str] = mapped_column(String(16), default="md")  # pdf/docx/xlsx/csv/json/md/image/chart/report
+    mime: Mapped[str] = mapped_column(String(64), default="text/markdown")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    agent: Mapped[str] = mapped_column(String(64), default="", index=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    storage_path: Mapped[str] = mapped_column(String(256), default="")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

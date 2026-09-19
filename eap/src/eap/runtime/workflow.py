@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Callable, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from ..agents.app import AgentApp
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from ..schemas import AgentManifest, InvokeRequest, InvokeResult
 from .tools import Tool
 
@@ -211,6 +213,7 @@ def register_workflow_tool(name: str, factory) -> None:
 
 
 def resolve_tool(name: str) -> Tool:
+    """工具统一解析（v0.5-⑥ Action 复用）：kb 检索 / 工作流注册表 / 连接器 / 插件。"""
     import re
 
     m = re.match(r"^kb\.([a-z0-9-]+)\.search$", name)
@@ -220,7 +223,21 @@ def resolve_tool(name: str) -> Tool:
         return retriever_tool(m.group(1))
     if name in _WORKFLOW_TOOLS:
         return _WORKFLOW_TOOLS[name]()
-    raise ValueError(f"工作流工具 {name} 未注册（可用: kb.<name>.search 或已注册工具）")
+    # 连接器工具（Action/UI 按钮按 tool_name 调用，如 erp.inventory.query）
+    from ..db import SessionLocal
+    from ..models import ConnectorRecord
+    from .connectors import load_connector_tools
+
+    try:
+        with SessionLocal() as db:
+            for record in db.scalars(
+                    select(ConnectorRecord).where(ConnectorRecord.enabled == True)).all():  # noqa: E712
+                for tool in load_connector_tools(record):
+                    if tool.name == name:
+                        return tool
+    except OperationalError:
+        pass  # 表未建（无库环境直调 resolve_tool）——按未注册处理
+    raise ValueError(f"工具 {name} 未注册（可用: kb.<name>.search / 已注册工作流工具 / 连接器工具）")
 
 
 # ---------- 执行引擎 ----------

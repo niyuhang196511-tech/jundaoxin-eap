@@ -14,7 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .agents.registry import registry
 from .api.v1 import a2a as api_a2a
+from .api.v1 import actions as api_actions
 from .api.v1 import agents as api_agents
+from .api.v1 import artifacts as api_artifacts
 from .api.v1 import budgets as api_budgets
 from .api.v1 import audit as api_audit
 from .api.v1 import auth as api_auth
@@ -87,6 +89,8 @@ def create_app() -> FastAPI:
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)
     app.include_router(api_budgets.router)
+    app.include_router(api_actions.router)
+    app.include_router(api_artifacts.router)
     app.include_router(api_auth.router)
     app.include_router(api_audit.router)
     # 知识文档图片（M16）：/media 静态服务（media_dir 按内容哈希去重存储）
