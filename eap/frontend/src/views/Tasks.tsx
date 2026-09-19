@@ -6,6 +6,7 @@ import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
+import { UISchemaRenderer, type UISchema } from '@/components/chat/UISchemaRenderer'
 import { api } from '@/lib/api'
 
 type Task = {
@@ -14,6 +15,7 @@ type Task = {
   state: string
   result: unknown
   pending_tool: string | null
+  pending_interaction?: { key: string; title?: string; description?: string; schema: UISchema } | null
 }
 
 type Schedule = {
@@ -49,6 +51,19 @@ function TasksPanel() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [detail, setDetail] = useState<Task | null>(null)
   const [confirm, setConfirm] = useState<{ id: string; decision: boolean } | null>(null)
+  const [interactTask, setInteractTask] = useState<Task | null>(null)
+
+  const doInteract = async (values: Record<string, unknown>) => {
+    if (!interactTask) return
+    try {
+      await api('POST', `/api/v1/tasks/${interactTask.task_id}/interact`, { values })
+      toast.success('已提交，任务从交互点续跑')
+      setInteractTask(null)
+      load()
+    } catch (e) {
+      toast.error(`提交失败：${(e as Error).message}`)
+    }
+  }
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -105,6 +120,7 @@ function TasksPanel() {
               <div className="flex items-center gap-1.5">
                 <Badge tone={STATE_TONE[t.state] ?? 'gray'}>{t.state}</Badge>
                 {t.pending_tool && <Badge tone="amber">待审批: {t.pending_tool}</Badge>}
+                {t.state === 'WAITING_INPUT' && <Badge tone="amber">等待输入</Badge>}
               </div>
             ) },
             { key: 'result', title: '结果', render: t => (
@@ -119,6 +135,12 @@ function TasksPanel() {
                     <Button size="xs" variant="primary" onClick={e => { e.stopPropagation(); setConfirm({ id: t.task_id, decision: true }) }}>批准</Button>
                     <Button size="xs" variant="danger" onClick={e => { e.stopPropagation(); setConfirm({ id: t.task_id, decision: false }) }}>否决</Button>
                   </div>
+                )
+              if (t.state === 'WAITING_INPUT')
+                return (
+                  <Button size="xs" variant="primary" onClick={e => { e.stopPropagation(); setInteractTask(t) }}>
+                    填写表单
+                  </Button>
                 )
               if (['PENDING', 'RUNNING'].includes(t.state))
                 return (
@@ -154,6 +176,20 @@ function TasksPanel() {
             {confirm?.decision ? '批准' : '否决'}
           </Button>
         </>} />
+
+      {/* 交互引擎表单（v0.5-④）：WAITING_INPUT 任务的表单填写与提交续跑 */}
+      <DialogContent open={!!interactTask} onOpenChange={o => !o && setInteractTask(null)}
+        title={interactTask?.pending_interaction?.title || '填写信息'}
+        description={interactTask?.pending_interaction?.description}>
+        {interactTask?.pending_interaction?.schema && (
+          <UISchemaRenderer
+            agent={interactTask.type === 'agent.hitl' ? '' : ''}
+            interactionId={null}
+            schema={interactTask.pending_interaction.schema}
+            onSubmit={doInteract}
+          />
+        )}
+      </DialogContent>
     </div>
   )
 }
