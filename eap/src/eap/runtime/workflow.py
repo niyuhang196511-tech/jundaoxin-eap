@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import uuid
+import re
 import time
+import uuid
 from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -44,7 +45,7 @@ class NodePosition(BaseModel):
 
 class Step(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,40}$")
-    type: Literal["llm", "tool", "retrieve", "branch", "parallel", "subflow", "loop", "interaction"]
+    type: str
     when: Condition | None = None  # 条件不满足则跳过本节点
     title: str = ""  # 画布节点显示名（空则用 id）
     position: NodePosition | None = None  # 画布布局
@@ -92,6 +93,10 @@ class Step(BaseModel):
 
     @model_validator(mode="after")
     def _validate_node(self) -> "Step":
+        builtin = {"llm", "tool", "retrieve", "branch", "parallel", "subflow", "loop", "interaction"}
+        if self.type not in builtin and self.type not in _CUSTOM_NODE_EXECUTORS:
+            raise ValueError(f"未知节点类型 {self.type!r}（内置: {sorted(builtin)}；"
+                             f"自定义: {sorted(_CUSTOM_NODE_EXECUTORS)}）")
         if self.type == "loop":
             if not self.loop_var:
                 raise ValueError(f"loop 节点 {self.id} 缺少 loop_var")
@@ -211,6 +216,22 @@ def eval_condition(cond: Condition, variables: dict) -> bool:
 # ---------- 工具解析 ----------
 
 _WORKFLOW_TOOLS: dict[str, callable] = {}
+
+# 自定义工作流节点（v0.7-Workflow Node SDK）：kind → executor(step, ctx, db, state, invoke_input)
+_CUSTOM_NODE_EXECUTORS: dict[str, callable] = {}
+
+
+def register_custom_node(kind: str, executor) -> None:
+    """注册自定义节点类型（Workflow Node SDK）：kind 进入 DSL Step.type 合法集合。"""
+    from .tools import Tool  # noqa: F401  确保命名空间加载
+
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{2,20}", kind):
+        raise ValueError(f"自定义节点 kind 非法: {kind!r}")
+    _CUSTOM_NODE_EXECUTORS[kind] = executor
+
+
+def custom_node_executors() -> dict[str, callable]:
+    return dict(_CUSTOM_NODE_EXECUTORS)
 
 
 def register_workflow_tool(name: str, factory) -> None:
@@ -428,8 +449,12 @@ async def _execute_graph(
 
 
 async def _execute_node(step: Step, ctx, db, state: _RunState, invoke_input: str) -> str:
-    """单节点执行（llm/tool/retrieve/parallel/subflow/loop），返回节点输出。"""
+    """单节点执行（llm/tool/retrieve/parallel/subflow/loop/自定义），返回节点输出。"""
     variables, citations, trace = state.variables, state.citations, state.trace
+
+    executor = _CUSTOM_NODE_EXECUTORS.get(step.type)
+    if executor is not None:
+        return await executor(step, ctx, db, state, invoke_input)
 
     if step.type == "interaction":
         # v0.5-⑤：向用户请求结构化输入——抛挂起异常（variables 已在 state，由调用方落库）；

@@ -280,7 +280,19 @@ class OpenAICompatProvider:
             raise ProviderError(f"{record.name}: {e}") from e
 
 
+_CUSTOM_PROVIDERS: dict[str, Provider] = {}
+
+
+def register_provider(name: str, provider: Provider) -> None:
+    """注册自定义供应商适配（v0.7-Model Provider SDK）：插件可注入 anthropic/ollama 等。"""
+    if not name or not isinstance(name, str):
+        raise ValueError("provider name 非法")
+    _CUSTOM_PROVIDERS[name] = provider
+
+
 def get_provider(provider_name: str) -> Provider:
+    if provider_name in _CUSTOM_PROVIDERS:
+        return _CUSTOM_PROVIDERS[provider_name]
     if provider_name == "mock":
         return _MOCK
     if provider_name == "openai_compat":

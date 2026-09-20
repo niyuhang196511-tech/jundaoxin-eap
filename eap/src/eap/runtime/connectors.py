@@ -16,6 +16,16 @@ from .tools import Tool
 
 _TIMEOUT = 10.0
 
+# 自定义连接器类型（v0.7-Connector SDK）：kind → factory(record) -> list[Tool]
+_CONNECTOR_KINDS: dict[str, callable] = {}
+
+
+def register_connector_kind(kind: str, factory) -> None:
+    """注册新连接器类型：factory(ConnectorRecord) -> list[Tool]（超出 rest/mock-erp 的形态）。"""
+    if not kind or not isinstance(kind, str):
+        raise ValueError("connector kind 非法")
+    _CONNECTOR_KINDS[kind] = factory
+
 
 def _safe_url(base_url: str, path: str) -> str:
     """仅允许登记时写死的 http(s) base_url 拼接 path（SSRF 基线：拒绝其它 scheme）。"""
@@ -94,6 +104,10 @@ def _params_schema(endpoint: dict) -> dict:
 
 def endpoint_tool(record: ConnectorRecord, endpoint: dict) -> Tool:
     name = endpoint.get("tool_name") or f"conn.{record.name}.{endpoint.get('name', '')}"
+    if record.kind in _CONNECTOR_KINDS:
+        # 自定义连接器类型（v0.7-Connector SDK）：整记录交由扩展工厂构建工具集
+        tools = _CONNECTOR_KINDS[record.kind](record)
+        return next(t for t in tools if t.name == name)
     handler = _mock_erp_handler(endpoint.get("name", "")) if record.kind == "mock-erp" \
         else _rest_handler(record, endpoint)
     return Tool(
