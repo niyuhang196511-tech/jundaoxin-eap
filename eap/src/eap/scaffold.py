@@ -14,6 +14,9 @@ import sys
 TEMPLATES: dict[str, dict[str, str]] = {
     # 手写工具：register_workflow_tool + 测试
     "tool": {
+        "manifest.json": '{"type": "tool", "name": "{name}", "version": "1.0.0", '
+                        '"title": "{NAME}", "description": "{NAME}：手写工具示例", '
+                        '"runtime": {"min_version": "0.7.0"}, "permissions": []}',
         "manifest.py": '''"""手写工具插件：{name}（扩展开发体系，进程内受信代码）。"""
 
 import json
@@ -65,6 +68,9 @@ def test_tool_registers_and_runs():
     },
     # 手写 RAG 组件：自定义 chunker + reranker
     "rag": {
+        "manifest.json": '{"type": "rag", "name": "{name}", "version": "1.0.0", '
+                        '"title": "{NAME}", "description": "{NAME}：手写 RAG 组件", '
+                        '"runtime": {"min_version": "0.7.0"}, "permissions": []}',
         "manifest.py": '''"""手写 RAG 组件插件：{name}（Chunker / Reranker）。"""
 
 from eap.knowledge.components import register_chunker, register_reranker
@@ -102,6 +108,9 @@ EAP_PLUGIN = {
     },
     # 手写 MCP Server：MCPServer（mcp 2.x SDK）
     "mcp": {
+        "manifest.json": '{"type": "connector", "name": "{name}", "version": "1.0.0", '
+                         '"title": "{NAME}", "description": "{NAME}：手写 MCP Server（stdio）", '
+                         '"runtime": {"min_version": "0.7.0"}, "permissions": []}',
         "server.py": '''"""手写 MCP Server：{name}（stdio 传输，控制台「扩展中心 → MCP Server」添加调试）。
 
 运行：python server.py   （经 stdio 与 EAP 通信）
@@ -125,6 +134,9 @@ if __name__ == "__main__":
     },
     # 手写 Agent：AgentApp 子类
     "agent": {
+        "manifest.json": '{"type": "agent", "name": "{name}", "version": "1.0.0", '
+                         '"title": "{NAME}", "description": "{NAME}：手写智能体", '
+                         '"runtime": {"min_version": "0.7.0"}, "permissions": []}',
         "agent.py": '''"""手写智能体：{name}（AgentApp SDK，docs/03 §7）。"""
 
 from eap.agents.app import AgentApp
@@ -163,6 +175,13 @@ def _render(template: str, name: str) -> str:
     return template.replace("{name}", name).replace("{NAME}", name.replace("-", " ").replace("_", " ").title())
 
 
+def pack(source_dir: str, out_path: str) -> str:
+    """目录 → .eapext zip（v0.7 开发者接入生命周期：打包 → 安装端点安装）。"""
+    from .runtime.bundles import pack_bundle
+
+    return pack_bundle(source_dir, out_path)
+
+
 def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
     if kind not in TEMPLATES:
         raise SystemExit(f"未知扩展类型 {kind}（可选：agent / tool / rag / mcp）")
@@ -189,17 +208,34 @@ def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m eap.scaffold",
-                                     description="生成手写扩展模板（agent/tool/rag/mcp）")
-    parser.add_argument("kind", choices=["agent", "tool", "rag", "mcp"])
-    parser.add_argument("name", help="扩展名（也是插件目录名）")
-    parser.add_argument("--dir", default=None,
-                        help="目标根目录（默认取 EAP_PLUGINS_DIR，./plugins）")
-    args = parser.parse_args()
-    base = args.dir
-    if base is None:
+                                     description="生成手写扩展模板（agent/tool/rag/mcp）或打包 .eapext")
+    sub = parser.add_subparsers(dest="command")
+    gen = sub.add_parser("generate", help="生成手写扩展模板")
+    gen.add_argument("kind", choices=["agent", "tool", "rag", "mcp"])
+    gen.add_argument("name", help="扩展名（也是插件目录名）")
+    gen.add_argument("--dir", default=None,
+                     help="目标根目录（默认取 EAP_PLUGINS_DIR，./plugins）")
+    pack_p = sub.add_parser("pack", help="扩展目录 → .eapext 安装包")
+    pack_p.add_argument("source", help="扩展目录")
+    pack_p.add_argument("out", help="输出 .eapext 路径")
+    # 兼容旧用法：python -m eap.scaffold <kind> <name> [--dir ...]
+    args, extra = parser.parse_known_args()
+    if args.command is None and extra:
+        # 旧式位置参数：<kind> <name>
+        kind, name = extra[0], extra[1] if len(extra) > 1 else ""
+        base = args.dir if False else None
         from eap.config import get_settings
 
-        base = get_settings().plugins_dir
+        base = (args.dir if hasattr(args, "dir") else None) or get_settings().plugins_dir
+        os.makedirs(base, exist_ok=True)
+        scaffold(kind, name, base)
+        return
+    if args.command == "pack":
+        print(pack(args.source, args.out))
+        return
+    from eap.config import get_settings
+
+    base = args.dir or get_settings().plugins_dir
     os.makedirs(base, exist_ok=True)
     scaffold(args.kind, args.name, base)
 

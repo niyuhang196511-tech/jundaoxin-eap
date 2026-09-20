@@ -167,3 +167,42 @@ def disable_extension(name: str, request: fastapi.Request, db: Session = fastapi
 def list_rag():
     return [{"name": c.name, "kind": c.kind, "description": c.description, "source": c.source}
             for c in list_rag_components()]
+
+
+# ---------- Bundle 安装/卸载（v0.7：开发者接入生命周期） ----------
+
+@router.post("/install", dependencies=[fastapi.Depends(require_admin)])
+async def install_bundle(request: fastapi.Request):
+    """安装 .eapext bundle（multipart 上传）：校验 → 解压 → 热加载 → 注册表登记 → 审计。"""
+    from ...observability import audit
+    from ...config import get_settings
+    from ...runtime.bundles import install_bundle
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise fastapi.HTTPException(status_code=400, detail="EAP-4000 缺少 file 字段（.eapext zip）")
+    data = await upload.read()
+    try:
+        result = install_bundle(
+            data, plugins_root=get_settings().plugins_dir,
+            actor=audit.actor_of(request), trace_id=getattr(request.state, "trace_id", ""))
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
+    return result
+
+
+@router.delete("/registry/{name}", dependencies=[fastapi.Depends(require_admin)])
+def uninstall_extension(name: str, request: fastapi.Request):
+    """卸载扩展：移除插件目录 + 注册表记录（审计）。"""
+    from ...observability import audit
+    from ...config import get_settings
+    from ...runtime.bundles import uninstall_bundle
+
+    try:
+        result = uninstall_bundle(
+            name, plugins_root=get_settings().plugins_dir,
+            actor=audit.actor_of(request), trace_id=getattr(request.state, "trace_id", ""))
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
+    return result
