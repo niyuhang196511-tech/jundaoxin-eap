@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.7.0 + M30 批次 1（event/im/a2a 三线，见下） |
-| 最新里程碑 | M30（批次 1：event-M30 / im-M30 / a2a-M30） |
-| 代码 commit | bff9797 |
+| 平台版本 | v0.7.0 + M30/M31 批次 1~2（v0.8 企业集成七项全部落地，见下） |
+| 最新里程碑 | M31（批次 2：webhook-M31 / connector-M31 / gateway-M31） |
+| 代码 commit | fe64dce |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **234 passed, 6 skipped, 0 errors**（263s）——较 M29 基线 198 passed 增 36（恰为批次 1 三线新用例 8+13+15）；M29 时 3 个 test_mcp 的 Windows 回环防火墙 error 本轮未复现（间歇性环境问题，docs/13 §三） |
-| 下一主线 | **批次 2：B `webhook-` + C `connector-` + F `gateway-`**（M31；B 依赖的 A 事件总线已就绪） |
+| 测试基线 | **270 passed, 6 skipped, 0 errors**（82s）——较 M30 基线 234 passed 增 36（恰为批次 2 三线新用例 11+9+16） |
+| 下一主线 | **批次 3：v0.9 生产化 P1 `prod-worker-` + P3 `prod-env-` + P5 `ci-`**（可并行；P2/P4 随后） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）三轮收版扫描；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -34,7 +34,7 @@
 | v0.5 | Agent Application（版本层/结构化输出/交互引擎/Action/Artifact） | ✅ 完成 | M18–M22 | docs/12 |
 | v0.6 | Platform Governance（工具治理/Policy/评测/成本/Memory 治理） | ✅ 完成 | M23–M26 | docs/13 |
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
-| **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | 🔶 进行中（Event/IM/A2A+Discovery 已完成 ✅；Webhook/Connector/Gateway 待批次 2） | M30 ✅ / M31 待开工 | — |
+| **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ✅ 完成（七项全部落地：M30 批次 1 + M31 批次 2；真实凭证/外网联调遗留 → L3/L4） | M30–M31 | 待收版审计 docs/16 |
 | v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ❌ 未启动（底座已备） | 排在 v0.8 后 | — |
 | v1.0 | Enterprise Agent Platform 收尾整合 | ❌ | 最后 | — |
 
@@ -118,18 +118,20 @@
 - **DoD**：配置「业务事件 → Agent 触发 → 产出 Artifact → 落审计」全链路测试绿；入站 webhook 带 HMAC 校验触发 agent；重复投递幂等。
 - **依赖**：无（B、C-Trigger 的底座）。
 
-#### 任务组 B：`webhook-` 对外 Webhook 推送（M31）
+#### 任务组 B：`webhook-` 对外 Webhook 推送（M31）✅（M31，8289327）
 - **设计依据**：unfinished.md §三十五（接入方式：Webhook 出站）。
 - **现状**：无出站 webhook；事件总线未建。
+- **完成描述（M31，待提交）**：① 端点模型 `WebhookEndpointRecord`（URL / secret Fernet 加密 / events JSON 订阅 pattern 列表，fnmatch 通配）+ 投递记录 `WebhookDeliveryRecord`（payload/attempts/next_retry_at/status pending|done|dead/response_status），迁移 `c6f0a2b4d8e1`（接 b4c6d8e0f2a4）；② 推送引擎 `runtime/webhooks.py`（lifespan 挂载照 triggers.py：总线全量订阅 → 端点 pattern 匹配 → payload 事件五元组原样 + meta → X-EAP-Signature = HMAC-SHA256(raw_body, secret) 与 M30 入站对称，附 Event-Id/Type/Timestamp 头 → HTTP POST 10s 超时；进程内 asyncio 重试循环照 im_outbound：指数退避 base*2^(n-1) 封顶 300s，`EAP_WEBHOOK_*` 可配，超限 dead 死信；HTTP 发送 `send_webhook` 可注入；每次投递审计 webhook.deliver）；③ API `api/v1/webhooks.py`（整路由 admin：端点 CRUD + 审计 webhook.create/update/delete，URL http(s)/pattern/重名校验，secret 不回显；`GET /deliveries` 按 endpoint/status 过滤 + limit/offset 分页；`POST /deliveries/{id}/redeliver` 死信/在途手工重投 attempts 重置 + 审计；`POST /{id}/test` 样例事件走真实投递通道）；④ 控制台 `Integrations.tsx` 增 Webhooks Tab（端点列表/创建编辑弹窗 secret 不回显/投递记录子列表失败标红/死信重投/试投按钮）+ `lib/api.ts` webhooksApi；⑤ `tests/test_webhooks.py` 11 用例离线绿（签名重算、事件→签名推送 done、失败→重试→成功、超限→dead、deliveries 过滤分页、手工重投、CRUD 非 admin 403、不匹配不投递、试投、加密落库）。
 - **剩余工作**：① WebhookEndpoint 模型 + 管理 API（URL/secret/事件订阅列表，admin+审计）；② 事件 → HMAC-SHA256 签名推送 → 指数退避重试（复用任务引擎）→ 死信可见；③ 控制台配置页。
 - **DoD**：订阅 `agent.run.completed` 后本地接收端收到带签名 payload；断连重试与死信可查询。
 - **依赖**：A（事件总线）。
 
-#### 任务组 C：`connector-` 连接器深化（M31）
+#### 任务组 C：`connector-` 连接器深化（M31）✅（M31，0fe5328）
 - **设计依据**：unfinished.md §二十五 Connector Center（Authentication/Credential/Action/Trigger/Webhook/Health）。
 - **现状**：ConnectorRecord + 端点工具化（`runtime/connectors.py`）+ requires_approval→risk=high（M24）+ secret Fernet（M26）；**缺 SQL 连接器、OAuth 凭证托管、Health Check、Trigger 联动**。
-- **剩余工作**：① SQL 连接器 kind（只读白名单 + 超时 + 行数上限）；② OAuth2 凭证托管（client_credentials / authorization_code，令牌刷新 + 加密存储）；③ 连接器 Health Check + 状态透出；④ Trigger 注册进事件中心。
-- **DoD**：sqlite demo 连接器建 Connection → 工具调用 → 审计；OAuth 令牌刷新测试绿。
+- **完成描述（M31）**：① SQL 连接器 kind `register_connector_kind("sql", …)`（endpoints `{name, query, params}`，config `{dialect, database}` 存新列 `connectors.config`；只读白名单——剥注释后首词须 SELECT + 写关键字词边界拒绝（INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/ATTACH/DETACH/PRAGMA/VACUUM/GRANT/REVOKE）+ 拒分号多语句；命名占位 `:name`→`?` 绑定防注入；`asyncio.wait_for` + `to_thread` 超时；行数上限 `EAP_CONNECTOR_SQL_MAX_ROWS` 默认 200 超出截断标 truncated；结果 `{columns, rows, truncated}`；psycopg 缺环境运行时报 EAP-7003 清晰错误，未新增依赖）；② OAuth2 凭证托管（ConnectorRecord 补 `oauth_client_id/client_secret_enc/token_url/access_token_enc/refresh_token_enc/expires_at/scopes` 七列，access/refresh Fernet 加密；client_credentials 工具调用前自动获取 + authorization_code `GET …/oauth/authorize`（一次性 state 防 CSRF）+ `POST …/oauth/callback` + `POST …/oauth/token`（admin 手动获取/刷新，不回显 token）；过期自动 refresh_token 刷新；token HTTP 经可注入 `http_client_factory`（默认 httpx）；REST handler 配置 oauth 即带 `Authorization: Bearer`）；③ Health Check `POST /api/v1/connectors/{name}/health`（admin+审计 `connector.health`：rest GET 5s 2xx=ok / sql SELECT 1 / mock-erp 恒 ok），落库 `last_health_at/last_health_ok` 并在列表 `_view` 透出；④ Trigger 联动：`target_type` 校验增 `connector`，`fire()` 增分支——payload 含 `endpoint`/`arguments` 经 `load_connector_tools` 解析同步执行，审计 trigger.fire（detail 标 connector，ref=结果摘要）；连接器调用路径统一 emit `connector.invoked`（try/except 不阻断）。测试 `tests/test_connector_v2.py` 9 用例离线绿（假 transport 禁真实网络）。迁移 `d7a1b3c5e9f2`（接 c6f0a2b4d8e1）。
+- **剩余工作**：psycopg/postgreSQL 运行时未实现（sqlite 首要落地，缺环境报清晰错误）；OAuth authorize 端点从 token_url 推导（`…/token`→`…/authorize`），非该约定 IdP 需显式传 `authorize_url`；多副本部署下 oauth state 为进程内语义。
+- **DoD**：sqlite demo 连接器建 Connection → 工具调用 → 审计；OAuth 令牌刷新测试绿。✅
 - **依赖**：仅 ④ 依赖 A；①②③ 可即刻并行。
 
 #### 任务组 D：`im-` IM 深化（M30，独立）✅（M30，69aa934）
@@ -147,11 +149,12 @@
 - **DoD**：外部 A2A 客户端流式调用平台 agent；平台 agent 经 delegate 调外部 mock A2A server 全链路测试绿。
 - **依赖**：无。
 
-#### 任务组 F：`gateway-` API Gateway（M31，独立）
+#### 任务组 F：`gateway-` API Gateway（M31，独立）✅（M31，fe64dce）
 - **设计依据**：unfinished.md §三十四（Rate Limit/Concurrency/Timeout/Circuit Breaker/Idempotency/Request Size）。
 - **现状**：按凭证限流已有（`EAP_CHAT_RATE_LIMIT`，429+Retry-After，覆盖 /v1/chat 与 invocations，M26）；中间件仅有 CORS/Trace/MCPAuth（`main.py`）；**缺并发上限、请求体上限、熔断、幂等键**。
-- **剩余工作**：① 全局中间件层：按租户/凭证并发上限、请求体大小上限、全局超时；② 熔断（按 provider/model 5xx 率跳闸，与模型降级链联动）；③ 写操作幂等键（`Idempotency-Key` 头，Redis 可选）；④ 网关指标透出（/metrics）。
-- **DoD**：并发超限 429、熔断跳闸与半开恢复、幂等重放不重复执行，均有测试覆盖。
+- **完成描述（M31）**：① `observability/gateway.py` 三中间件：RequestSizeLimit（Content-Length 超限 413，默认 10MB）、ConcurrencyLimit（按凭证在途上限 429+Retry-After，内置非流式请求超时 504）、Idempotency（/api/v1 写方法 + Idempotency-Key 头 → 同键重放带 X-Idempotent-Replay，进程内存储 + 在途 Future 合并 + TTL 清扫，Redis 可选分支；SSE 路径 /v1/chat/completions 与 /a2a 及 Accept: text/event-stream 前缀排除）；② CircuitBreaker（按模型滑动窗口错误率 → open → 冷却半开单次探测 → 成功 close/失败 re-open，伪时钟可注入）接入 modelhub 路由：open 模型从降级链剔除、成败记录到 breaker，指标 eap_circuit_state（gauge 0/1/2）+ eap_circuit_trips_total；③ 网关指标 eap_gateway_rejected_total{reason} / eap_idempotent_replays_total / eap_gateway_inflight（gauge），metrics.py 新增 gauge_set；④ config.py 追加 EAP_GATEWAY_*（并发默认 0=关、超时默认 0=关、体上限默认 10MB、TTL 300s）；main.py 中间件按 add_middleware LIFO 逆序注册（请求流经 Size→Concurrency→Idempotency）。零 schema 变更（熔断/幂等均进程内存态）。`tests/test_gateway.py` 16 用例离线绿（中间件单测 asyncio.run 驱动 + TestClient 集成 + 伪时钟熔断 + 路由降级链联动）。
+- **剩余工作**：全量回归待三线合并后统一跑；Redis 幂等分支仅实现未测（无 Redis 环境）；chunked 无 Content-Length 请求体不拦（生产前置反代收口）。
+- **DoD**：并发超限 429、熔断跳闸与半开恢复、幂等重放不重复执行，均有测试覆盖。✅
 - **依赖**：无。
 
 ### 次线：v0.9 生产化（优先级 2，v0.8 主体后开工）
@@ -210,7 +213,8 @@
 | 批次 | 并行任务组 | 说明 |
 |---|---|---|
 | **批次 1 ✅** | A `event-` ＋ D `im-` ＋ E `a2a-` | 已完成（04cabca / 69aa934 / bff9797），全量回归 234 passed |
-| **批次 2（当前）** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | B 依赖的 A 已完成；C 仅 Trigger 部分依赖 A（已就绪）；F 独立——三线可并行开工 |
+| **批次 2 ✅** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | 已完成（8289327 / 0fe5328 / fe64dce），全量回归 270 passed——v0.8 七项收官 |
+| **批次 3（当前）** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | v0.9 生产化首批，三线互不依赖可并行；P2 沙箱 / P4 HA 随后 |
 | 批次 3 | P1＋P3＋P5（或按需 2~3 线） | v0.9 生产化，P2/P4 随后 |
 | 批次 4 | V `v1.0-` 收尾 ＋ L 组按外部条件逐项 | 整合验收与悬置项消化 |
 
