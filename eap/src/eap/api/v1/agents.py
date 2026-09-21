@@ -22,6 +22,23 @@ from ..deps import require_admin, resolve_tenant
 router = fastapi.APIRouter(prefix="/api/v1/agents", dependencies=[fastapi.Depends(resolve_tenant)])
 
 
+def _audit_run_completed(request: fastapi.Request, name: str, status: str,
+                         elapsed_ms: int, trace_id: str) -> None:
+    """调用完成审计 agent.run.completed（L10/M34 A/B 归因）：detail 携带 prompt_variant。
+
+    variant 取自 runtime.prompts.variant_scope（本次调用内最近一次实验命中渲染，
+    由 resolve_template 写入）。归因口径局限：SSE 流式路径不落本审计（不计入报表
+    调用指标）；一次调用渲染多个实验 prompt 时归因到最近一次命中（覆盖语义）；
+    管理面 render 端点的渲染不经过本审计（只计入报表 renders）。
+    """
+    from ...runtime import prompts as prompt_rt
+
+    audit.record("agent.run.completed", actor=audit.actor_of(request), target=name,
+                 detail={"agent": name, "status": status, "elapsed_ms": elapsed_ms,
+                         "prompt_variant": prompt_rt.variant_scope.get(), "stream": False},
+                 trace_id=trace_id)
+
+
 @router.get("")
 def list_agents(db: Session = fastapi.Depends(get_db)):
     """Agent Registry 目录：三类纳管的 M1 视图（builtin/sdk/entrypoint）+ 配置发布指针。"""
@@ -135,19 +152,31 @@ async def invoke(
     try:
         resp = await registry.invoke(db, name, body, trace_id=getattr(request.state, "trace_id", None))
     except policy.PolicyDenied as e:
+        _audit_run_completed(request, name, "error",
+                             int((_time.monotonic() - t0) * 1000),
+                             getattr(request.state, "trace_id", ""))
         raise fastapi.HTTPException(status_code=403, detail=str(e)) from e
     except KeyError as e:
+        _audit_run_completed(request, name, "error",
+                             int((_time.monotonic() - t0) * 1000),
+                             getattr(request.state, "trace_id", ""))
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
     except RuntimeError as e:
+        _audit_run_completed(request, name, "error",
+                             int((_time.monotonic() - t0) * 1000),
+                             getattr(request.state, "trace_id", ""))
         raise fastapi.HTTPException(status_code=503, detail=f"EAP-4005 {e}") from e
     finally:
         policy.reset_tenant(token)
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
     record_usage(
         getattr(request.state, "trace_id", ""), getattr(request.state, "tenant_id", 0),
         kind="agent", model=resp.usage.get("model", name),
         tokens_in=resp.usage.get("tokens_in", 0), tokens_out=resp.usage.get("tokens_out", 0),
-        latency_ms=int((_time.monotonic() - t0) * 1000),
+        latency_ms=elapsed_ms,
     )
+    # L10/M34：A/B 变体归因审计（报表经 trace_id 联结 usage_records 聚合 token/成本）
+    _audit_run_completed(request, name, "ok", elapsed_ms, resp.trace_id)
     # 事件中心（M30）：agent 运行完成事件（发射失败不阻断调用）
     try:
         from ...runtime.events import emit_event
