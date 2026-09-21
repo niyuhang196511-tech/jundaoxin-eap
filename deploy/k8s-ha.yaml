@@ -134,3 +134,62 @@ spec:
               memory: 512Mi
             limits:
               memory: 1Gi
+---
+# M34 收尾补齐（P4 剩余项）：Ingress TLS / HPA / PDB —— 样例级，生产按集群实际调整
+# Ingress（TLS 由 cert-manager 自动签发；host 按环境改）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eap
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod   # 无 cert-manager 时改用静态 Secret
+    nginx.ingress.kubernetes.io/proxy-buffering: "off" # SSE 流式不缓冲（对齐 nginx.conf）
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["eap.example.com"]
+      secretName: eap-tls
+  rules:
+    - host: eap.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: eap          # 前面已定义的 API Service（80 → 8300）
+                port:
+                  number: 80
+---
+# HPA：API 双副本按 CPU 扩缩（1~6 副本；worker 不参与 HPA——队列深度才是其扩缩信号，此处固定）
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: eap-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: eap-api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# PDB：滚动/节点驱逐时至少保留 1 个 API 副本在线
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eap-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: eap
+      tier: api

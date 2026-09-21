@@ -19,6 +19,10 @@ on:
         description: "晋升目标环境：dev | staging | prod"
         required: true
         default: "staging"
+      image:
+        description: "晋升对象：eap（后端）| console（控制台）"
+        required: false
+        default: "eap"
 
 permissions:
   contents: read
@@ -70,6 +74,44 @@ jobs:
         with:
           generate_release_notes: true
 
+  release-console:
+    # 控制台镜像（P5 未尽事项补齐）：与后端同 tag 发布；NEXT_PUBLIC_* 为构建期参数，
+    # 运行期地址可由部署侧再注入（NEXT_PUBLIC_API_BASE_URL 空则走同源相对路径）
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract semver from tag & normalize console image name
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}/console" | tr '[:upper:]' '[:lower:]')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push console image
+        uses: docker/build-push-action@v6
+        with:
+          context: eap/frontend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+
   promote:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -81,11 +123,15 @@ jobs:
       packages: write
       contents: write
     steps:
-      - name: Validate inputs (environment enum / image_tag shape, anti-injection)
+      - name: Validate inputs (environment/image enum / image_tag shape, anti-injection)
         run: |
           case "${{ inputs.environment }}" in
             dev|staging|prod) ;;
             *) echo "::error::environment 仅允许 dev|staging|prod"; exit 1 ;;
+          esac
+          case "${{ inputs.image }}" in
+            eap|console) ;;
+            *) echo "::error::image 仅允许 eap|console"; exit 1 ;;
           esac
           case "${{ inputs.image_tag }}" in
             ""|v*|*[!0-9A-Za-z._-]*) echo "::error::image_tag 须形如 0.8.0（不带 v 前缀）"; exit 1 ;;
@@ -100,7 +146,7 @@ jobs:
 
       - name: Retag image with environment label (pull → tag → push)
         run: |
-          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}/eap" | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}/${{ inputs.image }}" | tr '[:upper:]' '[:lower:]')"
           docker pull "${image}:${{ inputs.image_tag }}"
           docker tag  "${image}:${{ inputs.image_tag }}" "${image}:${{ inputs.environment }}"
           docker push "${image}:${{ inputs.environment }}"
