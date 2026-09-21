@@ -1,7 +1,7 @@
 [project]
 name = "eap"
-version = "0.7.0"
-description = "EAP 企业级 Agent 智能体平台 — M1+M2+M3：模型中心 / 知识中心 / Agent Runtime / 发布治理 / 成本 / 策略 / 连接器 / 企业 IM / 技能包 / 评测（规则+LLM 裁判）/ Prompt 流水线与 A/B"
+version = "0.9.0"
+description = "EAP 企业级 Agent 智能体平台 — Agent Application / Governance / Extension Platform / 企业集成（事件-Webhook-IM-A2A-网关）/ 生产化（Worker 池-沙箱-HA-环境体系-CI/CD）/ 模型 / 知识 / Runtime / 发布治理 / 评测 / Prompt 流水线"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",

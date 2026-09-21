@@ -1,6 +1,6 @@
-# EAP 平台代码（M1 核心）
+# EAP 平台代码（v0.9.0）
 
-企业级 Agent 智能体平台的可运行核心：**模型中心 / 知识中心 / Agent Runtime / 注册钩子 SDK / OpenAI 兼容 API**。
+企业级 Agent 智能体平台可运行工程（v0.9.0）：**模型 / 知识 / Agent Runtime / Workflow（版本化+四环境）/ 交互引擎 / 发布治理 / 扩展平台 / 企业集成（事件-Webhook-IM-A2A-网关）/ 生产化（Worker 池-沙箱-HA-CI/CD）**。
 架构设计见上级目录 [docs/](../docs/)（三面七层、领域模型、API 规范、路线图）。
 
 ## 环境与启动（uv + Python 3.12）
@@ -197,24 +197,8 @@ class MyAgent(AgentApp):
 
 放置到任意模块并配置 `EAP_AGENT_MODULES='["your.module"]'`，平台启动即自动发现、校验、纳管（pip 安装包用 entry_points 组 `eap.agents`）。完整示例见 [examples/demo_agent/](examples/demo_agent/)。
 
-## 已实现 vs 待实现
+## 功能全景与完成状态
 
-| 模块 | 已实现 | 待实现（见 docs/09 路线） |
-|---|---|---|
-| 模型中心 | 能力路由、降级链、mock/OpenAI 兼容、定制模型注册 API、**Policy Engine（租户模型/供应商白名单 + prompt 上限，网关强制执行，EAP-7101）** | 评测门禁接入路由、vLLM multi-LoRA 托管 |
-| 知识中心 | 多 KB、分块、hash/openai 嵌入、**三路检索：BM25+向量+图谱（实体共现图 / LLM 结构化抽取可切，多跳扩展召回，/kb/{name}/graph 概览）+ RRF + 两阶段 Reranker（lexical/llm 可选，失败自动回退，retrieve.rerank 参数）、Citation、级联删除（含图谱/向量库）、向量路可切 Milvus（EAP_MILVUS_URI，不可达自动回退本地余弦）** | Reranker 接真实模型 |
-| Agent Runtime | Context 预算、Agent Loop、工具协议、HITL 审批门控 + 挂起/恢复 | 人工审批 UI、持久化 Checkpoint |
-| **多智能体** | **Supervisor 委派（agent.\* 工具化）+ 深度护栏 + 内置 supervisor-agent** | Handoff 策略编排 UI、跨租户 A2A 委派 |
-| **Memory** | **会话/长期记忆读写、向量+词面召回、遗忘 API（/api/v1/memory）** | 摘要压缩、组织记忆联动知识中心 |
-| **Workflow Engine** | **DSL（llm/tool/retrieve/branch + parallel 并行分支 + subflow 子流程委派/深度护栏）→ 创建即注册为智能体** | 画布前端 |
-| **Prompt Center** | **模板/变量自动提取/渲染/API + 版本流水线（draft→publish→archived，试渲染校验+回滚）+ A/B 实验（key 稳定 hash 分流，/api/v1/prompts）** | 实验效果报表、灰度发布联动 |
-| **评测中心** | **数据集 + 规则裁判 + LLM-as-Judge（按评分标准出 JSON 结论，逐用例带理由）+ 通过率门禁**（发布门禁两种裁判均可选） | 人工抽检、在线影子流量 |
-| **发布治理** | **版本生命周期（draft→review→canary→prod→rolled_back/retired）+ 评测门禁强制 + Canary 灰度（user/session 稳定 hash 分流 + overrides.model 路由覆盖）+ 回滚恢复旧版（/api/v1/releases）** | 环境体系（Dev/Staging/Prod）、制品组合版本 |
-| **成本中心** | **租户月度 token 预算 + 用量汇总（按 kind/model 分组）+ 调用侧超限熔断 429（/api/v1/budgets）** | 单价计费账单、按模型差价、配额分层 |
-| **企业连接器** | **连接器注册/验证/启停 API + 端点→平台工具自动包装（rest + 内置 mock-erp）+ order-agent 经连接器调 ERP（/api/v1/connectors）** | SQL 连接器、OAuth 凭证托管 |
-| **企业 IM** | **飞书/钉钉/企业微信渠道：群机器人 Webhook 推送 + 回调接入智能体（飞书 challenge/钉钉加签/企业微信 SHA1+AES 解密），回复自动推回群（/api/v1/im）** | 卡片消息、应用级 API（发消息/通讯录）、事件重试队列 |
-| Task/Job 引擎 | 状态机、队列+Worker、取消/审批/续跑、**可插拔队列后端：单实例 asyncio 队列 / 多副本 Redis Streams（消费组+XACK+崩溃恢复 XAUTOCLAIM，EAP_REDIS_URL 一键切换）**、**定时调度（间隔式，DB 持久化，到期自动提交）** | cron 表达式、优先级队列 |
-| Skill Registry | 技能 CRUD、L1/L2 渐进披露、启停、Agent 注入、**技能包打包/Ed25519 签名/验签导入（默认停用待审）/公钥分发（技能市场地基）** | 技能市场分发、scripts/assets 附件包 |
-| MCP | Server（/mcp，官方 SDK 2.x，**API Key 门禁 EAP-3001，EAP_MCP_AUTH 可关**）+ Client（外部 Server → 平台工具）+ **Registry（Server 纳管/验证/启停 API）** | MCP OAuth（可复用 OIDC 客户端）、长连接复用 |
-| 注册 SDK | @register_agent、manifest 校验、entry_points 发现、健康检查、**生命周期全钩子（on_register/on_start/on_stop/health_check）+ stop/start/unregister API + 热加载（同模块重注册=替换，reload 从源码恢复）** | 灰度（发布治理 Canary 已覆盖智能体维度） |
-| 接入 | OpenAI 兼容（含 SSE）、Agent 调用、KB API、嵌入外链（EmbedToken+JS Widget）、**A2A 1.0（Agent Card + Task）**、**React 控制台（总览/模型/知识/智能体/任务/资产/评测）**、**OIDC/SSO（授权码流程+JWKS 验签，换发租户 API Key）** | 多租户计费 |
+权威进度账本：[docs/progress-plan.md](../docs/progress-plan.md)——14 个能力域 × 状态、逐项完成描述（含关键文件证据）、剩余工作与验收标准、并行任务分组。
+
+版本路线：**v0.5 Agent Application / v0.6 Platform Governance / v0.7 Extension Platform / v0.8 企业集成 / v0.9 生产化均已落地**（里程碑 M18–M33，收版审计 docs/12/13/15）；长期悬置项（vLLM multi-LoRA、Harness 桌面端、IM 真实凭证联调等）见账本 L 组。
