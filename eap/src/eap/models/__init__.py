@@ -167,7 +167,15 @@ class Chunk(Base):
 
 
 class TaskRecord(Base):
-    """Task/Job 8 态状态机的 M1 子集（docs/03 §5）。"""
+    """Task/Job 8 态状态机的 M1 子集（docs/03 §5）。
+
+    M32 生产化（任务组 P1）新增：
+    - lease_expires_at：执行租约到期时刻（worker 取任务时置 now+租约；终态/取消清空）。
+      周期扫描将「RUNNING 且租约过期」的任务重置 PENDING 重跑（worker 崩溃兜底）
+    - priority：队列优先级，数值大优先、同级 FIFO（队列后端从本列读取）
+    - idempotency_key：幂等键——存在同 key 且在途（PENDING/RUNNING/WAITING_*）的任务时，
+      提交直接命中返回该任务；到终态后同 key 可再建
+    """
 
     __tablename__ = "tasks"
 
@@ -176,6 +184,9 @@ class TaskRecord(Base):
     state: Mapped[str] = mapped_column(String(16), default="PENDING")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # 数值大优先
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -338,6 +349,8 @@ class WorkflowRecord(Base):
     """工作流 DSL 存储（docs/03 §6 Workflow Engine）：启停 + 版本，启动时注册为智能体。
 
     tenant_id：可空 = 平台共享（v0.6 与 rls.py 清单对齐）。
+    published_version_id（M32 Workflow 版本化）：指向 workflow_versions 中当前生产
+    （env=prod）发布的版本；为空 = 无版本记录，执行回退 dsl 字段（存量工作流零影响）。
     """
 
     __tablename__ = "workflows"
@@ -348,7 +361,36 @@ class WorkflowRecord(Base):
     dsl: Mapped[dict] = mapped_column(JSON, default=dict)
     tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    published_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 指向 workflow_versions.id（与 channel_id 同惯例：循环引用不加 DB 级 FK）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class WorkflowVersionRecord(Base):
+    """Workflow 版本化 + prod-env- 环境体系（M32，v0.9 生产化）：对齐 Agent 配置版本层。
+
+    - dsl 为版本快照（不可变语义：published 后不可修改，与 agent_versions 一致）
+    - env：dev | test | staging | prod（nullable = 纯草稿，未绑定环境）
+    - 流水线：draft → publish(env) → published（同 env 旧版自动 archived）→ archived；
+      rollback(env) = 该 env 最近 archived 重发布
+    - env=prod 发布时同步 WorkflowRecord.published_version_id 指针，
+      workflow-as-agent 执行按解析链取版本 DSL；无版本记录时回退 dsl 字段（向后兼容）
+    """
+
+    __tablename__ = "workflow_versions"
+    __table_args__ = (UniqueConstraint("workflow_id", "version", name="uq_wfver_wf_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)  # 递增：max+1
+    dsl: Mapped[dict] = mapped_column(JSON, default=dict)
+    env: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    # dev | test | staging | prod（NULL = 草稿未绑定环境）
+    state: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # draft | published | archived
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class WorkflowRunRecord(Base):

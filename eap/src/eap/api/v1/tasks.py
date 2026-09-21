@@ -22,6 +22,12 @@ def _engine(request: fastapi.Request):
 class TaskSubmit(BaseModel):
     type: str
     payload: dict = Field(default_factory=dict)
+    priority: int = Field(default=0, ge=0,
+                          description="队列优先级（M32）：数值大优先，同级 FIFO")
+    # 任务幂等键（M32）：body 字段而非 Idempotency-Key 头——该头已被 M31 网关
+    # 幂等中间件占用（HTTP 层同键重放），任务级去重走 body 字段，两层语义互补
+    idempotency_key: str | None = Field(default=None, max_length=128,
+                                        description="同键在途任务（PENDING/RUNNING/WAITING_*）命中直接返回")
 
 
 class ApprovalDecision(BaseModel):
@@ -55,11 +61,20 @@ async def submit_task(body: TaskSubmit, request: fastapi.Request, db: Session = 
     # trace 传播（M11）：提交方 trace_id 注入 payload，task.run span 属性关联
     payload = dict(body.payload or {})
     payload.setdefault("_trace_id", getattr(request.state, "trace_id", ""))
+    # 任务幂等键（M32）：body 字段透传（HTTP 层的 Idempotency-Key 头由网关幂等中间件处理）
     try:
-        task_id = await _engine(request).submit(db, body.type, payload)
+        submitted = await _engine(request).submit(db, body.type, payload,
+                                                  priority=body.priority,
+                                                  idempotency_key=body.idempotency_key)
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
-    return {"task_id": task_id, "state": "PENDING"}
+    task_id = str(submitted)
+    state = "PENDING"
+    if submitted.existing:  # 命中在途任务：响应其真实状态（非固定 PENDING）
+        task = db.get(TaskRecord, task_id)
+        if task is not None:
+            state = task.state
+    return {"task_id": task_id, "state": state, "existing": submitted.existing}
 
 
 # ---------- 定时调度（docs/03 §5）：到期由引擎自动提交任务 ----------

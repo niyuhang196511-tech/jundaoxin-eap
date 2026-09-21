@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     # SQL 连接器（M31 任务组 C）：单次只读查询返回行数上限（超出截断并标记 truncated=true）
     connector_sql_max_rows: int = 200
 
+    # 独立 Worker 进程（M32 任务组 P1）：python -m eap.worker
+    worker_count: int = 2  # worker 并发协程数（单进程内取任务执行的并发度）
+    worker_lease_seconds: int = 300  # 任务执行租约（秒）：到期未完成视为 worker 崩溃，重置 PENDING 重跑
+
 
 @lru_cache
 def get_settings() -> Settings:
