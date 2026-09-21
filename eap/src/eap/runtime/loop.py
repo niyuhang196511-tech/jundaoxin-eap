@@ -25,6 +25,20 @@ class TaskSuspended(Exception):
         super().__init__(f"等待人工审批: {pending_tool}")
 
 
+def _sandbox_violation(tool_name: str, decision: dict, agent_name: str) -> None:
+    """M33：tool.sandbox.violation 审计 + 指标（audit 放行 / enforce 拒绝共用）。"""
+    try:
+        from ..observability.audit import record as _record
+        from ..observability.metrics import incr as _incr
+
+        _record("tool.sandbox.violation", actor="system", target=tool_name,
+                detail={"mode": decision.get("mode"), "policy": decision.get("policy"),
+                        "action": decision.get("action"), "agent": agent_name})
+        _incr("eap_sandbox_violations_total", {"mode": str(decision.get("mode") or "enforce")})
+    except Exception:
+        pass  # 治理观测失败不影响工具结果回注
+
+
 @dataclass
 class RunResult:
     content: str
@@ -131,11 +145,38 @@ async def run_loop(
 
                     _t0 = _time.monotonic()
                     _status = "ok"
+                    # M33 沙箱路由：tool-sandbox 清单命中时按策略语义执行
+                    # （位于 M24 拦截链与审批门之后）
+                    from .policy import check_tool_sandbox as _check_sandbox
+
+                    _sandbox = _check_sandbox(db, tc.name, getattr(tool, "runtime", "inproc"))
                     try:
                         import asyncio as _asyncio
 
-                        out = await _asyncio.wait_for(tool.handler(tc.arguments),
-                                                      timeout=getattr(tool, "timeout_s", 30.0))
+                        if _sandbox is not None and _sandbox["action"] == "deny":
+                            # enforce：进程内工具无法沙箱化 → 拒绝（EAP-7102）
+                            raise PolicyDenied(_sandbox["reason"])
+                        if _sandbox is not None and _sandbox["action"] == "sandbox":
+                            # 脚本工具必须走沙箱（防绕过 handler），工具自身 timeout_s 传导
+                            from .tools import run_script_in_sandbox as _run_script
+
+                            if not getattr(tool, "script_path", None):
+                                raise ValueError(f"脚本工具 {tc.name} 缺少 script_path，无法沙箱执行")
+                            _t_limit = getattr(tool, "timeout_s", 30.0)
+                            out = await _asyncio.wait_for(
+                                _run_script(tool.script_path, tc.arguments, timeout_s=_t_limit),
+                                timeout=_t_limit)
+                        else:
+                            if _sandbox is not None and _sandbox["action"] == "audit":
+                                # audit：进程内工具放行执行，仅记违规审计与指标
+                                _sandbox_violation(tc.name, _sandbox, agent_name)
+                            out = await _asyncio.wait_for(tool.handler(tc.arguments),
+                                                          timeout=getattr(tool, "timeout_s", 30.0))
+                    except PolicyDenied as e:  # M33：enforce 沙箱拒绝 → 违规审计 + 指标
+                        _status = "error"
+                        out = json.dumps({"error": f"工具被策略拒绝: {e}"}, ensure_ascii=False)
+                        if _sandbox is not None:
+                            _sandbox_violation(tc.name, _sandbox, agent_name)
                     except Exception as e:  # 工具失败（含超时）回注给模型而非崩溃
                         _status = "error"
                         out = json.dumps({"error": f"工具执行失败: {e}"}, ensure_ascii=False)

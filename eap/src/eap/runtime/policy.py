@@ -122,6 +122,36 @@ def check_agent_delegation(db: Session, target_agent: str) -> None:
                     f"（策略 {policy.name}）")
 
 
+def check_tool_sandbox(db: Session, tool_name: str, runtime: str = "inproc") -> dict | None:
+    """工具沙箱策略（M33 任务组 P2）：kind=tool-sandbox，config
+    {"mode": "enforce"|"audit", "tools": [...]}。
+
+    工具命中清单时返回执行决策（调用方按 action 路由；未命中返回 None，
+    走原有进程内路径不变）。多条策略命中取 priority 升序第一条：
+    - {"action": "sandbox", ...}：脚本工具必须经 SandboxRunner 执行
+      （防绕过 handler，enforce/audit 一致）；
+    - {"action": "deny", ...}：enforce 下进程内工具无法沙箱化 → 拒绝（EAP-7102）；
+    - {"action": "audit", ...}：audit 下进程内工具放行执行，
+      但调用方须记 tool.sandbox.violation 审计与指标。
+    """
+    tenant_id = tenant_scope.get()
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind != "tool-sandbox":
+            continue
+        tools = set((policy.config or {}).get("tools") or [])
+        if tool_name not in tools:
+            continue
+        mode = str((policy.config or {}).get("mode") or "enforce")
+        if runtime == "script":
+            return {"action": "sandbox", "mode": mode, "policy": policy.name}
+        if mode == "enforce":
+            return {"action": "deny", "mode": mode, "policy": policy.name,
+                    "reason": f"工具 {tool_name} 被要求沙箱执行但为进程内实现"
+                              f"（策略 {policy.name}，进程内工具无法沙箱化，EAP-7102）"}
+        return {"action": "audit", "mode": mode, "policy": policy.name}
+    return None
+
+
 def check_a2a_delegate(db: Session, endpoint: str, target_agent: str = "") -> None:
     """A2A 外部委派边界（M30）：数据出租户边界，fail-closed 默认拒绝，策略显式放行方可执行。
 

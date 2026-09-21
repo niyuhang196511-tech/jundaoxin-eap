@@ -22,13 +22,14 @@ router = fastapi.APIRouter(prefix="/api/v1/policies",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
 
 _KINDS = ("model-allowlist", "provider-allowlist", "max-prompt-tokens",
-          "tool-allowlist", "tool-risk-approval", "agent-allowlist")
+          "tool-allowlist", "tool-risk-approval", "agent-allowlist", "tool-sandbox")
 
 
 class PolicyCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,40}$")
     tenant_id: int = Field(default=0, ge=0, description="0 = 平台默认策略")
-    kind: str = Field(pattern=r"^(model-allowlist|provider-allowlist|max-prompt-tokens|tool-allowlist|tool-risk-approval|agent-allowlist)$")
+    kind: str = Field(pattern=r"^(model-allowlist|provider-allowlist|max-prompt-tokens|"
+                              r"tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox)$")
     config: dict = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
     notes: str = Field(default="", max_length=256)
@@ -61,6 +62,12 @@ def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fa
         raise fastapi.HTTPException(status_code=400, detail="EAP-7102 tool-risk-approval 的 threshold 须为 low/medium/high")
     if body.kind == "agent-allowlist" and not isinstance(cfg.get("agents"), list):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7102 agent-allowlist 需要 config.agents 列表")
+    if body.kind == "tool-sandbox":
+        # M33 任务组 P2：{"mode": "enforce"|"audit", "tools": [...]}
+        if not isinstance(cfg.get("tools"), list):
+            raise fastapi.HTTPException(status_code=400, detail="EAP-7102 tool-sandbox 需要 config.tools 列表")
+        if (cfg.get("mode") or "enforce") not in ("enforce", "audit"):
+            raise fastapi.HTTPException(status_code=400, detail="EAP-7102 tool-sandbox 的 mode 须为 enforce/audit")
     if body.kind == "provider-allowlist" and not isinstance(cfg.get("providers"), list):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7102 provider-allowlist 需要 config.providers 列表")
     if body.kind == "max-prompt-tokens" and not isinstance(cfg.get("limit"), int):

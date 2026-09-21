@@ -24,6 +24,9 @@ METRICS: dict[str, tuple[str, str]] = {
     "eap_gateway_inflight": ("Currently in-flight requests gateway-wide.", "gauge"),
     "eap_circuit_state": ("Circuit breaker state per model (0 closed / 1 open / 2 half-open).", "gauge"),
     "eap_circuit_trips_total": ("Circuit breaker trips per model.", "counter"),
+    # Sandbox（M33 任务组 P2）
+    "eap_sandbox_exec_total": ("Sandbox script executions by result (ok/timeout/error).", "counter"),
+    "eap_sandbox_violations_total": ("Sandbox policy violations by mode (enforce/audit).", "counter"),
 }
 
 

@@ -33,10 +33,12 @@ def list_tools(db: Session = fastapi.Depends(get_db)):
             tool = factory()
             tools.append({"name": tool.name, "description": tool.description,
                           "parameters": tool.parameters, "origin": "workflow",
-                          "requires_approval": tool.requires_approval})
+                          "requires_approval": tool.requires_approval,
+                          "runtime": getattr(tool, "runtime", "inproc")})
         except Exception:
             tools.append({"name": name, "description": "（实例化失败）", "parameters": {},
-                          "origin": "workflow", "requires_approval": False})
+                          "origin": "workflow", "requires_approval": False,
+                          "runtime": "inproc"})
 
     seen = {t["name"] for t in tools}
     for agent_name in registry.names():
@@ -48,7 +50,8 @@ def list_tools(db: Session = fastapi.Depends(get_db)):
                 seen.add(tool.name)
                 tools.append({"name": tool.name, "description": tool.description,
                               "parameters": tool.parameters, "origin": f"agent:{agent_name}",
-                              "requires_approval": tool.requires_approval})
+                              "requires_approval": tool.requires_approval,
+                              "runtime": getattr(tool, "runtime", "inproc")})
 
 
     for record in db.scalars(select(MCPServerRecord)).all():
