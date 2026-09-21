@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.7.0（`eap/pyproject.toml`） |
-| 最新里程碑 | M29（extensions 线，Extension SDK 契约） |
-| 代码 commit | b025ecf |
+| 平台版本 | v0.7.0 + M30 批次 1（event/im/a2a 三线，见下） |
+| 最新里程碑 | M30（批次 1：event-M30 / im-M30 / a2a-M30） |
+| 代码 commit | bff9797 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **198 passed, 3 skipped, 3 errors**（289s）——3 个 error 均为 `tests/test_mcp.py` 测试服务器子进程问题，属 docs/13 §三 记录的 Windows 回环防火墙已知限制，CI Linux 不受影响，判定基线绿 |
-| 下一主线 | **v0.8 企业集成**（任务组 A~F，里程碑号自 M30 起） |
+| 测试基线 | **234 passed, 6 skipped, 0 errors**（263s）——较 M29 基线 198 passed 增 36（恰为批次 1 三线新用例 8+13+15）；M29 时 3 个 test_mcp 的 Windows 回环防火墙 error 本轮未复现（间歇性环境问题，docs/13 §三） |
+| 下一主线 | **批次 2：B `webhook-` + C `connector-` + F `gateway-`**（M31；B 依赖的 A 事件总线已就绪） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）三轮收版扫描；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -34,7 +34,7 @@
 | v0.5 | Agent Application（版本层/结构化输出/交互引擎/Action/Artifact） | ✅ 完成 | M18–M22 | docs/12 |
 | v0.6 | Platform Governance（工具治理/Policy/评测/成本/Memory 治理） | ✅ 完成 | M23–M26 | docs/13 |
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
-| **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ❌ 未启动（底座已备） | M30+ 待开工 | — |
+| **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | 🔶 进行中（Event/IM/A2A+Discovery 已完成 ✅；Webhook/Connector/Gateway 待批次 2） | M30 ✅ / M31 待开工 | — |
 | v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ❌ 未启动（底座已备） | 排在 v0.8 后 | — |
 | v1.0 | Enterprise Agent Platform 收尾整合 | ❌ | 最后 | — |
 
@@ -106,8 +106,9 @@
 
 ### 主线：v0.8 企业集成（优先级 1，M30 起）
 
-#### 任务组 A：`event-` 事件中心（M30，底座，先行开工）
+#### 任务组 A：`event-` 事件中心（M30，底座，先行开工）✅（M30，04cabca）
 - **设计依据**：unfinished.md §二十八 Event/Trigger（Cron/Webhook/Event/Message/File Upload/Business Event）。
+- **完成描述（M30，commit 04cabca）**：① 进程内事件总线 `runtime/events.py`（通配订阅、队列满丢弃不阻断、可选 Redis pub/sub 跨副本，离线纯进程内可跑）；② TriggerRule 三源触发 `runtime/triggers.py`（event/cron/webhook → agent/workflow 走既有任务通道，min_interval_s 限流 + trigger.fire 审计）+ `api/v1/triggers.py` CRUD（admin+审计，async def 保证 reload 在事件循环上）；③ 入站 webhook `POST /triggers/webhook/{id}`（HMAC-SHA256 签名 + X-EAP-Event-Id LRU 去重）；④ 事件发射点：agent.run.completed / task.completed|failed / workflow.run.finished / kb.document.indexed；迁移 `a3e5f7b9c1d2`；`tests/test_events_triggers.py` 8 用例离线绿。
 - **现状**：定时触发已有（TaskScheduleRecord cron/interval，`runtime/tasks.py`，ops-M17.1/2）；任务队列/恢复/审计链完整；Webhook 仅有 IM 平台入站回调（`runtime/im.py`）；**无统一事件总线、无业务/文件事件、无入站 Webhook 触发器**。
 - **剩余工作**：
   1. 进程内事件总线（发布/订阅；可选 Redis pub/sub 跨副本）+ 核心事件目录（`agent.run.completed`、`task.*`、`workflow.run.finished`、`kb.document.indexed`、`connector.*`）；
@@ -131,17 +132,18 @@
 - **DoD**：sqlite demo 连接器建 Connection → 工具调用 → 审计；OAuth 令牌刷新测试绿。
 - **依赖**：仅 ④ 依赖 A；①②③ 可即刻并行。
 
-#### 任务组 D：`im-` IM 深化（M30，独立）
+#### 任务组 D：`im-` IM 深化（M30，独立）✅（M30，69aa934）
 - **设计依据**：unfinished.md §二十五 + docs/10 遗留（卡片消息、应用级 API、事件重试队列）。
-- **现状**：飞书/钉钉/企微 webhook 回调 + secret Fernet（`runtime/im.py` 173 行 + `api/v1/im.py`）；缺卡片消息、应用级发消息 API、回调事件重试队列；真实凭证联调未做。
-- **剩余工作**：① 出站卡片消息（三平台适配器，交互卡片按钮 → Action 协议）；② 应用级 API 凭据配置（发消息/通讯录）；③ 回调事件重试队列（幂等消费，复用任务引擎）；④ mock 适配层测试（真实联调 → L3）。
-- **DoD**：三平台卡片下发 mock 测试绿；回调重复投递幂等；凭据加密存储。
+- **现状**：飞书/钉钉/企微 webhook 回调 + secret Fernet（`runtime/im.py` + `api/v1/im.py`）；缺卡片消息、应用级发消息 API、回调事件重试队列；真实凭证联调未做。
+- **完成描述（M30）**：① 出站卡片 `runtime/im_outbound.py`（平台无关卡片 → 飞书应用级 im/v1/messages / 钉钉机器人 actionCard / 企微 template_card 三适配器，按钮 value/actionURL/key 编码 Action 协议回调引用，HTTP 发送可注入）；② 应用级凭据 `app_id`/`app_secret_enc`（Fernet 加密，M26 同款；`/channels` 创建 + `/channels/{name}/credentials` 端点，响应不回显）；③ 投递重试队列 `IMOutboundLogRecord`（幂等键 channel+event_key 唯一，direction in|out；进程内 asyncio 循环指数退避 `EAP_IM_RETRY_*` 可配，超限 dead；入站回调业务失败自动入队重投）；④ `POST /channels/{id}/send-card`（admin+审计 `im.send_card`，event_key 幂等）+ `tests/test_im_outbound.py` 13 用例离线绿。迁移 `b4c6d8e0f2a4`（接 a3e5f7b9c1d2）。
+- **剩余工作**：真实凭证联调（→ L3 遗留）；通讯录/群管理应用 API 未含。
+- **DoD**：三平台卡片下发 mock 测试绿；回调重复投递幂等；凭据加密存储。✅
 - **依赖**：无。
 
-#### 任务组 E：`a2a-` A2A 深化 + Agent Discovery（M30，独立）
+#### 任务组 E：`a2a-` A2A 深化 + Agent Discovery（M30，独立）✅（M30，bff9797）
 - **设计依据**：unfinished.md §三十五 + docs/04 §5（A2A 1.0 Task 生命周期含流式与异步任务）。
 - **现状**：`POST /a2a/rpc`（JSON-RPC message/send）+ `/.well-known/agent-card.json` 单 agent 名片（`api/v1/a2a.py` 122 行）；`a2a.py:6` 自述「流式/推送通知暂不支持」；**平台作为 A2A Client 委派外部 Agent 未做**；平台级 discovery 目录未做。
-- **剩余工作**：① `message/stream`（SSE）+ `tasks/pushNotificationConfig` 推送通知；② A2A Client：平台 Agent 委派外部 Agent（委派边界并入 agent-allowlist 策略，复用 M24 delegate 机制）；③ 平台级 discovery 端点（列出全部可发现 agent 的目录）；④ 跨租户委派默认拒绝 + 策略放行。
+- **剩余工作**：① `message/stream`（SSE）+ `tasks/pushNotificationConfig` 推送通知；② A2A Client：平台 Agent 委派外部 Agent（委派边界并入 agent-allowlist 策略，复用 M24 delegate 机制）；③ 平台级 discovery 端点（列出全部可发现 agent 的目录）；④ 跨租户委派默认拒绝 + 策略放行。→ ①②③④ 已完成（`runtime/a2a_client.py` + `api/v1/a2a.py` + `tests/test_a2a_v2.py`，15 passed；推送回执覆盖 RPC 内同步完成场景，异步任务引擎完成点未挂钩，见模块 docstring）。
 - **DoD**：外部 A2A 客户端流式调用平台 agent；平台 agent 经 delegate 调外部 mock A2A server 全链路测试绿。
 - **依赖**：无。
 
@@ -207,8 +209,8 @@
 
 | 批次 | 并行任务组 | 说明 |
 |---|---|---|
-| **批次 1（当前）** | A `event-` ＋ D `im-` ＋ E `a2a-` | 三线互不依赖，可同时开工；A 是 B/C④ 的底座故先行 |
-| 批次 2 | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | B 依赖 A 完成；C 仅 Trigger 部分依赖 A；F 独立 |
+| **批次 1 ✅** | A `event-` ＋ D `im-` ＋ E `a2a-` | 已完成（04cabca / 69aa934 / bff9797），全量回归 234 passed |
+| **批次 2（当前）** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | B 依赖的 A 已完成；C 仅 Trigger 部分依赖 A（已就绪）；F 独立——三线可并行开工 |
 | 批次 3 | P1＋P3＋P5（或按需 2~3 线） | v0.9 生产化，P2/P4 随后 |
 | 批次 4 | V `v1.0-` 收尾 ＋ L 组按外部条件逐项 | 整合验收与悬置项消化 |
 
