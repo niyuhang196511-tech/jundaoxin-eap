@@ -44,7 +44,7 @@ class TriggerCreate(BaseModel):
                              description="5 段 cron 表达式（UTC），source=cron 必填")
     secret: str | None = Field(default=None, max_length=256,
                                description="webhook HMAC 密钥（Fernet 加密存储，查询不回显）")
-    target_type: str = Field(default="agent", pattern=r"^(agent|workflow)$")
+    target_type: str = Field(default="agent", pattern=r"^(agent|workflow|connector)$")
     target_name: str = Field(min_length=1, max_length=64)
     input_mode: str = Field(default="payload", pattern=r"^(payload|template)$")
     template: dict | str | None = None
@@ -57,7 +57,7 @@ class TriggerPatch(BaseModel):
     match: dict | None = None
     cron: str | None = Field(default=None, max_length=64)
     secret: str | None = Field(default=None, max_length=256)
-    target_type: str | None = Field(default=None, pattern=r"^(agent|workflow)$")
+    target_type: str | None = Field(default=None, pattern=r"^(agent|workflow|connector)$")
     target_name: str | None = Field(default=None, min_length=1, max_length=64)
     input_mode: str | None = Field(default=None, pattern=r"^(payload|template)$")
     template: dict | str | None = None

@@ -1,9 +1,10 @@
-"""TriggerRule 引擎（M30 事件中心）：event / cron / webhook → 目标 agent / workflow。
+"""TriggerRule 引擎（M30 事件中心）：event / cron / webhook → 目标 agent / workflow / connector。
 
 - 启动（lifespan）加载 enabled 规则：source=event 订阅事件总线（支持通配）、
   source=cron 注册进 asyncio 循环（croniter 推算下次执行）、source=webhook 由 API 端点直接触发
 - 触发动作复用任务引擎：agent → agent.invoke 任务；workflow → 工作流运行（test_run_async，
-  运行记录落 workflow_runs 可轮询）——侵入最小的既有通道复用
+  运行记录落 workflow_runs 可轮询）——侵入最小的既有通道复用；connector（M31 任务组 C）→
+  解析连接器端点工具同步执行（payload 含 endpoint/arguments）
 - 每次触发：min_interval_s 限流（超限丢弃 + 审计 trigger.rate_limited）+ 审计 trigger.fire；
   失败仅记录，不抛出不阻断总线
 """
@@ -186,20 +187,61 @@ class TriggerEngine:
                 from ..workflows import test_run_async  # 延迟导入避免环
 
                 ref = await test_run_async(rule.target_name, payload_input)
+                status = "submitted"
+            elif rule.target_type == "connector":
+                # M31 任务组 C：连接器触发——解析端点工具并同步执行，结果摘要作 ref
+                ref = await self._fire_connector(rule, payload_input)
+                status = "ok"
             else:
                 payload = {"agent": rule.target_name, "input": payload_input}
                 if rule.tenant_id:
                     payload["_tenant_id"] = rule.tenant_id
                 with SessionLocal() as db:
                     ref = await self._tasks.submit(db, "agent.invoke", payload)
-            status = "submitted"
+                status = "submitted"
         except Exception as e:
             status, ref = "error", ""
             log.warning("触发规则 %s 失败: %s", rule.name, e)
-        audit.record("trigger.fire", actor="system", target=rule.name,
-                     detail={"source": source, "target": f"{rule.target_type}:{rule.target_name}",
-                             "status": status, "ref": ref})
+        detail: dict = {"source": source, "target": f"{rule.target_type}:{rule.target_name}",
+                        "status": status, "ref": ref}
+        if rule.target_type == "connector":
+            detail["connector"] = rule.target_name  # 审计标 connector（M31 任务组 C）
+        audit.record("trigger.fire", actor="system", target=rule.name, detail=detail)
         return {"rule": rule.name, "source": source, "status": status, "ref": ref}
+
+    async def _fire_connector(self, rule: RuleSnapshot, payload_input: str) -> str:
+        """target_type=connector：payload 需含 endpoint（工具名或端点名）与 arguments。
+
+        经 load_connector_tools/endpoint_tool 解析执行（复用 OAuth/白名单/事件通道）；
+        返回结果 JSON 前 500 字符作审计 ref。任何失败上抛由 fire() 统一转 error 审计。
+        """
+        from ..models import ConnectorRecord
+        from .connectors import load_connector_tools
+        from .tools import find_tool
+
+        try:
+            data = json.loads(payload_input or "{}")
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {"arguments": data}
+        endpoint = str(data.get("endpoint") or "")
+        arguments = data.get("arguments")
+        with SessionLocal() as db:
+            record = db.scalar(select(ConnectorRecord)
+                               .where(ConnectorRecord.name == rule.target_name))
+            if record is None:
+                raise ValueError(f"EAP-4004 连接器 {rule.target_name} 不存在")
+            tools = load_connector_tools(record)  # 未启用 → 空
+        tool = find_tool(tools, endpoint)
+        if tool is None and endpoint:
+            # 容错：允许只写端点名（按工具名后缀匹配，如 erp.inventory.query）
+            tool = next((t for t in tools if t.name.endswith("." + endpoint)), None)
+        if tool is None:
+            raise ValueError(f"EAP-4004 连接器 {rule.target_name} 无可用端点 {endpoint!r}（或未启用）")
+        result = await tool.handler(json.dumps(arguments if arguments is not None else {},
+                                               ensure_ascii=False))
+        return result[:500]
 
     def _build_input(self, rule: RuleSnapshot, data: dict) -> str:
         """触发输入：payload 模式透传触发数据（dict 序列化为 JSON）；template 模式变量替换。"""
