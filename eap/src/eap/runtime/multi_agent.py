@@ -19,6 +19,15 @@ def current_depth() -> int:
     return _depth.get()
 
 
+def push_depth() -> contextvars.Token:
+    """深度 +1 并返回 token（M30：A2A 外部委派工具复用同一防循环护栏）。"""
+    return _depth.set(_depth.get() + 1)
+
+
+def pop_depth(token: contextvars.Token) -> None:
+    _depth.reset(token)
+
+
 def delegate_tool(target_agent: str, description: str = "") -> Tool:
     """为指定下级智能体生成委派工具：agent.<name>(input) → 下级完整回答。"""
 

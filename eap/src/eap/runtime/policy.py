@@ -120,3 +120,29 @@ def check_agent_delegation(db: Session, target_agent: str) -> None:
                 raise PolicyDenied(
                     f"EAP-7102 智能体 {target_agent} 不在租户 {tenant_id} 的可委派名单内"
                     f"（策略 {policy.name}）")
+
+
+def check_a2a_delegate(db: Session, endpoint: str, target_agent: str = "") -> None:
+    """A2A 外部委派边界（M30）：数据出租户边界，fail-closed 默认拒绝，策略显式放行方可执行。
+
+    与 agent-allowlist（M24，默认放行 + 名单收敛）互补：跨租户/外部 endpoint 委派
+    只有租户策略 kind=a2a-delegate-allowlist 命中才放行，config：
+    {"endpoints": ["https://...", "*"], "agents": ["外部 agent 名", "*"]}
+    （endpoint 命中或 agent 命中即放行，"*" 通配）。
+    """
+    tenant_id = tenant_scope.get()
+    endpoint = (endpoint or "").rstrip("/")
+    gate_names: list[str] = []
+    for policy in _policies_for(db, tenant_id):
+        if policy.kind != "a2a-delegate-allowlist":
+            continue
+        gate_names.append(policy.name)
+        cfg = policy.config or {}
+        endpoints = {str(e).rstrip("/") for e in (cfg.get("endpoints") or [])}
+        agents = {str(a) for a in (cfg.get("agents") or [])}
+        if endpoint in endpoints or "*" in endpoints or target_agent in agents or "*" in agents:
+            return
+    where = f"（策略 {'、'.join(gate_names)}）" if gate_names else "（未配置放行策略）"
+    raise PolicyDenied(
+        f"EAP-7102 A2A 外部委派默认拒绝：endpoint {endpoint or '∅'} / agent {target_agent or '∅'} "
+        f"不在租户 {tenant_id} 的 a2a-delegate-allowlist 放行名单内{where}")

@@ -244,6 +244,18 @@ class PlatformContext:
 
         return await load_mcp_tools(server_url, prefix=prefix)
 
+    @staticmethod
+    def a2a_delegate_tool(transport: object | None = None) -> "Tool":
+        """A2A 外部委派工具（M30）：agent 工具清单加入 `a2a.delegate` 后，
+        模型可把任务委派给外部 Agent（A2A message/send）。
+
+        边界：外部 endpoint 跨租户 fail-closed，须 a2a-delegate-allowlist 策略放行；
+        每次委派落审计 a2a.delegate。transport 仅测试注入用。
+        """
+        from ..runtime.a2a_client import a2a_delegate_tool
+
+        return a2a_delegate_tool(transport)
+
     def connector_tools(self, name: str) -> list:
         """企业连接器工具（docs/04 §4）：按名称取启用连接器的端点工具。"""
         from sqlalchemy import select
