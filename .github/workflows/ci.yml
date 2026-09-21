@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
       - name: Sync dependencies
         run: uv sync --frozen --extra otel --extra docs --extra tokens
-      - name: Lint (ruff: F/E9 only)
+      - name: "Lint (ruff: F/E9 only)"
         run: uv run ruff check src/ tests/ --select F,E9
       - name: Migration dry-run (empty DB)
         run: |
@@ -88,3 +88,26 @@ jobs:
           context: eap/frontend
           push: false
           tags: eap-console:ci
+
+  docs-check:
+    # 文档/契约一致性检查（M32 · 任务组 P5 `ci-`）：
+    # 链接/裸引用/mermaid/快照 commit 由 scripts/check_docs.py（纯标准库）负责；
+    # workflow YAML 语法用 pyyaml 解析兜底（uv --with 临时依赖，不进项目依赖）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 快照头「代码 commit」需在完整历史中校验
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Validate workflow YAML syntax
+        run: |
+          uv run --no-project --with pyyaml python - <<'PY'
+          import pathlib, yaml
+          for p in sorted(pathlib.Path('.github/workflows').glob('*.y*ml')):
+              yaml.safe_load(p.read_text(encoding='utf-8'))
+              print(f'{p}: YAML OK')
+          PY
+      - name: Run docs/contract consistency check
+        run: uv run --no-project python scripts/check_docs.py

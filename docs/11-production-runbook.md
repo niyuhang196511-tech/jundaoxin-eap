@@ -92,3 +92,17 @@ docker compose start eap
 | 登录后 401 | IdP token 的 `tenant_id/tid` 声明未映射到租户：核对 claims 与 tenants 表 |
 | 定时任务不触发 | `task_schedules.next_run_at` 是否过期 + `enabled`；多副本已被抢占属正常 |
 | 任务长期 PENDING | 单副本形态确认 worker 存活（`/health`）；重启后启动恢复会自动重投 |
+
+## 7. 发布与晋升（M32）
+
+发布流水线 [.github/workflows/release.yml](../.github/workflows/release.yml)，两条路径：
+
+- **发布**：push `v*` tag（如 `v0.8.0`）→ 自动构建 [eap/Dockerfile](../eap/Dockerfile) 并推送
+  `ghcr.io/<owner>/<repo>/eap:<semver>`（去 `v` 前缀）与 `:latest`，同时生成 Release notes。
+- **晋升**：Actions → Release → `promote`（workflow_dispatch），输入 `image_tag`（如 `0.8.0`）与
+  `environment`（`dev|staging|prod`）→ 将已发布镜像重打 `:<environment>` 标签推送；镜像不可变，
+  环境间只挪标签不重构建。
+
+环境保护建议：仓库 Settings → Environments → `production` 配置必需审批人（required reviewers）
+与可部署分支限制；部署侧按 `:<environment>` 标签拉取。控制台镜像（eap/frontend）目前仅 CI 构建校验，
+自动发布待后续补齐。

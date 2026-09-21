@@ -1,0 +1,107 @@
+name: Release
+
+# 发布流水线（M32 · 任务组 P5 `ci-`）：
+#   release-image —— push v* tag 时构建 eap/Dockerfile 并推送 ghcr.io，自动生成 Release notes；
+#   promote       —— 手动触发（workflow_dispatch），把已发布镜像重打环境标签，用于环境晋升。
+#
+# 最小权限说明：顶层默认只读（contents: read），写权限在各 job 内按需声明；
+# promote 仅需 packages: write（推镜像），此处按流水线统一模板保留 contents: write，
+# 如需进一步收敛可降为 contents: read。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "已发布的镜像 tag（semver，不带 v 前缀，如 0.8.0）"
+        required: true
+      environment:
+        description: "晋升目标环境：dev | staging | prod"
+        required: true
+        default: "staging"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  release-image:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # 最小权限：packages:write 推镜像到 ghcr.io；contents:write 创建 Release notes
+    permissions:
+      packages: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract semver from tag (strip v prefix) & normalize image name
+        id: meta
+        # ghcr.io 镜像名要求全小写，这里规范化 <owner>/<repo>/eap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}/eap" | tr '[:upper:]' '[:lower:]')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push eap image
+        uses: docker/build-push-action@v6
+        with:
+          context: eap
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+
+      - name: Generate Release notes
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
+  promote:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # prod 晋升绑定 GitHub environment「production」：
+    # 可在仓库 Settings → Environments → production 配置必需审批人 / 分支限制等保护规则
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
+    # 最小权限：packages:write 推送重标签镜像（见文件头说明）
+    permissions:
+      packages: write
+      contents: write
+    steps:
+      - name: Validate inputs (environment enum / image_tag shape, anti-injection)
+        run: |
+          case "${{ inputs.environment }}" in
+            dev|staging|prod) ;;
+            *) echo "::error::environment 仅允许 dev|staging|prod"; exit 1 ;;
+          esac
+          case "${{ inputs.image_tag }}" in
+            ""|v*|*[!0-9A-Za-z._-]*) echo "::error::image_tag 须形如 0.8.0（不带 v 前缀）"; exit 1 ;;
+          esac
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag image with environment label (pull → tag → push)
+        run: |
+          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}/eap" | tr '[:upper:]' '[:lower:]')"
+          docker pull "${image}:${{ inputs.image_tag }}"
+          docker tag  "${image}:${{ inputs.image_tag }}" "${image}:${{ inputs.environment }}"
+          docker push "${image}:${{ inputs.environment }}"
+          echo "promoted ${image}:${{ inputs.image_tag }} → :${{ inputs.environment }}"
