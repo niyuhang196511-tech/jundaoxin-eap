@@ -161,11 +161,15 @@ class PlatformContext:
     async def run_loop(self, db, messages: list[dict], *, system: str, tools: list,
                        capability: str = "chat", prefer: str | None = None,
                        approval_gate=None, resume_messages: list[dict] | None = None,
-                       max_steps: int | None = None, response_schema: dict | None = None):
+                       max_steps: int | None = None, response_schema: dict | None = None,
+                       session_id: str | None = None):
         """完整 Agent Loop（工具调用循环 + HITL 审批门控，docs/03 §1）。
 
         工具清单按配置版本 whitelist 过滤；prefer/max_steps 未显式传入时应用配置版本覆盖；
         response_schema（v0.5）在最终回答后做结构化收尾（RunResult.data）。
+        session_id（M34/L7）提供会话语境时接入记忆压缩：开关
+        EAP_MEMORY_SUMMARY_COMPRESS 开启且消息超 max_context_chars 预算 → LLM 摘要
+        替代字符截断（摘要落 kind=summary 记忆）；未传 session_id 或开关关闭行为不变。
         """
         from ..runtime.agent_config import filter_tools
         from ..runtime.loop import run_loop
@@ -175,6 +179,12 @@ class PlatformContext:
         if prefer is None:
             prefer = overlay.get("model_prefer") or None
         steps = max_steps or overlay.get("max_steps") or self.settings.agent_max_steps
+        if session_id and self.settings.memory_summary_compress:
+            from ..runtime.context import compress_messages
+
+            messages = await compress_messages(
+                db, messages, self.settings.max_context_chars,
+                session_id=session_id, hub=self.hub)
         return await run_loop(
             self.hub, db, messages=messages, system=system, tools=tools,
             capability=capability, prefer=prefer, max_steps=steps,

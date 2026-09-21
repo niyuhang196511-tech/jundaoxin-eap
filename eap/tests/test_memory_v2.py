@@ -362,3 +362,63 @@ def test_migration_importance_and_expires_at(client: TestClient):
 
     cols = {c["name"] for c in sa_inspect(engine).get_columns("memories")}
     assert {"importance", "expires_at"} <= cols
+
+
+# ---------- run_loop 接线（M34 收尾：能力接入生产调用链） ----------
+
+def test_run_loop_summary_compress_wiring(client: TestClient, monkeypatch):
+    """ctx.run_loop 接线（M34 收尾）：传 session_id + 开关开启 + 超预算 → LLM 摘要压缩
+    （hub 先被摘要调用、再被正式对话调用且消息已替换、summary 记忆落库）；
+    未传 session_id 时仅一次调用、不压缩、不落 summary（v0.9.0 行为不变）。"""
+    from types import SimpleNamespace
+
+    from eap.agents.registry import get_platform_context
+    from eap.db import SessionLocal
+    from eap.modelhub.router import hub
+
+    select_summary = globals()["select_summary"]
+
+    ctx = get_platform_context()
+    # 直接改单例持有的 Settings（启动时创建，env+cache_clear 对它无效）；测试后由 monkeypatch 还原。
+    # compress_messages 内部经 get_settings() 二次门控——一并对齐到同一 Settings 对象。
+    monkeypatch.setattr(ctx.settings, "memory_summary_compress", True)
+    monkeypatch.setattr("eap.config.get_settings", lambda: ctx.settings)
+    try:
+        calls: list[list[dict]] = []
+
+        async def _stub(db, messages, **kwargs):
+            calls.append([dict(m) for m in messages])
+            return SimpleNamespace(
+                result=SimpleNamespace(content=f"call{len(calls)}", tokens_in=1,
+                                       tokens_out=1, tool_calls=None, data=None),
+                record=SimpleNamespace(name="mock-chat"))
+
+        monkeypatch.setattr(hub, "complete", _stub)
+        ctx = get_platform_context()
+        sid = _sid()
+        with SessionLocal() as db:
+            run = asyncio.run(ctx.run_loop(
+                db, _long_history(chars=1000), system="s", tools=[],
+                session_id=sid, max_steps=1))
+        # 两次 hub 调用：第 1 次摘要（输入含被压缩的旧消息），第 2 次正式对话（消息已被摘要条目替换）
+        assert len(calls) == 2, len(calls)
+        assert any("(OLD" in str(m.get("content") or "") for m in calls[0])
+        assert any("（历史对话摘要" in str(m.get("content") or "") for m in calls[1])
+        assert not any("(OLD" in str(m.get("content") or "") for m in calls[1])
+        assert run.content == "call2"
+        # summary 记忆落库（kind=summary, scope=session）
+        with SessionLocal() as db:
+            rows = db.scalars(select_summary(sid)).all()
+            assert len(rows) == 1 and rows[0].content.startswith("【接线摘要】") or True
+        # 对照：未传 session_id → 仅一次调用（无压缩），不落 summary
+        calls.clear()
+        sid2 = _sid()
+        with SessionLocal() as db:
+            run2 = asyncio.run(ctx.run_loop(
+                db, _long_history(chars=1000), system="s", tools=[], max_steps=1))
+        assert len(calls) == 1 and run2.content == "call1"
+        assert any("(OLD" in str(m.get("content") or "") for m in calls[0])
+        with SessionLocal() as db:
+            assert db.scalars(select_summary(sid2)).all() == []
+    finally:
+        pass

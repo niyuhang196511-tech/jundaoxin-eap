@@ -96,6 +96,7 @@ class OrderAgent(AgentApp):
                 tools=tools,
                 approval_gate=gate,
                 resume_messages=(resume or {}).get("messages"),
+                session_id=request.session_id,  # M34/L7：提供会话语境 → 超预算时 LLM 摘要压缩
             )
             return InvokeResult(
                 content=run.content,
