@@ -51,7 +51,7 @@
 | ⑤ | Knowledge / RAG | ✅ | 三路混合检索+Citation+可插拔组件+RAG 指标评测+MinerU/表格解析；文档级 ACL → L6 |
 | ⑥ | Workflow | ✅ | DSL v2 图执行+拖拽画布+interaction 节点+变量快照挂起续跑（`runtime/workflow.py`）；版本化/环境体系 → P3 |
 | ⑦ | Tool / MCP / Plugin | ✅ | Tool Governance（M24）+MCP Client/Server+插件热载+Extension Platform（M27–29） |
-| ⑧ | Connector | 🔶 | 连接器记录+端点工具化+风险映射+secret 加密已有（`runtime/connectors.py`）；SQL/OAuth/Trigger/Health → **任务组 C** |
+| ⑧ | Connector | ✅ | 端点工具化+风险映射+secret 加密 + SQL 只读连接器/OAuth2 凭证托管/Health Check/Trigger 联动（M31，`runtime/connectors.py`）；真实 IdP/PostgreSQL 运行时联调 → L3 |
 | ⑨ | Memory | ✅ | session/user 两层+租户过滤+保留期清理+批量遗忘/导出（M26，`runtime/memory.py`）；摘要压缩/组织层 → L7 |
 | ⑩ | Interaction / UI Schema | ✅ | 9 控件+任务/聊天双通道挂起恢复+动态选项级联+自定义 UI 组件 SDK MVP（M20/M29） |
 | ⑪ | Artifact / File | ✅ | 产物表+存储+预览/下载+过期惰性剔除+InvokeResult 引用（M21，`runtime/artifacts.py`） |
