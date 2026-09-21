@@ -127,3 +127,57 @@ export const conversationsApi = {
   remove: (sessionId: string) =>
     api<{ deleted: number }>('DELETE', `/api/v1/conversations/${encodeURIComponent(sessionId)}`),
 }
+
+/* ---------- Webhooks（对外 Webhook 推送，M31） ---------- */
+
+// type 别名（非 interface）：携带隐式索引签名，满足 Table 泛型 Record<string, unknown> 约束
+export type WebhookEndpoint = {
+  id: number
+  name: string
+  url: string
+  events: string[]
+  has_secret: boolean
+  tenant_id: number | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type WebhookDelivery = {
+  id: number
+  endpoint_id: number
+  event_id: string
+  event_type: string
+  attempts: number
+  status: string
+  response_status: number | null
+  error: string
+  next_retry_at: string | null
+  created_at: string
+}
+
+export type WebhookDeliveryPage = {
+  total: number
+  items: WebhookDelivery[]
+}
+
+export const webhooksApi = {
+  list: () => api<WebhookEndpoint[]>('GET', '/api/v1/webhooks'),
+  create: (body: { name: string; url: string; events: string[]; secret?: string | null; enabled?: boolean }) =>
+    api<WebhookEndpoint>('POST', '/api/v1/webhooks', body),
+  update: (id: number, body: Partial<{ url: string; events: string[]; secret: string | null; enabled: boolean }>) =>
+    api<WebhookEndpoint>('PATCH', `/api/v1/webhooks/${id}`, body),
+  remove: (id: number) => api<{ name: string; status: string }>('DELETE', `/api/v1/webhooks/${id}`),
+  deliveries: (params: { endpoint_id?: number; status?: string; limit?: number; offset?: number }) => {
+    const q = new URLSearchParams()
+    if (params.endpoint_id !== undefined) q.set('endpoint_id', String(params.endpoint_id))
+    if (params.status) q.set('status', params.status)
+    q.set('limit', String(params.limit ?? 50))
+    q.set('offset', String(params.offset ?? 0))
+    return api<WebhookDeliveryPage>('GET', `/api/v1/webhooks/deliveries?${q.toString()}`)
+  },
+  redeliver: (id: number) =>
+    api<{ id: number; status: string; attempts: number }>('POST', `/api/v1/webhooks/deliveries/${id}/redeliver`),
+  test: (id: number) =>
+    api<{ endpoint: string; event_id: string; delivery_id: number }>('POST', `/api/v1/webhooks/${id}/test`, {}),
+}

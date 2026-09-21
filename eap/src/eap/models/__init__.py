@@ -280,14 +280,17 @@ class ConnectorRecord(Base):
 
     - kind=rest：base_url + endpoint path 经 httpx 调用（管理端登记，超时熔断）
     - kind=mock-erp：内置离线演示 ERP（库存查询/下单），测试与开发用
-    - endpoints：[{tool_name, method, path, description, params, requires_approval}]
+    - kind=sql：只读 SQL 查询（M31 任务组 C），config 存 {"dialect", "database"}
+    - endpoints：[{tool_name, method, path, description, params, requires_approval}]；
+      sql 类型为 [{name, tool_name, query, params, description}]
+    - OAuth2 凭证托管（M31 任务组 C）：secret/access/refresh 均 Fernet 加密落库
     """
 
     __tablename__ = "connectors"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    kind: Mapped[str] = mapped_column(String(16), default="rest")  # rest | mock-erp
+    kind: Mapped[str] = mapped_column(String(16), default="rest")  # rest | mock-erp | sql
     description: Mapped[str] = mapped_column(String(256), default="")
     base_url: Mapped[str] = mapped_column(String(256), default="")
     header_name: Mapped[str] = mapped_column(String(64), default="Authorization")
@@ -296,6 +299,20 @@ class ConnectorRecord(Base):
     status: Mapped[str] = mapped_column(String(16), default="registered")  # registered | verified | unreachable
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    # 类型专属配置（M31 任务组 C）：sql → {"dialect": "sqlite", "database": "<path>"}
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # OAuth2 凭证托管（M31 任务组 C）：client_credentials / authorization_code / refresh_token
+    oauth_client_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    oauth_client_secret_enc: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    oauth_token_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    oauth_access_token_enc: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    oauth_refresh_token_enc: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    oauth_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    oauth_scopes: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Health Check（M31 任务组 C）：POST /{name}/health 探测结果落库
+    last_health_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_health_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class SkillRecord(Base):
@@ -725,6 +742,55 @@ class IMOutboundLogRecord(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)  # 已尝试次数（含首投）
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # pending 的下次到期时刻
     status: Mapped[str] = mapped_column(String(8), default="pending", index=True)  # pending | done | dead
+    error: Mapped[str] = mapped_column(String(512), default="")  # 最近一次失败原因（done 时清空）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class WebhookEndpointRecord(Base):
+    """对外 Webhook 端点（docs/unfinished §三十五，M31 任务组 B）：事件 → HMAC 签名推送。
+
+    - events：订阅 pattern 列表（JSON 字符串存库，如 ["agent.run.completed", "task.*"]，
+      fnmatch 通配语义，与事件总线订阅一致）
+    - secret：Fernet 静态加密存储（security_crypto，M8/M26 同款）；推送签名头
+      X-EAP-Signature = hex(HMAC-SHA256(raw_body, secret))，与入站 webhook（M30）对称
+    - 推送引擎见 runtime/webhooks.py；端点 CRUD 后经 engine.reload() 即时生效
+    """
+
+    __tablename__ = "webhook_endpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    url: Mapped[str] = mapped_column(String(512))  # http(s) 回调地址
+    secret: Mapped[str | None] = mapped_column(String(512), nullable=True)  # Fernet 密文（enc1: 前缀）
+    events: Mapped[str] = mapped_column(Text, default="[]")  # JSON 字符串：订阅 pattern 列表
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class WebhookDeliveryRecord(Base):
+    """Webhook 投递记录 / 重试队列（M31）：每端点每事件一条，成功失败均落库。
+
+    - status：pending（等待重试）| done（2xx 成功）| dead（超限死信，可查询可手工重投）
+    - payload：实际推送的事件 JSON（{id,type,tenant_id,data,ts} 原样 + meta 元数据）；
+      重投按端点当前 URL/secret 重新签名发送
+    - 重试：首投失败落 pending（attempts=1），由 runtime/webhooks.py 的进程内 asyncio
+      循环按指数退避（EAP_WEBHOOK_* 可配）重投，超过上限置 dead（死信可见）
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    endpoint_id: Mapped[int] = mapped_column(ForeignKey("webhook_endpoints.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # 已尝试次数（含首投）
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # pending 的下次到期时刻
+    status: Mapped[str] = mapped_column(String(8), default="pending", index=True)  # pending | done | dead
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 最近一次 HTTP 响应码
     error: Mapped[str] = mapped_column(String(512), default="")  # 最近一次失败原因（done 时清空）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

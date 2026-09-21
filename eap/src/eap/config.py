@@ -100,6 +100,27 @@ class Settings(BaseSettings):
     im_retry_max_seconds: float = 300.0
     im_retry_poll_seconds: float = 5.0
 
+    # 对外 Webhook 推送（M31 任务组 B）：进程内 asyncio 指数退避（无 Redis 依赖）。
+    # 退避间隔 = base * 2^(attempts-1)，封顶 max_seconds；timeout_s 为单次 HTTP POST 超时
+    webhook_max_attempts: int = 5
+    webhook_base_seconds: float = 2.0
+    webhook_max_seconds: float = 300.0
+    webhook_timeout_s: float = 10.0
+
+    # API Gateway（M31 任务组 F）：全局防护默认关闭（0），熔断/幂等按需激活；
+    # 幂等无需总开关——仅带 Idempotency-Key 头的写请求才进入幂等通道
+    gateway_max_concurrency: int = 0  # 每凭证在途请求上限（0=关闭）
+    gateway_max_body_bytes: int = 10 * 1024 * 1024  # 请求体上限字节（0=关闭；默认 10MB）
+    gateway_timeout_s: float = 0.0  # 非流式请求超时秒（0=关闭；流式路径始终豁免）
+    gateway_cb_window_s: float = 60.0  # 熔断滑动窗口（秒）
+    gateway_cb_rate: float = 0.5  # 熔断失败率阈值（窗口内失败占比 ≥ 该值跳闸）
+    gateway_cb_min_samples: int = 5  # 熔断最小样本数（窗口样本不足不跳闸）
+    gateway_cb_cooldown_s: float = 30.0  # open → half-open 冷却（秒）
+    gateway_idempotency_ttl_s: int = 300  # 幂等键结果保留时长（秒）
+
+    # SQL 连接器（M31 任务组 C）：单次只读查询返回行数上限（超出截断并标记 truncated=true）
+    connector_sql_max_rows: int = 200
+
 
 @lru_cache
 def get_settings() -> Settings:

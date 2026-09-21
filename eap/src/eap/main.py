@@ -37,6 +37,7 @@ from .api.v1 import releases as api_releases
 from .api.v1 import skills as api_skills
 from .api.v1 import tasks as api_tasks
 from .api.v1 import triggers as api_triggers
+from .api.v1 import webhooks as api_webhooks
 from .api.v1 import workflows as api_workflows
 from .db import init_db
 from .config import get_settings
@@ -45,6 +46,7 @@ from .observability.middleware import TraceMiddleware
 from .runtime.events import bus
 from .runtime.tasks import create_task_engine
 from .runtime.triggers import TriggerEngine
+from .runtime.webhooks import WebhookEngine
 
 
 @asynccontextmanager
@@ -67,8 +69,12 @@ async def lifespan(app: FastAPI):
     app.state.trigger_engine = TriggerEngine(app.state.task_engine)
     await bus.start()
     await app.state.trigger_engine.start()
+    # 对外 Webhook 推送（M31）：订阅总线事件 → HMAC 签名推送（端点 CRUD 后经 reload 即时生效）
+    app.state.webhook_engine = WebhookEngine()
+    await app.state.webhook_engine.start()
     async with app.state.mcp.session_manager.run():  # MCP Streamable HTTP 会话管理
         yield
+    await app.state.webhook_engine.stop()
     await app.state.trigger_engine.stop()
     await bus.stop()
     await registry_sync.stop_subscriber()
@@ -94,6 +100,13 @@ def create_app() -> FastAPI:
         app.add_middleware(
             CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
         )
+    # API Gateway（M31 任务组 F）：add_middleware 为 LIFO（后注册者在外层），
+    # 故逆序注册 → 请求流经顺序 = RequestSize(413) → Concurrency(429/超时504) → Idempotency(重放)
+    from .observability.gateway import ConcurrencyLimitMiddleware, IdempotencyMiddleware, RequestSizeLimitMiddleware
+
+    app.add_middleware(IdempotencyMiddleware)
+    app.add_middleware(ConcurrencyLimitMiddleware)
+    app.add_middleware(RequestSizeLimitMiddleware)
     app.include_router(api_chat.router)
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)
@@ -120,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(api_tasks.router)
     app.include_router(api_triggers.router)
     app.include_router(api_triggers.public_router)  # 入站 webhook（公开端点，签名即凭证）
+    app.include_router(api_webhooks.router)  # 对外 Webhook 推送（M31：端点/投递/重投/试投）
     app.include_router(api_skills.router)
     app.include_router(api_workflows.router)
     app.include_router(api_prompts.router)
