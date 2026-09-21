@@ -24,11 +24,16 @@ def test_schedule_lifecycle(client):
     assert r.status_code == 200, r.text
     assert r.json()["enabled"] is True
 
-    # 等调度器跑 2-3 轮 → 产生已完成的周期任务
-    time.sleep(3)
-    tasks = client.get("/api/v1/tasks", headers=AUTH,
-                       params={"state": "COMPLETED"}).json()
-    cron_tasks = [t for t in tasks if t["payload"].get("input") == "定时冒烟"]
+    # 等调度器跑 2-3 轮 → 产生已完成的周期任务（全量负载下引擎可能延迟：截止时间轮询，窗口 25s）
+    deadline = time.time() + 25
+    cron_tasks: list = []
+    while time.time() < deadline:
+        tasks = client.get("/api/v1/tasks", headers=AUTH,
+                           params={"state": "COMPLETED"}).json()
+        cron_tasks = [t for t in tasks if t["payload"].get("input") == "定时冒烟"]
+        if len(cron_tasks) >= 2:
+            break
+        time.sleep(0.5)
     assert len(cron_tasks) >= 2, len(cron_tasks)
     assert all(t["state"] == "COMPLETED" for t in cron_tasks)
 
