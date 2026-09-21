@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     judge_model: str = ""  # LLM-as-Judge 使用的模型（空 = 按 chat 能力路由）
     chat_rate_limit: int = 120  # 每分钟对话调用上限（/v1/chat 与 agents invocations，按凭证）
     memory_retention_days: int = 180  # 记忆保留期（天），超期可由 /memory/purge 清理
+    # 记忆摘要压缩（M34/L7）：开启后会话消息超预算时经 LLM 生成摘要替换旧消息（默认 off 保持字符截断）
+    memory_summary_compress: bool = False
 
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True

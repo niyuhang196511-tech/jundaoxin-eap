@@ -1,7 +1,9 @@
-"""记忆 API：长期记忆写入 / 列表 / 召回 / 遗忘 / 治理（docs/03 §4 + v0.6-⑦）。
+"""记忆 API：长期记忆写入 / 列表 / 召回 / 遗忘 / 治理（docs/03 §4 + v0.6-⑦ + M34/L7）。
 
 租户过滤：JWT 通道按租户过滤与归属；API Key 通道 = 平台管理员语义（可跨租户管理）。
 数据权利：按用户批量遗忘与导出（admin）。
+M34/L7：scope 分层扩展（session|user|agent|org）、importance 权重、ttl_days TTL；
+不传新字段行为与 v0.9.0 一致（无破坏性变更）。
 """
 
 from __future__ import annotations
@@ -21,12 +23,14 @@ router = fastapi.APIRouter(prefix="/api/v1/memory",
 
 
 class MemoryWrite(BaseModel):
-    scope: str = "user"  # user | session
+    scope: str = "user"  # session | user | agent | org（M34/L7）
     content: str = Field(min_length=1)
     kind: str = "fact"  # fact | preference | summary
     user_id: str | None = None
     session_id: str | None = None
     agent: str = ""
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)  # 重要性权重（M34/L7）
+    ttl_days: int | None = Field(default=None, ge=1)  # TTL（天），转 expires_at（M34/L7）
 
 
 class MemoryRecall(BaseModel):
@@ -34,6 +38,9 @@ class MemoryRecall(BaseModel):
     user_id: str | None = None
     session_id: str | None = None
     top_k: int = Field(default=3, ge=1, le=10)
+    scope: str | None = None  # session|user|agent|org，支持逗号组合（M34/L7）
+    agent: str | None = None  # scope=agent 时必带
+    include_expired: bool = False  # 默认过滤已过期（M34/L7）
 
 
 def _tenant_of(request: fastapi.Request) -> int | None:
@@ -45,32 +52,56 @@ def _tenant_of(request: fastapi.Request) -> int | None:
 
 @router.post("")
 def remember(body: MemoryWrite, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    # scope 语义校验（M34/L7）：agent 层必带 agent；org 层为租户内共享，不允许挂 user/session
     if body.scope == "user" and not body.user_id:
         raise fastapi.HTTPException(status_code=400, detail="EAP-4000 用户级记忆需要 user_id")
     if body.scope == "session" and not body.session_id:
         raise fastapi.HTTPException(status_code=400, detail="EAP-4000 会话级记忆需要 session_id")
-    record = memory_service.remember(
-        db, scope=body.scope, content=body.content, kind=body.kind,
-        user_id=body.user_id, session_id=body.session_id, agent=body.agent,
-        tenant_id=_tenant_of(request),
-    )
+    if body.scope == "agent" and not body.agent:
+        raise fastapi.HTTPException(status_code=400, detail="EAP-4000 智能体级记忆需要 agent")
+    if body.scope == "org" and (body.user_id or body.session_id):
+        raise fastapi.HTTPException(status_code=400,
+                                    detail="EAP-4000 组织级记忆为租户内共享，不应携带 user_id/session_id")
+    try:
+        record = memory_service.remember(
+            db, scope=body.scope, content=body.content, kind=body.kind,
+            user_id=body.user_id, session_id=body.session_id, agent=body.agent,
+            tenant_id=_tenant_of(request),
+            importance=body.importance, ttl_days=body.ttl_days,
+        )
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
     db.commit()
-    return {"id": record.id, "scope": record.scope, "kind": record.kind}
+    return {"id": record.id, "scope": record.scope, "kind": record.kind,
+            "importance": record.importance,
+            "expires_at": str(record.expires_at) if record.expires_at else None}
 
 
 @router.get("")
 def list_memories(user_id: str | None = None, session_id: str | None = None,
-                  scope: str | None = None, request: fastapi.Request = None,
+                  scope: str | None = None, agent: str | None = None,
+                  importance_min: float | None = None, include_expired: bool = False,
+                  request: fastapi.Request = None,
                   db: Session = fastapi.Depends(get_db)):
-    return memory_service.list(db, user_id=user_id, session_id=session_id, scope=scope,
-                               tenant_id=_tenant_of(request))
+    """记忆列表（M34/L7：scope/agent/importance 过滤，默认排除已过期）。"""
+    try:
+        return memory_service.list(db, user_id=user_id, session_id=session_id, scope=scope,
+                                   agent=agent, importance_min=importance_min,
+                                   include_expired=include_expired,
+                                   tenant_id=_tenant_of(request))
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
 
 
 @router.post("/recall")
 def recall(body: MemoryRecall, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
-    return {"hits": memory_service.recall(
-        db, body.query, user_id=body.user_id, session_id=body.session_id, top_k=body.top_k,
-        tenant_id=_tenant_of(request))}
+    try:
+        return {"hits": memory_service.recall(
+            db, body.query, user_id=body.user_id, session_id=body.session_id, top_k=body.top_k,
+            scope=body.scope, agent=body.agent, include_expired=body.include_expired,
+            tenant_id=_tenant_of(request))}
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 {e}") from e
 
 
 @router.delete("/{memory_id}")
@@ -98,7 +129,8 @@ def export_user(user_id: str, request: fastapi.Request, db: Session = fastapi.De
 
 @router.post("/purge", dependencies=[fastapi.Depends(require_admin)])
 def purge_expired(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
-    """保留期清理：删除超过 EAP_MEMORY_RETENTION_DAYS（默认 180）的记忆。"""
+    """保留期清理：删除超过 EAP_MEMORY_RETENTION_DAYS（默认 180）的记忆，
+    并同时删除 TTL 已到期（expires_at < now）的记忆（M34/L7）。"""
     retention = get_settings().memory_retention_days
     count = memory_service.purge_expired(db, retention)
     audit.record("memory.purge", actor=audit.actor_of(request), target="*",

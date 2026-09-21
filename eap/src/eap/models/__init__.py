@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -330,7 +330,9 @@ class SkillRecord(Base):
     """技能注册表（docs/04 §3）：SKILL.md 的结构化存储。
 
     渐进披露：L1 = name+description（目录，零成本）；L2 = instructions 全文（按需注入）。
-    scripts/references/assets 与签名打包在 M2 技能市场接入。
+    附件（M34，L5 工程部分）：assets 列存签名清单 [{path, size, sha256}]（随包签名
+    覆盖，见 runtime/skill_pkg.py），文件本体落盘 EAP_MEDIA_DIR/skills/<name>/
+    （runtime/skill_files.py）；scripts/ 执行属 M33 沙箱 script_tool 范畴。
     """
 
     __tablename__ = "skills"
@@ -341,6 +343,7 @@ class SkillRecord(Base):
     description: Mapped[str] = mapped_column(String(256), default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
     permissions: Mapped[list] = mapped_column(JSON, default=list)
+    assets: Mapped[list] = mapped_column(JSON, default=list)  # M34 附件签名清单
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -581,13 +584,19 @@ class MCPServerRecord(Base):
 
 
 class MemoryRecord(Base):
-    """记忆体系（docs/03 §4）：会话历史 / 长期记忆 / 摘要，可检索、可遗忘。"""
+    """记忆体系（docs/03 §4）：会话历史 / 长期记忆 / 摘要，可检索、可遗忘。
+
+    scope 分层（M34/L7）：session（会话级）| user（用户级）| agent（智能体长期记忆，
+    按 agent 列过滤）| org（租户内组织共享，session_id/user_id 为空）。
+    importance：0~1 重要性权重（默认 0.5），召回打分加权用。
+    expires_at：TTL 过期时间（可空），recall/list 默认过滤已过期，purge 一并清理。
+    """
 
     __tablename__ = "memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(Integer, default=1, index=True)
-    scope: Mapped[str] = mapped_column(String(16), index=True)  # session | user
+    scope: Mapped[str] = mapped_column(String(16), index=True)  # session | user | agent | org
     kind: Mapped[str] = mapped_column(String(16), default="fact")  # message | fact | preference | summary
     session_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
@@ -595,6 +604,8 @@ class MemoryRecord(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list] = mapped_column(JSON, default=list)
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
