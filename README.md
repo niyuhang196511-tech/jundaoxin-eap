@@ -43,6 +43,8 @@ cd frontend && pnpm install && pnpm dev   # 控制台 → http://localhost:3000
 
 ## 下一步
 
-- **M1 收尾**（见 docs/09）：嵌入外链 JS SDK + EmbedToken、Workflow 画布、Redis Streams 任务队列
-- **M2**：Agent Runtime 完整版（Checkpoint/HITL）、MCP 全栈、Skill Registry、Prompt/评测/成本中心、Harness Beta
-- 在会话中直接说"继续实现 XX"即可推进对应模块
+> 进度账本：[docs/progress-plan.md](docs/progress-plan.md)（状态 / 剩余工作 / DoD / 并行分组，完成一项回写一项）。
+
+- **当前主线 v0.8 企业集成**：Event 事件中心（底座）、IM 深化、A2A 深化 + Agent Discovery → Webhook 推送、Connector 深化、API Gateway
+- **次线 v0.9 生产化**：分布式 Worker、沙箱、环境体系 + Workflow 版本化、HA/DR、CI/CD
+- 在会话中直接说"继续实现 XX"即可按账本推进对应任务组
