@@ -467,6 +467,16 @@ class TaskEngine:
             incr("eap_tasks_total", {"state": state})
         except Exception:
             pass
+        # 事件中心（M30）：任务终态事件（COMPLETED/FAILED），发射失败不阻断任务引擎
+        if state in ("COMPLETED", "FAILED"):
+            try:
+                from .events import emit_event
+
+                emit_event(f"task.{'completed' if state == 'COMPLETED' else 'failed'}",
+                           data={"task_id": task_id, "type": task.type, "state": state,
+                                 "error": (result or {}).get("error", "")})
+            except Exception:
+                pass
 
     # ---------- 内置处理器 ----------
 

@@ -84,6 +84,14 @@ def ingest_document(name: str, body: DocIngest, db: Session = fastapi.Depends(ge
     kb = _get_kb(db, name)
     doc = kb_svc.ingest_text(db, kb, body.title, body.text, source=body.source)
     db.commit()
+    # 事件中心（M30）：文档摄入完成事件（发射失败不阻断摄入）
+    try:
+        from ...runtime.events import emit_event
+
+        emit_event("kb.document.indexed",
+                   data={"kb": kb.name, "document_id": doc.id, "title": doc.title})
+    except Exception:
+        pass
     return {"document_id": doc.id, "title": doc.title, "kb": kb.name}
 
 

@@ -148,6 +148,15 @@ async def invoke(
         tokens_in=resp.usage.get("tokens_in", 0), tokens_out=resp.usage.get("tokens_out", 0),
         latency_ms=int((_time.monotonic() - t0) * 1000),
     )
+    # 事件中心（M30）：agent 运行完成事件（发射失败不阻断调用）
+    try:
+        from ...runtime.events import emit_event
+
+        emit_event("agent.run.completed", tenant_id=getattr(request.state, "tenant_id", None),
+                   data={"agent": name, "status": "ok",
+                         "elapsed_ms": int((_time.monotonic() - t0) * 1000)})
+    except Exception:
+        pass
     return resp
 
 
@@ -215,6 +224,15 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
         record_usage(trace_id, getattr(request.state, "tenant_id", 0), kind="agent", model=name,
                      tokens_in=0, tokens_out=max(1, tokens_out // 4),
                      latency_ms=int((_time.monotonic() - t0) * 1000))
+        # 事件中心（M30）：流式调用完成事件（发射失败不阻断流）
+        try:
+            from ...runtime.events import emit_event
+
+            emit_event("agent.run.completed", tenant_id=getattr(request.state, "tenant_id", None),
+                       data={"agent": name, "status": "ok", "stream": True,
+                             "elapsed_ms": int((_time.monotonic() - t0) * 1000)})
+        except Exception:
+            pass
     except Exception as e:
         yield send("error", {"message": str(e)})
     finally:

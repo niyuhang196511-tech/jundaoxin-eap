@@ -13,7 +13,20 @@ from sqlalchemy.orm import Session
 from .agents.registry import registry
 from .db import SessionLocal
 from .models import WorkflowRecord, WorkflowRunRecord
+from .runtime.events import emit_event
 from .runtime.workflow import WorkflowSpec, create_workflow_agent_class, execute_workflow
+
+
+def _emit_run_finished(run_id: str, name: str, status: str, started: float,
+                       error: str = "") -> None:
+    """事件中心（M30）：工作流运行结束事件（发射失败不阻断运行记录落库）。"""
+    try:
+        emit_event("workflow.run.finished",
+                   data={"run_id": run_id, "workflow": name, "status": status,
+                         "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                         "error": error})
+    except Exception:
+        pass
 
 
 async def create_and_register(db: Session, spec: WorkflowSpec) -> WorkflowRecord:
@@ -124,6 +137,7 @@ async def _run_with_id(name: str, input_text: str, run_id: str) -> None:
         _flush_run(run_id, status="succeeded", output=str(result.get("output", "")), error="",
                    node_runs=[dict(nr) for nr in node_runs],
                    elapsed_ms=int((time.perf_counter() - started) * 1000))
+        _emit_run_finished(run_id, name, "succeeded", started)
     except WorkflowSuspended as sus:
         # 交互引擎（v0.5-⑤）：挂起 → waiting_input + 变量快照，submit 端点续跑；
         # 同时落 interactions 表（复用交互引擎的提交/前端渲染链路）
@@ -143,6 +157,7 @@ async def _run_with_id(name: str, input_text: str, run_id: str) -> None:
         _flush_run(run_id, status="failed", output="", error=str(e)[:4000],
                    node_runs=[dict(nr) for nr in node_runs],
                    elapsed_ms=int((time.perf_counter() - started) * 1000))
+        _emit_run_finished(run_id, name, "failed", started, error=str(e)[:200])
 
 
 async def resume_run_async(name: str, run_id: str, values: dict) -> None:
@@ -189,6 +204,7 @@ async def resume_run_async(name: str, run_id: str, values: dict) -> None:
         _flush_run(run_id, status="succeeded", output=str(result.get("output", "")), error="",
                    node_runs=[dict(nr) for nr in node_runs],
                    elapsed_ms=int((time.perf_counter() - started) * 1000))
+        _emit_run_finished(run_id, name, "succeeded", started)
     except WorkflowSuspended as sus:
         # 连续多个交互节点：再次挂起
         _flush_run(run_id, status="waiting_input", output=sus.schema.get("title", ""), error="",
@@ -207,6 +223,7 @@ async def resume_run_async(name: str, run_id: str, values: dict) -> None:
         _flush_run(run_id, status="failed", output="", error=str(e)[:4000],
                    node_runs=[dict(nr) for nr in node_runs],
                    elapsed_ms=int((time.perf_counter() - started) * 1000))
+        _emit_run_finished(run_id, name, "failed", started, error=str(e)[:200])
 
 
 def get_spec(name: str) -> WorkflowSpec:

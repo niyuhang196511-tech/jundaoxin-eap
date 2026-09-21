@@ -36,12 +36,15 @@ from .api.v1 import policies as api_policies
 from .api.v1 import releases as api_releases
 from .api.v1 import skills as api_skills
 from .api.v1 import tasks as api_tasks
+from .api.v1 import triggers as api_triggers
 from .api.v1 import workflows as api_workflows
 from .db import init_db
 from .config import get_settings
 from .mcp_server import create_mcp_server
 from .observability.middleware import TraceMiddleware
+from .runtime.events import bus
 from .runtime.tasks import create_task_engine
+from .runtime.triggers import TriggerEngine
 
 
 @asynccontextmanager
@@ -60,8 +63,14 @@ async def lifespan(app: FastAPI):
     load_plugins()  # 扩展开发体系：插件目录加载（单插件失败不阻断启动）
     registry_sync.start_subscriber(registry.apply_remote_event)  # M10：跨副本管理操作广播
     await app.state.task_engine.start(workers=2)
+    # 事件中心（M30）：先起事件总线，触发引擎再订阅（规则 CRUD 后经 reload 即时生效）
+    app.state.trigger_engine = TriggerEngine(app.state.task_engine)
+    await bus.start()
+    await app.state.trigger_engine.start()
     async with app.state.mcp.session_manager.run():  # MCP Streamable HTTP 会话管理
         yield
+    await app.state.trigger_engine.stop()
+    await bus.stop()
     await registry_sync.stop_subscriber()
     await app.state.task_engine.stop()
     for agent in registry.all():
@@ -109,6 +118,8 @@ def create_app() -> FastAPI:
     app.include_router(api_embed.router)
     app.include_router(api_im.router)
     app.include_router(api_tasks.router)
+    app.include_router(api_triggers.router)
+    app.include_router(api_triggers.public_router)  # 入站 webhook（公开端点，签名即凭证）
     app.include_router(api_skills.router)
     app.include_router(api_workflows.router)
     app.include_router(api_prompts.router)

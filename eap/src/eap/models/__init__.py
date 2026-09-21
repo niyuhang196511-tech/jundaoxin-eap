@@ -254,6 +254,9 @@ class IMChannelRecord(Base):
     - 推送：群机器人 Webhook（三平台格式不同，runtime/im.py 统一封装）
     - 接入：回调端点 /api/v1/im/{platform}/{name}/webhook → 路由到绑定智能体，回复推回群
     - secret：飞书=Verification Token；钉钉=加签密钥；企业微信用 extra={"token","aes_key"}
+    - app_id/app_secret_enc：应用级凭据（M30 任务组 D）——飞书 im/v1/messages 应用 API
+      使用；钉钉/企微当前走机器人 webhook，凭据列为后续应用消息预留。secret 复用
+      M26 Fernet 静态加密（security_crypto，enc1: 前缀，明文兼容）
     """
 
     __tablename__ = "im_channels"
@@ -264,6 +267,8 @@ class IMChannelRecord(Base):
     agent: Mapped[str] = mapped_column(String(64))  # 接入消息路由到的智能体
     webhook_url: Mapped[str] = mapped_column(String(512), default="")  # 群机器人推送地址
     secret: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    app_id: Mapped[str] = mapped_column(String(128), default="")  # 应用级凭据（飞书 app_id 等）
+    app_secret_enc: Mapped[str | None] = mapped_column(String(256), nullable=True)  # Fernet 密文
     extra: Mapped[dict] = mapped_column(JSON, default=dict)  # 企业微信: {"token","aes_key"}
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[str] = mapped_column(String(128), default="")
@@ -665,3 +670,61 @@ class ArtifactRecord(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     trace_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class TriggerRuleRecord(Base):
+    """触发规则（docs/unfinished §二十八，M30 事件中心）：event / cron / webhook → 目标 agent / workflow。
+
+    - source=event：event_type 订阅事件总线（支持 task.* 通配），match 为 data 顶层简单等值过滤
+    - source=cron：5 段 cron 表达式（croniter 推算，runtime/triggers.py）
+    - source=webhook：POST /api/v1/triggers/webhook/{id}，X-EAP-Signature = HMAC-SHA256(raw_body, secret)
+    - secret：Fernet 静态加密存储（security_crypto，未配置 EAP_SECRET_KEY 时明文兼容）
+    - input_mode=payload：触发数据透传为目标输入；template：{{var}} 变量替换
+    - min_interval_s：同规则两次触发的最小间隔（限流防风暴，超限丢弃 + 审计）
+    """
+
+    __tablename__ = "trigger_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(16), default="event")  # event | cron | webhook
+    event_type: Mapped[str | None] = mapped_column(String(128), nullable=True)  # source=event 必填
+    match: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 等值过滤 {key: value}
+    cron: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 5 段 cron（UTC）
+    secret: Mapped[str | None] = mapped_column(String(512), nullable=True)  # Fernet 密文（enc1: 前缀）
+    target_type: Mapped[str] = mapped_column(String(16), default="agent")  # agent | workflow
+    target_name: Mapped[str] = mapped_column(String(64))
+    input_mode: Mapped[str] = mapped_column(String(16), default="payload")  # payload | template
+    template: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {{var}} 变量替换模板
+    min_interval_s: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class IMOutboundLogRecord(Base):
+    """IM 投递日志 / 回调重试队列（M30 任务组 D）：出站卡片与入站回调事件的投递记录。
+
+    - direction：out=出站卡片（payload 为平台无关卡片 dict）；in=入站回调事件重投
+      （payload 含 text/sender/reply_url，重投走绑定智能体，见 runtime/im_outbound.py）
+    - event_key：幂等键——同 channel_id+event_key 已 done/pending 的重复投递直接跳过
+      （IM 平台至少一次投递语义的幂等消费）；唯一约束兜底并发
+    - 重试：首投失败落 pending（attempts=1），由 runtime/im_outbound.py 的 asyncio
+      循环按指数退避（EAP_IM_RETRY_* 可配）重投，超过上限置 dead（死信可见）
+    """
+
+    __tablename__ = "im_outbound_logs"
+    __table_args__ = (UniqueConstraint("channel_id", "event_key", name="uq_im_outbound_channel_event"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(Integer, index=True)  # im_channels.id（跨库不加 FK）
+    direction: Mapped[str] = mapped_column(String(4), default="out")  # in | out
+    event_key: Mapped[str] = mapped_column(String(128), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # 已尝试次数（含首投）
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # pending 的下次到期时刻
+    status: Mapped[str] = mapped_column(String(8), default="pending", index=True)  # pending | done | dead
+    error: Mapped[str] = mapped_column(String(512), default="")  # 最近一次失败原因（done 时清空）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
