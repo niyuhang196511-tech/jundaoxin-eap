@@ -1,7 +1,9 @@
-"""扩展脚手架：python -m eap.scaffold <agent|tool|rag|mcp> <name> [--dir plugins/my-plugin]
+"""扩展脚手架：python -m eap.scaffold <agent|tool|rag|mcp|skill> <name> [--dir plugins/my-plugin]
 
 生成可直接运行的模板项目，帮助手写扩展快速起步。
 模板用 {name}/{NAME} 占位（str.replace 注入，避免 str.format 花括号转义问题）。
+skill 模板（M34）生成 SKILL.md + scripts/demo.py + assets/README.md，
+可经 skill_pkg.sign_bundle(files=...) 打包后走 /api/v1/skills/import 导入。
 """
 
 from __future__ import annotations
@@ -168,6 +170,50 @@ class MyAgent(AgentApp):
             )
 ''',
     },
+    # 手写技能：SKILL.md + scripts/assets 附件示例（M34 附件包格式，跟随技能市场惯例）
+    "skill": {
+        "SKILL.md": '''---
+name: "{name}"
+version: "1.0.0"
+description: "{NAME}：手写技能示例"
+permissions: []
+---
+
+## 使用说明
+
+1. 先阅读 assets/README.md 了解附件约定（白名单扩展、大小/数量上限）。
+2. 需要脚本时运行 scripts/demo.py——技能包只分发不执行，运行一律经
+   M33 沙箱 script_tool（导入后由平台按需调用，本文件不会被自动运行）。
+''',
+        "scripts/demo.py": '''"""{name} 示例脚本：stdin JSON → 处理 → stdout JSON。
+
+技能包中的脚本仅随包分发（M34：逐文件 sha256 清单随签名覆盖，导入端逐一复核），
+执行属 M33 沙箱 script_tool 范畴，平台不会自动运行本文件。替换为你的业务逻辑。
+"""
+
+import json
+import sys
+
+
+def main() -> None:
+    """读取 stdin JSON，回显并附提示（确定性示例，便于联调）。"""
+    raw = sys.stdin.read() or "{}"
+    data = json.loads(raw)
+    json.dump({"echo": data, "hint": "替换为你的业务逻辑"}, sys.stdout, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
+''',
+        "assets/README.md": '''# {NAME} 技能附件
+
+- 本目录存放技能运行所需的静态资源；允许的扩展名：
+  .png / .jpg / .svg / .csv / .json / .md / .txt（EAP-8104 白名单）。
+- 打包时逐文件计算 sha256 写入签名清单（随包签名覆盖），导入端逐一复核，
+  清单与实际不符即拒绝（EAP-8104）。
+- 上限：单文件 ≤1MB、总文件数 ≤10、总量 ≤5MB。替换为你的资源文件。
+''',
+    },
 }
 
 
@@ -184,7 +230,7 @@ def pack(source_dir: str, out_path: str) -> str:
 
 def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
     if kind not in TEMPLATES:
-        raise SystemExit(f"未知扩展类型 {kind}（可选：agent / tool / rag / mcp）")
+        raise SystemExit(f"未知扩展类型 {kind}（可选：agent / tool / rag / mcp / skill）")
     if not name.replace("_", "").replace("-", "").isalnum():
         raise SystemExit("名称仅允许字母/数字/连字符/下划线")
     base = Path(base_dir).resolve()
@@ -197,21 +243,25 @@ def scaffold(kind: str, name: str, base_dir: str) -> list[str]:
     written = []
     for filename, template in TEMPLATES[kind].items():
         path = target / filename
+        path.parent.mkdir(parents=True, exist_ok=True)  # M34 skill 模板含 scripts/ assets/ 子目录
         path.write_text(_render(template, name), encoding="utf-8", newline="\n")
         written.append(str(path))
     print(f"✅ 已生成 {kind} 扩展模板：")
     for p in written:
         print(f"   {p}")
-    print("重启平台（或 POST /api/v1/extensions/plugins/reload）后生效。")
+    if kind == "skill":
+        print("打包：skill_pkg.sign_bundle(skill, files=[...]) → POST /api/v1/skills/import 导入。")
+    else:
+        print("重启平台（或 POST /api/v1/extensions/plugins/reload）后生效。")
     return written
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m eap.scaffold",
-                                     description="生成手写扩展模板（agent/tool/rag/mcp）或打包 .eapext")
+                                     description="生成手写扩展模板（agent/tool/rag/mcp/skill）或打包 .eapext")
     sub = parser.add_subparsers(dest="command")
     gen = sub.add_parser("generate", help="生成手写扩展模板")
-    gen.add_argument("kind", choices=["agent", "tool", "rag", "mcp"])
+    gen.add_argument("kind", choices=["agent", "tool", "rag", "mcp", "skill"])
     gen.add_argument("name", help="扩展名（也是插件目录名）")
     gen.add_argument("--dir", default=None,
                      help="目标根目录（默认取 EAP_PLUGINS_DIR，./plugins）")
