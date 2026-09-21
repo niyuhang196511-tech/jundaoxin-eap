@@ -4,9 +4,28 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from .conftest import AUTH
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_gov_policies(client: TestClient):
+    """模块结束后清理本模块创建的租户策略（docs/16 §三：状态泄漏会污染部分组合运行序
+    下的 test_policies / test_multiagent——「租户有自有策略不叠加平台默认」语义）。"""
+    from eap.db import SessionLocal
+    from eap.models import PolicyRecord
+
+    with SessionLocal() as db:
+        before = set(db.scalars(select(PolicyRecord.id)).all())
+    yield
+    with SessionLocal() as db:
+        for r in db.scalars(select(PolicyRecord)).all():
+            if r.id not in before:
+                db.delete(r)
+        db.commit()
 
 
 def _make_policy(client: TestClient, name: str, kind: str, config: dict):
