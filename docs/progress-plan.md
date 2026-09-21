@@ -17,13 +17,13 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.7.0 + M30~M33 批次 1~4（**v0.9 生产化全部落地**，见下） |
-| 最新里程碑 | M33（批次 4：prod-sandbox-M33 / prod-ha-M33） |
-| 代码 commit | a2928f8 |
+| 平台版本 | **v0.9.0（已发布）**——v0.5 Agent Application / v0.6 Governance / v0.7 Extension Platform / v0.8 企业集成 / v0.9 生产化 五阶段全部落地 |
+| 最新里程碑 | M33 + 收版批次 5（release v0.9.0 + 审计结论 docs/16） |
+| 代码 commit | 见 git tag v0.9.0（发布后打标）；本快照对应 a2928f8 之后的 release 提交 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **298 passed, 8 skipped, 0 errors**（87s）——较 M32 基线 288 passed 增 10（恰为 P2 新用例；P4 为脚本/部署样例交付；+1 skip 为 POSIX 专属用例） |
-| 下一主线 | **批次 5：V `v1.0-` 收尾整合**（v0.9 收版审计 docs/16 + 版本提升 v0.9.0 + README 同步；随后 L 组按外部条件逐项） |
-| 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）三轮收版扫描；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
+| 测试基线 | **298 passed, 8 skipped, 0 errors**（87s） |
+| 下一主线 | **L 组长期悬置项**按外部条件逐项消化（vLLM/Harness/IM 联调/SLO/技能市场等）；v1.0 正式发布前置：seal 深度扫描补跑（docs/16 声明）+ L 组清零或产品决策 |
+| 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
 
@@ -35,8 +35,8 @@
 | v0.6 | Platform Governance（工具治理/Policy/评测/成本/Memory 治理） | ✅ 完成 | M23–M26 | docs/13 |
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
 | **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ✅ 完成（七项全部落地：M30 批次 1 + M31 批次 2；真实凭证/外网联调遗留 → L3/L4） | M30–M31 | 待收版审计 docs/16 |
-| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ✅ 完成（P1 Worker/P3 环境体系/P5 CI-CD/P2 沙箱/P4 HA-DR 全部落地） | M32–M33 | 待收版审计 docs/16 |
-| v1.0 | Enterprise Agent Platform 收尾整合 | ❌ | 最后 | — |
+| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ✅ 完成（P1 Worker/P3 环境体系/P5 CI-CD/P2 沙箱/P4 HA-DR 全部落地） | M32–M33 | docs/16 ✅ |
+| v1.0 | Enterprise Agent Platform 收尾整合 | 🔶 收尾中（v0.9.0 已发布 + docs/16 审计 + 文档全量同步；剩 seal 补扫与 L 组悬置项消化后正式发布） | — | docs/16 |
 
 ---
 
@@ -192,9 +192,10 @@
 
 ### 收尾：v1.0 整合验收（优先级 3）
 
-#### 任务组 V：`v1.0-` 全域整合验收
-- **剩余工作**：对照 unfinished.md §四十九 能力地图逐域核对；README/docs 全量同步；生产部署演练；收版审计（docs/16）；v1.0 版本发布。
-- **依赖**：主线 A~F 与 P 组完成。
+#### 任务组 V：`v1.0-` 全域整合验收 🔶（收版批次 5 完成，v1.0 正式发布待 L 组消化）
+- **完成描述（收版批次 5）**：① 能力域总览终核——14 域全部 ✅（对照 unfinished.md §四十九 能力地图）；② 版本提升 v0.9.0（pyproject + `__init__`）+ README 根目录/eap 双侧特性同步（v0.8/v0.9 增量 + eap/README 过期「已实现 vs 待实现」表替换为账本指引）；③ 收版审计结论 docs/16（方法如实声明：逐线审查+继承判定+自动化验证，建议补跑 seal）；④ 文档一致性检查绿（19 文档/67 链接）；⑤ 全量回归 298 passed 复验版本提升。
+- **剩余工作**：v1.0 正式发布前置——seal 深度扫描补跑（docs/16 声明）+ 测试状态泄漏修复（test_tool_governance 租户策略持久，docs/16 §三）+ L 组清零或产品决策。
+- **依赖**：主线 A~F 与 P 组完成（均已 ✅）。
 
 ### 长期悬置（需外部条件或产品决策，按条件逐项消化）
 
@@ -222,6 +223,7 @@
 | **批次 2 ✅** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | 已完成（8289327 / 0fe5328 / fe64dce），全量回归 270 passed——v0.8 七项收官 |
 | **批次 3 ✅** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | 已完成（d6b03c8 / 22d7a24 / e49cff6），全量回归 288 passed；P5 顺带修复 ci.yml 自 M13.1 起的 YAML 解析错误 |
 | **批次 4 ✅** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | 已完成（94dc33b / a2928f8），全量回归 298 passed——**v0.9 五组全部收官**（main.py worker 数接 EAP_WORKER_COUNT 收尾项一并落地） |
-| **批次 5（当前）** | V `v1.0-` 收尾整合 | v0.9 收版审计 docs/16 + 版本提升 v0.9.0 + README 特性同步；随后 L 组按外部条件逐项 |
+| **批次 5 ✅** | V `v1.0-` 收版整合 | 已完成（v0.9.0 发布 + docs/16 审计 + README 双侧同步 + 回归 298 passed）；v1.0 正式发布剩 seal 补扫与 L 组 |
+| **批次 6（当前）** | L 组按外部条件逐项 | vLLM multi-LoRA（GPU）/ Harness 桌面端（产品决策）/ IM 真实联调（外部账号）/ SLO 验收（生产环境）/ 技能市场等——有条件即开工 |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
