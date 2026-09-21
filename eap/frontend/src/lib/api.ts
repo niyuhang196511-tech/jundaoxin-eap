@@ -181,3 +181,42 @@ export const webhooksApi = {
   test: (id: number) =>
     api<{ endpoint: string; event_id: string; delivery_id: number }>('POST', `/api/v1/webhooks/${id}/test`, {}),
 }
+
+/* ---------- Workflow 版本化 + prod-env- 环境体系（M32） ---------- */
+
+export type WfEnv = 'dev' | 'test' | 'staging' | 'prod'
+export type WfVersionState = 'draft' | 'published' | 'archived'
+
+export interface WorkflowVersion {
+  id: number
+  version: number
+  env: WfEnv | null
+  state: WfVersionState
+  note: string
+  created_at: string
+  published_at: string | null
+  dsl?: Record<string, unknown>
+}
+
+export interface WorkflowVersionsPayload {
+  workflow: string
+  published_version_id: number | null
+  versions: WorkflowVersion[]
+}
+
+export const workflowVersionsApi = {
+  list: (name: string) =>
+    api<WorkflowVersionsPayload>('GET', `/api/v1/workflows/${encodeURIComponent(name)}/versions`),
+  get: (name: string, versionId: number) =>
+    api<WorkflowVersion>('GET',
+      `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}`),
+  saveDraft: (name: string, note: string) =>
+    api<{ id: number; version: number; state: string }>(
+      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions`, { note }),
+  publish: (name: string, versionId: number, env: WfEnv) =>
+    api<{ id: number; version: number; env: WfEnv; state: string }>(
+      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/publish`, { env }),
+  rollback: (name: string, versionId: number, env: WfEnv) =>
+    api<{ id: number; version: number; env: WfEnv; state: string }>(
+      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/rollback`, { env }),
+}

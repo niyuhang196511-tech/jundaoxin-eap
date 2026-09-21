@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from .agents.registry import registry
 from .db import SessionLocal
 from .models import WorkflowRecord, WorkflowRunRecord
+from .runtime import workflow_versions
 from .runtime.events import emit_event
 from .runtime.workflow import WorkflowSpec, create_workflow_agent_class, execute_workflow
 
@@ -44,12 +45,16 @@ async def create_and_register(db: Session, spec: WorkflowSpec) -> WorkflowRecord
 
 
 async def load_enabled() -> int:
-    """平台启动时：把已启用的 DSL 工作流重新注册为智能体。"""
+    """平台启动时：把已启用的 DSL 工作流重新注册为智能体。
+
+    M32：按执行解析链取 DSL（prod 发布指针优先，无版本记录回退 dsl 字段——存量零影响）。
+    """
     count = 0
     with SessionLocal() as db:
         for record in db.scalars(select(WorkflowRecord).where(WorkflowRecord.enabled == True)).all():  # noqa: E712
             try:
-                spec = WorkflowSpec(**record.dsl)
+                dsl, _vid = workflow_versions.resolve_dsl(db, record)
+                spec = WorkflowSpec(**dsl)
                 cls = create_workflow_agent_class(spec)
                 registry.register(cls, cls.manifest, source="workflow",
                                   module=f"workflow:{spec.name}")
@@ -58,6 +63,19 @@ async def load_enabled() -> int:
             except Exception as e:
                 logging.getLogger("eap.workflow").warning("%s 注册失败: %s", record.name, e)
     return count
+
+
+async def refresh_registration(name: str) -> None:
+    """publish/rollback 后热更新（M32）：按解析链重建 spec → 同模块重注册 = 替换 → 重启，
+    workflow-as-agent 立即用新版（语义同 agents 配置版本发布后的生效方式）。"""
+    spec = get_spec(name)
+    try:
+        await registry.stop_agent(name)
+    except Exception:
+        pass  # 未启动/已摘除时直接替换注册
+    cls = create_workflow_agent_class(spec)
+    registry.register(cls, cls.manifest, source="workflow", module=f"workflow:{spec.name}")
+    await registry.start_agent(spec.name)
 
 
 async def disable(name: str) -> None:
@@ -92,21 +110,29 @@ def _flush_run(run_id: str, *, status: str, output: str, error: str,
         db.commit()
 
 
-async def test_run_async(name: str, input_text: str) -> str:
-    """端点用：预生成 run_id → 立即落 running 记录 → create_task 后台执行 → 返回 run_id。"""
+async def test_run_async(name: str, input_text: str, *,
+                         env: str | None = None, version: int | None = None) -> str:
+    """端点用：预生成 run_id → 立即落 running 记录 → create_task 后台执行 → 返回 run_id。
+
+    M32：env/version 覆盖仅作用于本次试运行（不落版本记录）；缺省走执行解析链
+    （prod 指针 → dsl 兜底）。
+    """
     with SessionLocal() as db:
         record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
         if record is None:
             raise KeyError(f"工作流 {name} 不存在")
+        dsl, _vid = workflow_versions.resolve_dsl(db, record, version=version, env=env)
+        spec = WorkflowSpec(**dsl)
         run_id = f"run-{uuid4().hex[:12]}"
-        db.add(WorkflowRunRecord(id=run_id, workflow=name, version=record.version,
+        db.add(WorkflowRunRecord(id=run_id, workflow=name, version=spec.version,
                                  input=input_text))
         db.commit()
-    asyncio.get_running_loop().create_task(_run_with_id(name, input_text, run_id))
+    asyncio.get_running_loop().create_task(_run_with_id(name, input_text, run_id, spec))
     return run_id
 
 
-async def _run_with_id(name: str, input_text: str, run_id: str) -> None:
+async def _run_with_id(name: str, input_text: str, run_id: str,
+                       spec: WorkflowSpec | None = None) -> None:
     started = time.perf_counter()
     node_runs: list[dict] = []
 
@@ -130,7 +156,8 @@ async def _run_with_id(name: str, input_text: str, run_id: str) -> None:
         from .agents.registry import get_platform_context
         from .runtime.workflow import WorkflowSuspended
 
-        spec = get_spec(name)
+        if spec is None:
+            spec = get_spec(name)
         ctx = get_platform_context()
         with ctx.db() as db:
             result = await execute_workflow(spec, ctx, db, input_text, on_event=on_event)
@@ -226,9 +253,15 @@ async def resume_run_async(name: str, run_id: str, values: dict) -> None:
         _emit_run_finished(run_id, name, "failed", started, error=str(e)[:200])
 
 
-def get_spec(name: str) -> WorkflowSpec:
+def get_spec(name: str, *, env: str | None = None, version: int | None = None) -> WorkflowSpec:
+    """按执行解析链取工作流 spec（M32）：显式 version > env 指定 > prod 指针 > dsl 兜底。
+
+    兼容注记：工作流没有版本记录时（published_version_id 为空、无 env 发布），
+    解析结果就是 WorkflowRecord.dsl——M32 之前创建的存量工作流行为完全不变。
+    """
     with SessionLocal() as db:
         record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
         if record is None:
             raise KeyError(f"工作流 {name} 不存在")
-        return WorkflowSpec(**record.dsl)
+        dsl, _vid = workflow_versions.resolve_dsl(db, record, version=version, env=env)
+        return WorkflowSpec(**dsl)

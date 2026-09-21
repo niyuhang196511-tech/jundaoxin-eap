@@ -15,9 +15,9 @@ import {
   type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Badge, Button, Input, Table, toast } from '@/components/ui'
-import { ListPlus, Save } from 'lucide-react'
-import { api } from '@/lib/api'
+import { Badge, Button, Input, Select, Table, toast } from '@/components/ui'
+import { GitBranch, ListPlus, Save } from 'lucide-react'
+import { api, workflowVersionsApi, type WfEnv } from '@/lib/api'
 import {
   autoLayout, collapseLoopBodies, collapseParallelBranches, expandLoopBodies,
   expandParallelBranches, genEdgeId, genStepId, linearToEdges,
@@ -28,6 +28,7 @@ import { nodeTypes, type WfNodeData } from '@/components/canvas/WfNode'
 import { NodePanel } from '@/components/canvas/NodePanel'
 import { ConfigDrawer } from '@/components/canvas/ConfigDrawer'
 import { RunPanel } from '@/components/canvas/RunPanel'
+import { WfVersionDrawer, WF_ENVS } from '@/components/canvas/VersionDrawer'
 
 const STATUS_BY_ID = (runs: NodeRun[]) => {
   const map = new Map<string, NodeRun>()
@@ -161,6 +162,9 @@ export default function WorkflowCanvasPage() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [preview, setPreview] = useState<{ env: WfEnv; version: number } | null>(null)
+  const [viewEnv, setViewEnv] = useState<'draft' | WfEnv>('draft')
+  const [versionsOpen, setVersionsOpen] = useState(false)
   const wrapper = useRef<HTMLDivElement>(null)
 
   const loadList = useCallback(async () => {
@@ -192,7 +196,44 @@ export default function WorkflowCanvasPage() {
     setNodes([])
     setEdges([])
     setDirty(false)
+    setPreview(null)
+    setViewEnv('draft')
   }
+
+  /* ---------- 环境视图（M32 prod-env- 体系）：选择环境 → 加载该 env 发布版只读预览 ---------- */
+
+  const switchEnv = useCallback(async (next: 'draft' | WfEnv) => {
+    if (!dsl) return
+    setViewEnv(next)
+    if (next === 'draft') {
+      setPreview(null)
+      await openDsl(dsl.name) // 切回草稿：重新加载当前编辑 DSL
+      return
+    }
+    try {
+      const payload = await workflowVersionsApi.list(dsl.name)
+      const hit = payload.versions.find(v => v.state === 'published' && v.env === next)
+      if (!hit) {
+        toast.info(`环境 ${next} 未发布版本，已显示草稿`)
+        setPreview(null)
+        await openDsl(dsl.name)
+        return
+      }
+      const detail = await workflowVersionsApi.get(dsl.name, hit.id)
+      const full = detail.dsl as unknown as WorkflowDsl
+      const normalized: WorkflowDsl = { ...full, edges: full.edges?.length ? full.edges : linearToEdges(full.steps) }
+      setDsl(normalized)
+      const g = dslToFlow(normalized)
+      setNodes(g.nodes)
+      setEdges(g.edges)
+      setDirty(false)
+      setPreview({ env: next, version: hit.version })
+    } catch (e) {
+      toast.error(`加载 ${next} 发布版失败：${(e as Error).message}`)
+      setViewEnv('draft')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dsl])
 
   /* ---------- 画布交互 ---------- */
 
@@ -321,8 +362,14 @@ export default function WorkflowCanvasPage() {
             <ListPlus className="size-3.5" /> 新建工作流
           </Button>
           {dsl && (
-            <Button variant={dirty ? 'primary' : 'secondary'} onClick={save} loading={saving} title="保存并注册">
+            <Button variant={dirty ? 'primary' : 'secondary'} onClick={save} loading={saving}
+              disabled={!!preview} title={preview ? `只读预览 ${preview.env} 发布版 v${preview.version}` : '保存并注册'}>
               <Save className="size-3.5" />{dirty ? '保存*' : '保存'}
+            </Button>
+          )}
+          {dsl && (
+            <Button variant="secondary" onClick={() => setVersionsOpen(true)} title="版本管理（发布/回滚）">
+              <GitBranch className="size-3.5" />版本
             </Button>
           )}
         </div>
@@ -339,9 +386,21 @@ export default function WorkflowCanvasPage() {
         <div className="min-h-0 flex-1 overflow-y-auto">{listTab}</div>
       </div>
 
-      {/* 中栏：画布 */}
+      {/* 中栏：环境选择器 + 画布 */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-[--radius-card] border border-line bg-surface">
-        <div className="flex h-full">
+        {dsl && (
+          <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+            <span className="text-xs font-medium text-ink-3">环境视图</span>
+            <Select className="w-36" value={viewEnv} onChange={e => void switchEnv(e.target.value as 'draft' | WfEnv)}>
+              <option value="draft">草稿（编辑）</option>
+              {WF_ENVS.map(e => <option key={e} value={e}>{e}</option>)}
+            </Select>
+            {preview && (
+              <Badge tone="amber">只读预览：{preview.env} 发布版 v{preview.version}——切回「草稿」编辑</Badge>
+            )}
+          </div>
+        )}
+        <div className="flex h-full min-h-0">
           {dsl ? (
             <>
               <NodePanel />
@@ -399,6 +458,18 @@ export default function WorkflowCanvasPage() {
           allIds={nodes.map(n => n.id)}
           onChange={patch => selectedId && patchStep(selectedId, patch)}
           onClose={() => setNodes(ns => ns.map(n => (n.selected ? { ...n, selected: false } : n)))}
+        />
+      )}
+
+      {/* 版本抽屉（M32）：列表 + 发布到环境 + 回滚 */}
+      {dsl && (
+        <WfVersionDrawer
+          workflow={dsl.name}
+          open={versionsOpen}
+          onOpenChange={open => {
+            setVersionsOpen(open)
+            if (!open) loadList() // 发布/回滚后目录状态可能变化
+          }}
         />
       )}
     </div>

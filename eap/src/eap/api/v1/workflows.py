@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...observability import audit
-from ...models import WorkflowRecord, WorkflowRunRecord
+from ...models import WorkflowRecord, WorkflowRunRecord, WorkflowVersionRecord
+from ...runtime import workflow_versions
 from ...runtime.workflow import WorkflowSpec
-from ...workflows import (create_and_register, disable, load_enabled, resume_run_async,
-                          test_run_async)
+from ...workflows import (create_and_register, disable, load_enabled, refresh_registration,
+                          resume_run_async, test_run_async)
 from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/workflows",
@@ -56,11 +57,22 @@ def get_workflow_dsl(name: str, db: Session = fastapi.Depends(get_db)):
 
 @router.post("/{name}/test-run")
 async def test_run(name: str, body: dict):
-    """后台执行一次试运行，立即返回 run_id（逐节点执行历史落 workflow_runs）。"""
+    """后台执行一次试运行，立即返回 run_id（逐节点执行历史落 workflow_runs）。
+
+    M32：body 可传 env（dev|test|staging|prod）或 version（版本号）覆盖本次试运行
+    的 DSL 解析（测试不落版本记录）；缺省走执行解析链（prod 指针 → dsl 兜底）。
+    """
+    env = body.get("env")
+    version = body.get("version")
     try:
-        run_id = await test_run_async(name, str(body.get("input", "")))
+        if version is not None:
+            version = int(version)
+        run_id = await test_run_async(name, str(body.get("input", "")),
+                                      env=env, version=version)
     except KeyError as e:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
     return {"run_id": run_id}
 
 
@@ -129,6 +141,145 @@ def list_runs(name: str, db: Session = fastapi.Depends(get_db)):
          "error": r.error, "elapsed_ms": r.elapsed_ms, "created_at": str(r.created_at)}
         for r in records
     ]
+
+
+# ---------- 版本化 + prod-env- 环境体系（M32，风格对齐 agents 配置版本端点） ----------
+
+class VersionDraftBody(BaseModel):
+    note: str = Field(default="", max_length=256)
+
+
+class VersionPublishBody(BaseModel):
+    env: str = Field(pattern=r"^(dev|test|staging|prod)$",
+                     description="发布目标环境：dev|test|staging|prod")
+
+
+class VersionRollbackBody(BaseModel):
+    env: str = Field(pattern=r"^(dev|test|staging|prod)$",
+                     description="回滚目标环境：回滚该 env 到上一版")
+
+
+def _require_workflow(db: Session, name: str) -> WorkflowRecord:
+    record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+    if record is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 工作流 {name} 不存在")
+    return record
+
+
+@router.get("/{name}/versions")
+def list_versions(name: str, db: Session = fastapi.Depends(get_db)):
+    """版本列表 + 当前生产指针（workflow-as-agent 的生效版本）。"""
+    record = _require_workflow(db, name)
+    rows = db.scalars(select(WorkflowVersionRecord)
+                      .where(WorkflowVersionRecord.workflow_id == record.id)
+                      .order_by(WorkflowVersionRecord.version.desc())).all()
+    return {
+        "workflow": name,
+        "published_version_id": record.published_version_id,
+        "versions": [
+            {"id": r.id, "version": r.version, "env": r.env, "state": r.state,
+             "note": r.note, "created_at": str(r.created_at),
+             "published_at": str(r.published_at) if r.published_at else None}
+            for r in rows
+        ],
+    }
+
+
+@router.post("/{name}/versions", dependencies=[fastapi.Depends(require_admin)])
+def save_workflow_draft(name: str, body: VersionDraftBody, request: fastapi.Request,
+                        db: Session = fastapi.Depends(get_db)):
+    """从当前 dsl 存草稿（version = max+1 递增）。"""
+    record = _require_workflow(db, name)
+    try:
+        row = workflow_versions.save_draft(db, record, record.dsl or {}, body.note)
+        db.commit()
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    audit.record("workflow.version.create", actor=audit.actor_of(request),
+                 target=f"{name}@v{row.version}", detail={"note": body.note},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"workflow": name, "id": row.id, "version": row.version, "state": row.state}
+
+
+@router.get("/{name}/versions/{version_id}")
+def get_workflow_version(name: str, version_id: int, db: Session = fastapi.Depends(get_db)):
+    """单版本详情（含 DSL 全文，画布环境预览数据源）。"""
+    record = _require_workflow(db, name)
+    row = db.scalar(select(WorkflowVersionRecord)
+                    .where(WorkflowVersionRecord.workflow_id == record.id,
+                           WorkflowVersionRecord.id == version_id))
+    if row is None:
+        raise fastapi.HTTPException(status_code=404,
+                                    detail=f"EAP-4004 工作流 {name} 版本 {version_id} 不存在")
+    return {"workflow": name, "id": row.id, "version": row.version, "env": row.env,
+            "state": row.state, "note": row.note, "dsl": row.dsl or {},
+            "created_at": str(row.created_at),
+            "published_at": str(row.published_at) if row.published_at else None}
+
+
+@router.post("/{name}/versions/{version_id}/publish", dependencies=[fastapi.Depends(require_admin)])
+async def publish_workflow_version(name: str, version_id: int, body: VersionPublishBody,
+                                   request: fastapi.Request,
+                                   db: Session = fastapi.Depends(get_db)):
+    """发布到环境：DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。"""
+    record = _require_workflow(db, name)
+    try:
+        row = workflow_versions.publish(db, record, version_id, body.env)
+        db.commit()
+    except KeyError as e:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 {e}") from e
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    audit.record("workflow.version.publish", actor=audit.actor_of(request),
+                 target=f"{name}@v{row.version}", detail={"env": body.env},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    await refresh_registration(name)  # 热更新：workflow-as-agent 立即用新版
+    return {"workflow": name, "id": row.id, "version": row.version,
+            "env": row.env, "state": row.state}
+
+
+@router.post("/{name}/versions/{version_id}/rollback", dependencies=[fastapi.Depends(require_admin)])
+async def rollback_workflow_version(name: str, version_id: int, body: VersionRollbackBody,
+                                    request: fastapi.Request,
+                                    db: Session = fastapi.Depends(get_db)):
+    """回滚该环境到上一版：现 published → archived，最近 archived → published（prod 同步指针）。"""
+    record = _require_workflow(db, name)
+    target = db.get(WorkflowVersionRecord, version_id)
+    if target is None or target.workflow_id != record.id:
+        raise fastapi.HTTPException(status_code=404,
+                                    detail=f"EAP-4004 工作流 {name} 版本 {version_id} 不存在")
+    try:
+        row = workflow_versions.rollback(db, record, body.env)
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    if row is None:
+        db.rollback()  # 丢弃 flush：无可回滚版本时现状不变
+        raise fastapi.HTTPException(status_code=409,
+                                    detail=f"EAP-6002 环境 {body.env} 无更早的可回滚版本")
+    db.commit()
+    audit.record("workflow.version.rollback", actor=audit.actor_of(request),
+                 target=f"{name}@v{row.version}", detail={"env": body.env,
+                                                          "from_version": target.version},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    await refresh_registration(name)  # 热更新：生产指针变化后 workflow-as-agent 立即切回
+    return {"workflow": name, "id": row.id, "version": row.version,
+            "env": row.env, "state": row.state}
+
+
+@router.get("/{name}/versions/{version_a}/diff/{version_b}")
+def diff_workflow_versions(name: str, version_a: int, version_b: int,
+                           db: Session = fastapi.Depends(get_db)):
+    """两个版本的 DSL 结构化差异（仅报告不同项，形态对齐 agent diff 端点）。"""
+    record = _require_workflow(db, name)
+    rows = {r.id: r for r in db.scalars(select(WorkflowVersionRecord)
+            .where(WorkflowVersionRecord.workflow_id == record.id,
+                   WorkflowVersionRecord.id.in_([version_a, version_b]))).all()}
+    for vid in (version_a, version_b):
+        if vid not in rows:
+            raise fastapi.HTTPException(status_code=404,
+                                        detail=f"EAP-4004 工作流 {name} 版本 {vid} 不存在")
+    changes = workflow_versions.diff_dsl(rows[version_a].dsl or {}, rows[version_b].dsl or {})
+    return {"workflow": name, "from": version_a, "to": version_b, "changes": changes}
 
 
 @router.post("/reload", dependencies=[fastapi.Depends(require_admin)])
