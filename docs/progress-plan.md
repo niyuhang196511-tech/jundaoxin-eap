@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | **v0.9.0（已发布）**——v0.5 Agent Application / v0.6 Governance / v0.7 Extension Platform / v0.8 企业集成 / v0.9 生产化 五阶段全部落地 |
-| 最新里程碑 | M33 + 收版批次 5（release v0.9.0 + 审计结论 docs/16） |
-| 代码 commit | 见 git tag v0.9.0（发布后打标）；本快照对应 a2928f8 之后的 release 提交 |
+| 平台版本 | v0.9.0（已发布）+ M34 批次 6（L 组工程部分三项落地，见下） |
+| 最新里程碑 | M34（批次 6：memory-M34 / evals-M34 / skills-M34 + 测试泄漏与调度窗口修复） |
+| 代码 commit | 88c14b9 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **298 passed, 8 skipped, 0 errors**（87s） |
-| 下一主线 | **L 组长期悬置项**按外部条件逐项消化（vLLM/Harness/IM 联调/SLO/技能市场等）；v1.0 正式发布前置：seal 深度扫描补跑（docs/16 声明）+ L 组清零或产品决策 |
+| 测试基线 | **329 passed, 8 skipped, 0 errors**（86s）——较 v0.9.0 基线 298 passed 增 31（恰为三线新用例 10+6+15）；另修复存量测试状态泄漏（498bdfd）与 scheduler 全量负载抖动（88c14b9） |
+| 下一主线 | **L 组剩余项按外部条件逐项消化**（vLLM 需 GPU、Harness 需产品决策、IM 联调需外部账号、SLO 需生产环境等）；v1.0 正式发布前置：seal 深度扫描补跑（docs/16 声明）+ 上述条件项清零或产品决策 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -52,7 +52,7 @@
 | ⑥ | Workflow | ✅ | DSL v2 图执行+拖拽画布+interaction 节点+变量快照挂起续跑（`runtime/workflow.py`）+ 版本化/四环境/回滚/画布环境切换（M32，`runtime/workflow_versions.py`） |
 | ⑦ | Tool / MCP / Plugin | ✅ | Tool Governance（M24）+MCP Client/Server+插件热载+Extension Platform（M27–29） |
 | ⑧ | Connector | ✅ | 端点工具化+风险映射+secret 加密 + SQL 只读连接器/OAuth2 凭证托管/Health Check/Trigger 联动（M31，`runtime/connectors.py`）；真实 IdP/PostgreSQL 运行时联调 → L3 |
-| ⑨ | Memory | ✅ | session/user 两层+租户过滤+保留期清理+批量遗忘/导出（M26，`runtime/memory.py`）；摘要压缩/组织层 → L7 |
+| ⑨ | Memory | ✅ | 四层 scope（session/user/agent/org）+importance 加权召回+TTL+LLM 摘要压缩+租户过滤/保留期/批量遗忘导出（M26+M34，`runtime/memory.py`）；组织记忆联动知识中心 → L7 剩余 |
 | ⑩ | Interaction / UI Schema | ✅ | 9 控件+任务/聊天双通道挂起恢复+动态选项级联+自定义 UI 组件 SDK MVP（M20/M29） |
 | ⑪ | Artifact / File | ✅ | 产物表+存储+预览/下载+过期惰性剔除+InvokeResult 引用（M21，`runtime/artifacts.py`） |
 | ⑫ | Evaluation | ✅ | LLM 裁判多维评分+异步评测+回归对比+RAG 指标 HitRate/Recall/MRR/NDCG（M25） |
@@ -205,13 +205,13 @@
 | L2 | Harness 桌面端（Tauri，订阅同步、沙箱） | docs/09 M3 验收项，至今零进展，需产品决策 |
 | L3 | IM 真实凭证联调（飞书/钉钉/企微生产账号） | 需外部账号；代码侧由任务组 D 交付 |
 | L4 | SLO 99.9% 验收 + DR 实战演练 | 需生产环境；依赖 P4 |
-| L5 | 技能市场分发站点 + 技能包 scripts/assets 附件 | 产品级需求，待排期 |
+| L5 | 技能市场分发站点 + 技能包 scripts/assets 附件 | 🔶 附件包工程部分 ✅（M34，d550af3）：bundle 扩展 scripts/（仅 .py，执行走 M33 沙箱 script_tool）与 assets/（白名单扩展），sha256 清单随签名覆盖、安全校验镜像 M28、落盘/清单/下载/导出往返端点、scaffold 模板示例；**分发站点仍待产品决策** |
 | L6 | Permission-aware RAG 文档级 ACL | 租户过滤已做（M23）；缺文档/角色级 ACL，需权限模型设计 |
-| L7 | Memory 深化：LLM 摘要压缩、agent/组织层 scope、importance 权重、组织记忆联动知识中心 | 当前为 session/user 两层 + 字符截断压缩 |
+| L7 | Memory 深化：LLM 摘要压缩、agent/组织层 scope、importance 权重、组织记忆联动知识中心 | 🔶 工程部分 ✅（M34，49a5ea4）：scope 扩为 session\|user\|agent\|org（agent 按 agent 列过滤、org 租户内共享）、importance 0~1 加权召回打分（final = cos + 0.3\*overlap + 0.2\*importance）、ttl_days→expires_at TTL（recall/list 默认过滤过期，purge 一并清理）、`EAP_MEMORY_SUMMARY_COMPRESS` 开关的 LLM 摘要压缩（`runtime/context.py` compress_messages：hub.complete 生成摘要→kind=summary 落库→历史替换，失败回退字符截断）；迁移 c0d3e5a7f9b4；剩余「组织记忆联动知识中心」 |
 | L8 | MCP 深化：OAuth（复用 OIDC 客户端）、长连接复用 | docs/10 遗留 |
 | L9 | 多租户计费细化（单价账单、配额分层） | 成本报表已有（M26），计费产品化待决策 |
-| L10 | 评测深化：人工抽检、在线影子流量、A/B 效果报表回流 | Prompt A/B 已有，转化指标回流未做 |
-| L11 | A2A 跨租户委派 | 若任务组 E 的 ④ 已覆盖则关闭本项 |
+| L10 | 评测深化：人工抽检、在线影子流量、A/B 效果报表回流 | 🔶 A/B 报表回流工程部分 ✅（M34，b403ebd）：变体归因埋点（`runtime/prompts.py` resolve_template 实验命中即写审计 prompt.render[experiment/version_selected/picked/percent_b] + variant_scope contextvar；agents 同步调用完成/失败落 agent.run.completed 审计并携带 prompt_variant，经 trace_id 关联 usage_records）；报表 `GET /api/v1/prompts/experiments/{name}/report`（admin+审计 prompt.ab.report，分 variant 聚合渲染数与分流占比 vs percent_b 偏差、归因调用数/成功率、token/成本、延迟 p50/均值，支持 since_hours 时间窗，attribution 字段诚实标注口径）；结论辅助 `POST .../conclude`（admin+审计 prompt.ab.conclude，winner+reason 禁用实验，promote=true 复用版本流水线发布胜出版本）。**归因口径局限（如实）**：renders 精确；调用指标为近似——仅覆盖同步智能体调用内部渲染了实验 prompt 的调用（SSE 流式不落审计不计入；渲染前失败无变体可归因；一次调用渲染多实验按最近命中归因），无数据维度返回 0/null 不编造。零 schema 变更（指标全走审计日志 JSON 聚合）；迁移链修复：e2f5a7b9c3d6 down 改指 c0d3e5a7f9b4 恢复单头线性。剩余：人工抽检、在线影子流量 |
+| L11 | A2A 跨租户委派 | ✅ 已关闭——任务组 E ④ 已覆盖（跨租户委派默认拒绝 + `a2a-delegate-allowlist` 策略放行 + 审计，M30） |
 
 ---
 
@@ -224,6 +224,7 @@
 | **批次 3 ✅** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | 已完成（d6b03c8 / 22d7a24 / e49cff6），全量回归 288 passed；P5 顺带修复 ci.yml 自 M13.1 起的 YAML 解析错误 |
 | **批次 4 ✅** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | 已完成（94dc33b / a2928f8），全量回归 298 passed——**v0.9 五组全部收官**（main.py worker 数接 EAP_WORKER_COUNT 收尾项一并落地） |
 | **批次 5 ✅** | V `v1.0-` 收版整合 | 已完成（v0.9.0 发布 + docs/16 审计 + README 双侧同步 + 回归 298 passed）；v1.0 正式发布剩 seal 补扫与 L 组 |
-| **批次 6（当前）** | L 组按外部条件逐项 | vLLM multi-LoRA（GPU）/ Harness 桌面端（产品决策）/ IM 真实联调（外部账号）/ SLO 验收（生产环境）/ 技能市场等——有条件即开工 |
+| **批次 6 ✅** | L 组工程部分：memory（L7）＋ evals A/B 报表（L10）＋ skills 附件包（L5）＋ 测试泄漏/调度抖动修复 | 已完成（49a5ea4 / b403ebd / d550af3 + 498bdfd / 88c14b9），全量回归 329 passed；剩余为纯外部条件项 |
+| **批次 7（按条件开工）** | L 组剩余外部条件项 | vLLM multi-LoRA（GPU）/ Harness 桌面端（产品决策）/ IM 真实联调（外部账号）/ SLO 验收（生产环境）/ RAG 文档级 ACL（权限模型设计）/ MCP OAuth / 多租户计费——条件就绪即开工；v1.0 正式发布前置 seal 补扫 |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
