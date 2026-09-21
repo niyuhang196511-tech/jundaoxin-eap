@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.7.0 + M30/M31 批次 1~2（v0.8 企业集成七项全部落地，见下） |
-| 最新里程碑 | M31（批次 2：webhook-M31 / connector-M31 / gateway-M31） |
-| 代码 commit | fe64dce |
+| 平台版本 | v0.7.0 + M30~M32 批次 1~3（v0.8 收官，v0.9 首批落地，见下） |
+| 最新里程碑 | M32（批次 3：prod-worker-M32 / prod-env-M32 / ci-M32） |
+| 代码 commit | e49cff6 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **270 passed, 6 skipped, 0 errors**（82s）——较 M30 基线 234 passed 增 36（恰为批次 2 三线新用例 11+9+16） |
-| 下一主线 | **批次 3：v0.9 生产化 P1 `prod-worker-` + P3 `prod-env-` + P5 `ci-`**（可并行；P2/P4 随后） |
+| 测试基线 | **288 passed, 7 skipped, 0 errors**（83s）——较 M31 基线 270 passed 增 18（恰为 P1/P3 新用例 9+9；P5 为脚本/workflow 交付） |
+| 下一主线 | **批次 4：v0.9 收尾 P2 `prod-sandbox-` + P4 `prod-ha-`**（可并行；随后批次 5 = V `v1.0-` 收尾整合） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）三轮收版扫描；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -35,7 +35,7 @@
 | v0.6 | Platform Governance（工具治理/Policy/评测/成本/Memory 治理） | ✅ 完成 | M23–M26 | docs/13 |
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
 | **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ✅ 完成（七项全部落地：M30 批次 1 + M31 批次 2；真实凭证/外网联调遗留 → L3/L4） | M30–M31 | 待收版审计 docs/16 |
-| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ❌ 未启动（底座已备） | 排在 v0.8 后 | — |
+| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | 🔶 进行中（P1 Worker/P3 环境体系+Workflow 版本化/P5 CI-CD ✅；P2 沙箱/P4 HA 待批次 4） | M32 ✅ / M33 待开工 | — |
 | v1.0 | Enterprise Agent Platform 收尾整合 | ❌ | 最后 | — |
 
 ---
@@ -49,7 +49,7 @@
 | ③ | Agent Runtime | ✅ | Loop+HITL 审批+任务恢复+多智能体委派边界+交互挂起+结构化输出（`runtime/loop.py`、`tasks.py`、`multi_agent.py`、`interaction.py`） |
 | ④ | Model Center | ✅ | 能力路由+降级链+真流式+定价计量+Mock 确定性合成（`modelhub/`）；vLLM multi-LoRA 悬置 → L1 |
 | ⑤ | Knowledge / RAG | ✅ | 三路混合检索+Citation+可插拔组件+RAG 指标评测+MinerU/表格解析；文档级 ACL → L6 |
-| ⑥ | Workflow | ✅ | DSL v2 图执行+拖拽画布+interaction 节点+变量快照挂起续跑（`runtime/workflow.py`）；版本化/环境体系 → P3 |
+| ⑥ | Workflow | ✅ | DSL v2 图执行+拖拽画布+interaction 节点+变量快照挂起续跑（`runtime/workflow.py`）+ 版本化/四环境/回滚/画布环境切换（M32，`runtime/workflow_versions.py`） |
 | ⑦ | Tool / MCP / Plugin | ✅ | Tool Governance（M24）+MCP Client/Server+插件热载+Extension Platform（M27–29） |
 | ⑧ | Connector | ✅ | 端点工具化+风险映射+secret 加密 + SQL 只读连接器/OAuth2 凭证托管/Health Check/Trigger 联动（M31，`runtime/connectors.py`）；真实 IdP/PostgreSQL 运行时联调 → L3 |
 | ⑨ | Memory | ✅ | session/user 两层+租户过滤+保留期清理+批量遗忘/导出（M26，`runtime/memory.py`）；摘要压缩/组织层 → L7 |
@@ -159,30 +159,34 @@
 
 ### 次线：v0.9 生产化（优先级 2，v0.8 主体后开工）
 
-#### 任务组 P1：`prod-worker-` 分布式 Worker / 队列深化
+#### 任务组 P1：`prod-worker-` 分布式 Worker / 队列深化 ✅（M32，d6b03c8）
 - **现状**：AsyncioQueueBackend + 可选 Redis Streams（`EAP_REDIS_URL`，`runtime/tasks.py`）+ 多副本调度锁（multireplica 测试）+ PENDING 崩溃恢复。
 - **剩余工作**：多 worker 抢占语义强化（可见性超时/租约）、任务幂等键、队列优先级、独立 worker 进程模式（`python -m eap.worker`）。
-- **DoD**：双进程并发消费不重复、不丢失（压力测试）。
+- **完成描述（M32）**：① 执行租约：TaskRecord 加 `lease_expires_at` 列，worker 取任务时置 now+`EAP_WORKER_LEASE_SECONDS`（默认 300），终态/取消清空；`_recover_leases` 周期扫描（60s + 引擎启动即时）将「RUNNING 且租约过期」重置 PENDING 重跑（抢占式 UPDATE 防多副本重复入队，与 `_recover_pending` 分工：前者管 PENDING 遗留、后者管 RUNNING 泄漏）；引擎 stop 先置停机标记，在途任务回退 PENDING 并清租约（不误判崩溃）。② 任务幂等键：`submit(..., idempotency_key=None)`，同 key 且在途（PENDING/RUNNING/WAITING_*）命中直接返回既有任务；返回值用 str 子类 `TaskSubmitResult`（值即 task_id + `.existing` 属性），既有调用方（kb/evals/triggers）零改动；API 走 body 字段 `idempotency_key`（`Idempotency-Key` 头已被 M31 网关幂等中间件占用，两层互补），响应带 `existing`。③ 队列优先级：TaskRecord 加 `priority`（数值大优先、同级 FIFO）；AsyncioQueueBackend 改 heapq 堆消费 `(-priority, seq, task_id)`；RedisStreamBackend 双流 `eap:tasks:hi`/`eap:tasks`（priority>0 入 hi，lo 复用基础 stream 名保持既有消费端/监控兼容），消费先 hi 短 block 再 lo，XAUTOCLAIM 两流都做且重投保留优先级。④ 独立 Worker：新 `worker.py`（`python -m eap.worker`，不导入 eap.main），init_db → 打版本/配置日志 → TaskEngine（`EAP_WORKER_COUNT` 默认 2）→ SIGINT/SIGTERM 优雅停（drain 停入队等在途 ≤30s → engine.stop）；config.py 加 `worker_count`/`worker_lease_seconds`。迁移 `a9c1e3f5b7d2`（幂等补列 + idempotency_key 索引，接 d7a1b3c5e9f2）。`tests/test_worker.py` 9 用例离线绿（租约恢复/不误恢复/停机回退/drain/幂等引擎级+API 级/优先级出队序/Redis 双流+XAUTOCLAIM 按 skip 机制/入口冒烟断言不导入 eap.main）。
+- **剩余工作**：双进程并发消费压力测试与 Redis 分支联调需真实 Redis 环境（本地不可达，Redis 用例自动 skip；test_tasks_redis 存量用例与双流兼容——priority=0 仍走基础 stream）；多副本同 key 并发提交存在非原子窗口（无部分唯一索引，at-least-once 语义可接受）。
+- **DoD**：双进程并发消费不重复、不丢失（压力测试）。租约恢复/幂等/优先级/优雅停已有测试覆盖 ✅
 
 #### 任务组 P2：`prod-sandbox-` 工具/代码沙箱
 - **现状**：无沙箱（扩展=受信代码，进程内执行，docs/04 §8 既有约定）。
 - **剩余工作**：高风险工具/技能脚本的受限执行（子进程 + 超时 + 资源限制 + 文件系统隔离），经策略 risk_level 联动。
 - **DoD**：超时/越界脚本被隔离拒绝且有测试。
 
-#### 任务组 P3：`prod-env-` 环境体系 + Workflow 版本化
+#### 任务组 P3：`prod-env-` 环境体系 + Workflow 版本化 ✅（M32，22d7a24）
 - **现状**：Agent 配置版本层已有（M18）；Prompt 有版本+回滚；**Workflow 无版本、无环境标签**。
-- **剩余工作**：Workflow 版本（draft→publish→rollback，对齐 Agent 模式）；DEV/TEST/STAGING/PROD 环境标签与发布晋升；与 canary 联动。
-- **DoD**：Workflow 发布/回滚/环境隔离测试绿；画布可切环境。
+- **完成描述（M32）**：① 模型/迁移：新表 `workflow_versions`（`WorkflowVersionRecord`：workflow_id FK、version 整数递增、dsl JSON 快照、env 可空标签 dev|test|staging|prod、state draft|published|archived、note、published_at，唯一约束 (workflow_id, version)）；`WorkflowRecord` 加 `published_version_id` 生产指针列（按 channel_id 惯例用普通 Integer 不加 DB 级 FK——与 workflow_versions 双向引用成环，SQLite 无法 ALTER 加约束）；迁移 `b8d2f4a6c0e3`（幂等建表+加列，接 P1 线 `a9c1e3f5b7d2`）。② 版本服务 `runtime/workflow_versions.py`：save_draft（max+1 递增）/publish（复用 WorkflowSpec 解析做发布期 DSL 校验，同 env 旧 published 自动 archived，env=prod 同步指针，单 env 绑定语义：跨环境发布=迁移、降级清悬空指针）/rollback（该 env 最近 archived 重发布，prod 同步指针）/diff_dsl（按节点/边 id 结构化差异，形态对齐 agent diff）/resolve_dsl 执行解析链（显式 version > env 指定 > prod 指针 > WorkflowRecord.dsl 兜底——无版本记录时行为不变，存量零影响）。③ 桥接 `workflows.py`：get_spec/load_enabled 走解析链；test_run_async 支持 env/version 覆盖（不落版本）；`refresh_registration` 发布/回滚后按解析链重建 spec → 同模块重注册=替换 → 重启（workflow-as-agent 热更新，语义同 agents 版本发布生效）。④ API `api/v1/workflows.py`：GET/POST `/{name}/versions`、GET `/{name}/versions/{id}`（DSL 全文，画布预览数据源）、POST `/{name}/versions/{id}/publish`、POST `/{name}/versions/{id}/rollback`（写操作 admin+审计 `workflow.version.*`，风格对齐 agents versions）、GET `/{name}/versions/{a}/diff/{b}`、test-run body 增 env/version。⑤ 前端：画布左栏「版本」按钮 + `canvas/VersionDrawer.tsx`（版本列表 + 发布到环境 + 回滚 + 存草稿，精简自 agents VersionDrawer，diff 入口后置）；画布顶部环境选择器（草稿/dev/test/staging/prod）——选环境加载该 env 发布版 DSL 只读预览（未发布提示回草稿，预览中禁用保存）；`lib/api.ts` 增 `workflowVersionsApi`。⑥ 测试 `tests/test_workflow_versions.py` 9 例：草稿递增、dev 发布旧版归档/prod 同步指针、坏 DSL 挡发布、rollback 恢复上一版+指针同步、diff、解析链全序（显式 version > env > 指针 > 兜底，两个内容不同版本以标记工具输出断言）、存量无版本工作流行为不变、RBAC member 403、publish/rollback 后 workflow-as-agent 注册 spec 即时变化。零新增依赖。
+- **剩余工作**：画布版本 diff 可视化入口后置；与 canary 联动（P2/发布治理）未做；alembic 升级链依赖 P1 线 `a9c1e3f5b7d2` 先合入。
+- **DoD**：Workflow 发布/回滚/环境隔离测试绿；画布可切环境。✅
 
 #### 任务组 P4：`prod-ha-` HA / 备份 / 恢复 / DR
 - **现状**：备份 cron 化（M15.5/M13.3）+ 生产 runbook（docs/11）。
 - **剩余工作**：恢复演练自动化脚本、双实例 HA 部署样例（compose/k8s）、健康告警对接。
 - **DoD**：一键恢复演练脚本在干净环境跑通。
 
-#### 任务组 P5：`ci-` CI/CD 强化
+#### 任务组 P5：`ci-` CI/CD 强化 ✅（M32，e49cff6）
 - **现状**：GitHub Actions 全量回归 + Docker 镜像 job + Playwright E2E（M17.5/M15.6）。
-- **剩余工作**：发布流水线（tag → 镜像推送 → 环境晋升）、文档/契约一致性检查 job。
-- **DoD**：打 tag 自动发布镜像并可晋升环境。
+- **完成描述（M32）**：① 发布流水线 `.github/workflows/release.yml`：push `v*` tag → `release-image` job 构建 `eap/Dockerfile` 推送 `ghcr.io/<owner>/<repo>/eap:<semver>`（去 v 前缀）与 `:latest`，并生成 Release notes（softprops/action-gh-release）；`promote` job（workflow_dispatch，inputs: image_tag/environment）pull→tag→push 重打 `:<environment>` 环境标签，prod 绑定 GitHub environment `production`（审批保护可后配），inputs 白名单校验防注入，ghcr 镜像名全小写规范化；两 job 均 `packages: write, contents: write` + 最小化注释（顶层默认 contents: read）。② 文档/契约一致性检查 `scripts/check_docs.py`（纯标准库，仓库根 `uv run --no-project python scripts/check_docs.py`）：README+docs 相对链接与裸 `docs/...` 引用存在性（锚点/外链/代码块忽略，`docs/16` 前向引用豁免）、全部 mermaid 代码块含 diagrams/*.mmd 轻量校验（声明行/边两侧非空/括号平衡，erDiagram 鸦爪记号不误报）、progress-plan 快照头「代码 commit」git rev-parse + cat-file -e 校验；当前全绿（18 文档 / 62 链接 / 32 裸引用 / 33 mermaid 块），无存量坏链接。③ ci.yml 增独立 job `docs-check`（fetch-depth: 0 + uv setup + workflow YAML pyyaml 解析兜底 + 跑脚本），不影响现有 job。④ docs/11 §7「发布与晋升」+ README runbook 行同步。⑤ 顺手修复存量 bug：ci.yml `Lint (ruff: F/E9 only)` 未加引号，自 M13.1（ef26049）起整个 workflow YAML 解析失败（Actions 会拒绝加载），加引号修复。零后端 schema / runtime 改动。
+- **剩余工作**：release.yml 真实运行验证需推送后在 GitHub 观察（tag 触发发布 + promote 两次 dispatch，本地仅 YAML 解析与结构复查）；console 镜像（eap/frontend）自动发布未纳入（CI 仅构建校验）；GitHub Environments 的 production 保护规则需在仓库设置中后配。
+- **DoD**：打 tag 自动发布镜像并可晋升环境。✅
 
 ### 收尾：v1.0 整合验收（优先级 3）
 
@@ -214,8 +218,7 @@
 |---|---|---|
 | **批次 1 ✅** | A `event-` ＋ D `im-` ＋ E `a2a-` | 已完成（04cabca / 69aa934 / bff9797），全量回归 234 passed |
 | **批次 2 ✅** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | 已完成（8289327 / 0fe5328 / fe64dce），全量回归 270 passed——v0.8 七项收官 |
-| **批次 3（当前）** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | v0.9 生产化首批，三线互不依赖可并行；P2 沙箱 / P4 HA 随后 |
-| 批次 3 | P1＋P3＋P5（或按需 2~3 线） | v0.9 生产化，P2/P4 随后 |
-| 批次 4 | V `v1.0-` 收尾 ＋ L 组按外部条件逐项 | 整合验收与悬置项消化 |
+| **批次 3 ✅** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | 已完成（d6b03c8 / 22d7a24 / e49cff6），全量回归 288 passed；P5 顺带修复 ci.yml 自 M13.1 起的 YAML 解析错误 |
+| **批次 4（当前）** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | v0.9 收尾两线，互不依赖可并行；随后批次 5 = V `v1.0-` 收尾整合 + L 组按外部条件逐项 |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
