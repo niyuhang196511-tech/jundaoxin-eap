@@ -106,6 +106,13 @@ class ModelHub:
         chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
         if not chain:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
+        # 熔断过滤（M31 任务组 F）：open 的模型从候选链剔除，自然落到降级链下一个
+        from ..observability.gateway import get_breaker
+
+        breaker = get_breaker()
+        chain = [r for r in chain if breaker.allow(r.name)]
+        if not chain:
+            raise ProviderError(f"[{capability}] 链上模型均处于熔断状态，请稍后重试")
         errors: list[str] = []
         for record in chain:
             span_cm = tracer().start_as_current_span(
@@ -118,14 +125,19 @@ class ModelHub:
                 provider = get_provider(record.provider)
                 result = await provider.complete(record=record, messages=messages, tools=tools,
                                                  temperature=temperature, response_schema=response_schema)
+                breaker.record_success(record.name)
                 if span is not None:
                     span.set_attribute("llm.tokens_out", result.tokens_out)
                     span.set_attribute("llm.latency_ms", result.latency_ms)
                 return Completion(result=result, record=record)
             except ProviderError as e:
+                breaker.record_failure(record.name)
                 errors.append(str(e))
                 if span is not None:
                     span.record_exception(e)
+            except Exception as e:
+                breaker.record_failure(record.name)  # 非供应商异常同样计入熔断（防半开探测泄漏）
+                raise
             finally:
                 if span_cm is not None:
                     span_cm.__exit__(None, None, None)
@@ -158,6 +170,13 @@ class ModelHub:
         chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
         if not chain:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
+        # 熔断过滤（M31 任务组 F）：open 的模型从候选链剔除，自然落到降级链下一个
+        from ..observability.gateway import get_breaker
+
+        breaker = get_breaker()
+        chain = [r for r in chain if breaker.allow(r.name)]
+        if not chain:
+            raise ProviderError(f"[{capability}] 链上模型均处于熔断状态，请稍后重试")
         errors: list[str] = []
         for record in chain:
             from ..observability.tracing import enabled as otel_enabled, tracer
@@ -178,6 +197,7 @@ class ModelHub:
                 if emitted:
                     from ..observability.middleware import record_usage
 
+                    breaker.record_success(record.name)
                     record_usage("", 0, kind="chat", model=record.name,
                                  tokens_in=sum(max(1, len(str(m.get("content", "")))) // 4 for m in messages),
                                  tokens_out=max(1, emitted // 4), latency_ms=0)
@@ -187,6 +207,7 @@ class ModelHub:
                         span_cm.__exit__(None, None, None)
                     return
             except ProviderError as e:
+                breaker.record_failure(record.name)
                 if span is not None:
                     span.record_exception(e)
                 if span_cm is not None:
@@ -194,6 +215,11 @@ class ModelHub:
                 if emitted:
                     return  # 已产出部分内容：中断重试会造成重复输出，就此收尾
                 errors.append(str(e))
+            except Exception:
+                breaker.record_failure(record.name)  # 非供应商异常同样计入熔断（防半开探测泄漏）
+                if span_cm is not None:
+                    span_cm.__exit__(None, None, None)
+                raise
         raise ProviderError("所有模型均失败（降级链耗尽）: " + " | ".join(errors))
 
 
