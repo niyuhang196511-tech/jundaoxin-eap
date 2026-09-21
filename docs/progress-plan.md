@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.7.0 + M30~M32 批次 1~3（v0.8 收官，v0.9 首批落地，见下） |
-| 最新里程碑 | M32（批次 3：prod-worker-M32 / prod-env-M32 / ci-M32） |
-| 代码 commit | e49cff6 |
+| 平台版本 | v0.7.0 + M30~M33 批次 1~4（**v0.9 生产化全部落地**，见下） |
+| 最新里程碑 | M33（批次 4：prod-sandbox-M33 / prod-ha-M33） |
+| 代码 commit | a2928f8 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **288 passed, 7 skipped, 0 errors**（83s）——较 M31 基线 270 passed 增 18（恰为 P1/P3 新用例 9+9；P5 为脚本/workflow 交付） |
-| 下一主线 | **批次 4：v0.9 收尾 P2 `prod-sandbox-` + P4 `prod-ha-`**（可并行；随后批次 5 = V `v1.0-` 收尾整合） |
+| 测试基线 | **298 passed, 8 skipped, 0 errors**（87s）——较 M32 基线 288 passed 增 10（恰为 P2 新用例；P4 为脚本/部署样例交付；+1 skip 为 POSIX 专属用例） |
+| 下一主线 | **批次 5：V `v1.0-` 收尾整合**（v0.9 收版审计 docs/16 + 版本提升 v0.9.0 + README 同步；随后 L 组按外部条件逐项） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）三轮收版扫描；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -35,7 +35,7 @@
 | v0.6 | Platform Governance（工具治理/Policy/评测/成本/Memory 治理） | ✅ 完成 | M23–M26 | docs/13 |
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
 | **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ✅ 完成（七项全部落地：M30 批次 1 + M31 批次 2；真实凭证/外网联调遗留 → L3/L4） | M30–M31 | 待收版审计 docs/16 |
-| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | 🔶 进行中（P1 Worker/P3 环境体系+Workflow 版本化/P5 CI-CD ✅；P2 沙箱/P4 HA 待批次 4） | M32 ✅ / M33 待开工 | — |
+| v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ✅ 完成（P1 Worker/P3 环境体系/P5 CI-CD/P2 沙箱/P4 HA-DR 全部落地） | M32–M33 | 待收版审计 docs/16 |
 | v1.0 | Enterprise Agent Platform 收尾整合 | ❌ | 最后 | — |
 
 ---
@@ -166,10 +166,11 @@
 - **剩余工作**：双进程并发消费压力测试与 Redis 分支联调需真实 Redis 环境（本地不可达，Redis 用例自动 skip；test_tasks_redis 存量用例与双流兼容——priority=0 仍走基础 stream）；多副本同 key 并发提交存在非原子窗口（无部分唯一索引，at-least-once 语义可接受）。
 - **DoD**：双进程并发消费不重复、不丢失（压力测试）。租约恢复/幂等/优先级/优雅停已有测试覆盖 ✅
 
-#### 任务组 P2：`prod-sandbox-` 工具/代码沙箱
+#### 任务组 P2：`prod-sandbox-` 工具/代码沙箱 ✅（M33，94dc33b）
 - **现状**：无沙箱（扩展=受信代码，进程内执行，docs/04 §8 既有约定）。
-- **剩余工作**：高风险工具/技能脚本的受限执行（子进程 + 超时 + 资源限制 + 文件系统隔离），经策略 risk_level 联动。
-- **DoD**：超时/越界脚本被隔离拒绝且有测试。
+- **完成描述（M33，待提交）**：① 新模块 `runtime/sandbox.py`：`SandboxRunner` 子进程受限执行引擎（`sys.executable script_path`，单行 JSON stdin 进/stdout 出协议；超时先 terminate 宽限 3s 再 kill——POSIX `start_new_session`+`os.killpg` 进程组树杀、Windows proc.terminate/kill；stdout/stderr 各 256KB 截断带标记；异常/超时一律返回结构化结果 `{ok, exit_code, stdout, stderr, duration_ms, timed_out, limits_applied, truncated, sandbox_dir}` 不上抛；`run_async` 经 `asyncio.to_thread` 线程池承载防阻塞事件循环，模块级默认实例复用）。资源限制：POSIX `preexec_fn` 设 RLIMIT_CPU/RLIMIT_AS；**Windows 降级语义**（resource 为 POSIX 专属）仅强制超时+FS 隔离+env 裁剪，`limits_applied` 如实反映实际生效项。文件系统隔离为**软隔离：约定+环境裁剪，非容器级**（cwd=一次性临时目录沙箱根，相对写入随执行销毁；不 mounts 不 chroot，绝对路径越界写入无技术阻断，诚实标注于 docstring）。环境裁剪：仅透传 PATH/TEMP/TMP/SYSTEMROOT/LANG 白名单（另注入 PYTHONIOENCODING/PYTHONUTF8 两个协议变量强制子进程 UTF-8，防中文 Windows locale 下 JSON 错乱）。② 脚本工具类型：`Tool` 加 `runtime`（inproc|script，默认 inproc 存量零影响）与 `script_path` 字段；`script_tool()` 工厂（handler 经 SandboxRunner 喂 args JSON/回注结果 JSON，失败回注 `{"error": ...}` 与现有工具失败语义一致）+ `run_script_in_sandbox()` 统一执行入口（工厂 handler 与 loop 路由共用，防绕过）；demo 脚本 `examples/sandbox/echo.py`（回显+pwd+环境键清单）。③ 策略联动：新 kind `tool-sandbox`（config `{"mode": "enforce"|"audit", "tools": [...]}`，policies API 白名单+校验），`policy.check_tool_sandbox()` 返回执行决策（script 工具命中清单必须走沙箱防绕过；inproc 工具 enforce→PolicyDenied「被要求沙箱执行但为进程内实现」/audit→放行+violation）；挂进 loop.py 工具执行块（M24 拦截链中、审批门之后），enforce 拒绝与 audit 放行均落 `tool.sandbox.violation` 审计 + `eap_sandbox_violations_total{mode}`；扩展中心工具目录透出 `runtime` 字段。④ 指标：`eap_sandbox_exec_total{result=ok|timeout|error}` + `eap_sandbox_violations_total{mode=enforce|audit}`。零 schema 变更（策略 kinds 用 PolicyRecord 现有表，脚本工具不落新表）。`tests/test_sandbox.py` 11 用例离线绿（echo 往返/超时杀进程/FS 约定隔离与 cwd 断言/env 裁剪/mem 限额 skipif win32/策略 API 校验/决策矩阵/script_tool 全链路/失败回注/loop 沙箱路由防绕过毒丸验证/enforce 拒绝 inproc+violation 审计），test_tool_governance 等存量回归绿。
+- **剩余工作**：软隔离语义边界如实记录——绝对路径越界写入无技术阻断（非容器级，需容器/bwrap 才能升级），越界「拒绝」体现为沙箱根一次性销毁 + 策略审计可观测，FS 隔离测试为约定检查（脚本 os.getcwd()==沙箱根）而非权限断言；Windows 无 rlimit（POSIX 限额用例 skipif win32，跨平台仅超时/FS 约定/env 裁剪可跑）；沙箱执行占 asyncio 默认线程池，大量长时限脚本并发需池容量评估；多副本幂等无涉（每次执行独立临时目录、无共享态）；preexec_fn 为 POSIX fork+exec 传统方案，多线程父进程存在文档化限制。
+- **DoD**：超时/越界脚本被隔离拒绝且有测试。✅
 
 #### 任务组 P3：`prod-env-` 环境体系 + Workflow 版本化 ✅（M32，22d7a24）
 - **现状**：Agent 配置版本层已有（M18）；Prompt 有版本+回滚；**Workflow 无版本、无环境标签**。
@@ -177,10 +178,11 @@
 - **剩余工作**：画布版本 diff 可视化入口后置；与 canary 联动（P2/发布治理）未做；alembic 升级链依赖 P1 线 `a9c1e3f5b7d2` 先合入。
 - **DoD**：Workflow 发布/回滚/环境隔离测试绿；画布可切环境。✅
 
-#### 任务组 P4：`prod-ha-` HA / 备份 / 恢复 / DR
+#### 任务组 P4：`prod-ha-` HA / 备份 / 恢复 / DR ✅（M33，a2928f8）
 - **现状**：备份 cron 化（M15.5/M13.3）+ 生产 runbook（docs/11）。
-- **剩余工作**：恢复演练自动化脚本、双实例 HA 部署样例（compose/k8s）、健康告警对接。
-- **DoD**：一键恢复演练脚本在干净环境跑通。
+- **完成描述（M33，待提交）**：① 一键备份/恢复演练脚本 `scripts/drill_restore.py`（纯标准库，零新增依赖）：backup 子命令按 EAP_DB_URL 形态自动选择——SQLite 走 sqlite3 在线备份 API（一致性快照，不中断写入）/ PostgreSQL 调 pg_dump `-Fc` Custom 格式（SQLAlchemy 连接串自动转 libpq 形态）；drill 子命令（核心 DoD）`--backup`/`--latest` 定位备份 → 临时目录还原（SQLite 直接副本 + 只读预检，坏文件在此得到清晰报错；PostgreSQL pg_restore `--clean --if-exists` 到 `--restore-db` 演练库）→ 独立进程 Alembic `upgrade head` 确认可迁移（当前解释器无 alembic 时回退 `uv run --project eap`）→ 冒烟断言（integrity_check + tenants/agents/tasks 关键表可计数 ≥0 + alembic_version 单头）→ 结构化报告（每步 `[步骤 N]` 行/耗时/结论，`--report-json` 机器可读）→ 清理（`--keep` 或失败时保留现场）；退出码全绿 0 / 失败 1，演练全程只读源库。真实跑通：开发库 eap.db backup（1.1MB）→ drill 5/5 步全绿退出码 0（关键表 tenants=1/agents=4/tasks=0，alembic 单头 b8d2f4a6c0e3），负路径（随机字节伪备份）在还原步报「不是有效的 SQLite 数据库」退出码 1。② 双实例 HA 部署样例 `deploy/`：docker-compose.ha.yml（2×无状态 API 实例 EAP_WORKER_COUNT=0 + 独立 worker `python -m eap.worker` + PostgreSQL/Redis healthcheck + depends_on 启动顺序 + YAML 锚点合并共享环境，镜像经 EAP_IMAGE 注入 ghcr 晋升标签）、nginx.conf（upstream least_conn + max_fails 自动摘除、/health 直通、SSE proxy_buffering off + 3600s 长超时、client_max_body_size 对齐网关 10MB 上限）、k8s-ha.yaml（Secret 占位 + Deployment 2 副本 + Service + /health readiness/livenessProbe + 独立 worker Deployment + resources 建议，样例级并注明生产需补 Ingress TLS/HPA/PDB 与外置 PG/Redis）、prometheus-alerts.yml（8 条规则全部基于 /metrics 实际导出指标名：实例宕机 sum(up{job="eap"})<2 与全宕、5xx 占比>5%、平均延迟、任务失败增速、熔断 eap_circuit_state、Agent 错误、网关在途）。③ runbook 增补 §8「恢复演练与 HA 部署」（drill 用法 + 月度 crontab 演练建议 + compose.ha 启动顺序 + 晋升切换要点 + 告警接入）。验证：三份 YAML pyyaml 解析 + 结构断言通过；check_docs.py 全绿（新增 5 链接有效）。
+- **剩余工作**：pg_dump/pg_restore/psycopg 分支无环境未实测（按 runbook §3/§4 既有规程书写，仅 --help 与代码审查交付）；k8s 样例为样例级（Ingress TLS/HPA/PDB/真实 Secret 托管待各环境补齐）；main.py lifespan 固定 task_engine.start(workers=2)，EAP_WORKER_COUNT=0 在 API 实例完全生效需 eap/src 一行改动（改读 settings.worker_count，属并行沙箱线文件域，样例按目标状态书写）；p95 延迟告警与任务积压深度告警分别需 metrics 增加 histogram 桶 / 队列深度 gauge 导出后补充（当前延迟为均值代理，积压无对应指标）。
+- **DoD**：一键恢复演练脚本在干净环境跑通。✅
 
 #### 任务组 P5：`ci-` CI/CD 强化 ✅（M32，e49cff6）
 - **现状**：GitHub Actions 全量回归 + Docker 镜像 job + Playwright E2E（M17.5/M15.6）。
@@ -219,6 +221,7 @@
 | **批次 1 ✅** | A `event-` ＋ D `im-` ＋ E `a2a-` | 已完成（04cabca / 69aa934 / bff9797），全量回归 234 passed |
 | **批次 2 ✅** | B `webhook-` ＋ C `connector-` ＋ F `gateway-` | 已完成（8289327 / 0fe5328 / fe64dce），全量回归 270 passed——v0.8 七项收官 |
 | **批次 3 ✅** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | 已完成（d6b03c8 / 22d7a24 / e49cff6），全量回归 288 passed；P5 顺带修复 ci.yml 自 M13.1 起的 YAML 解析错误 |
-| **批次 4（当前）** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | v0.9 收尾两线，互不依赖可并行；随后批次 5 = V `v1.0-` 收尾整合 + L 组按外部条件逐项 |
+| **批次 4 ✅** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | 已完成（94dc33b / a2928f8），全量回归 298 passed——**v0.9 五组全部收官**（main.py worker 数接 EAP_WORKER_COUNT 收尾项一并落地） |
+| **批次 5（当前）** | V `v1.0-` 收尾整合 | v0.9 收版审计 docs/16 + 版本提升 v0.9.0 + README 特性同步；随后 L 组按外部条件逐项 |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
