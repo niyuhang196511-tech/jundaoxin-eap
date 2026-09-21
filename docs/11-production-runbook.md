@@ -106,3 +106,48 @@ docker compose start eap
 环境保护建议：仓库 Settings → Environments → `production` 配置必需审批人（required reviewers）
 与可部署分支限制；部署侧按 `:<environment>` 标签拉取。控制台镜像（eap/frontend）目前仅 CI 构建校验，
 自动发布待后续补齐。
+
+## 8. 恢复演练与 HA 部署（M33）
+
+### 8.1 一键备份与恢复演练（[scripts/drill_restore.py](../scripts/drill_restore.py)）
+
+```bash
+# 备份（按 EAP_DB_URL 形态自动选择：SQLite 在线 backup API / PostgreSQL pg_dump -Fc）
+uv run python scripts/drill_restore.py backup --out /backup
+
+# 演练（--latest 取最近一份）：临时目录还原 → alembic upgrade head → 冒烟断言 → 报告 → 清理
+uv run python scripts/drill_restore.py drill --latest /backup
+
+# PostgreSQL 演练：pg_restore 到独立演练库（--clean --if-exists，不影响生产库）
+EAP_DB_URL=postgresql+psycopg://eap:pass@pg:5432/eap \
+  uv run python scripts/drill_restore.py drill --latest /backup --restore-db drill_eap
+```
+
+- 退出码全绿 0 / 失败非 0，每步打印 `[步骤 N]` 行可直接进 CI；`--keep` 保留现场，`--report-json` 出结构化报告。
+- 演练只在临时副本/演练库上操作，绝不回写源库；备份文件非空、能打开、可迁移、关键表可计数、`alembic_version` 单头。
+- 月度演练建议（crontab，演练不过 = 备份等于没备）：
+
+```bash
+0 5 1 * * cd /opt/eap && uv run python scripts/drill_restore.py drill --latest /backup --restore-db drill_eap >> /var/log/eap-drill.log 2>&1
+```
+
+### 8.2 双实例 HA（[deploy/docker-compose.ha.yml](../deploy/docker-compose.ha.yml)）
+
+启动顺序由 depends_on + healthcheck 保证：postgres/redis 健康 → eap-api-1/2（`EAP_WORKER_COUNT=0`，
+不内嵌 worker）→ eap-worker（`python -m eap.worker`）→ nginx。镜像用晋升标签 `:prod`（§7）：
+`EAP_IMAGE=… docker compose -f deploy/docker-compose.ha.yml up -d`。
+
+- nginx（[deploy/nginx.conf](../deploy/nginx.conf)）：upstream `least_conn` 分流、`/health` 直通、
+  SSE `proxy_buffering off`；故障实例由 `max_fails` 自动摘除。
+- 晋升切换要点：换镜像标签逐实例滚动重启（一次一个）；迁移由启动时 `alembic upgrade head` 补齐，
+  先放行一个实例验证 `/health` 与 `/metrics` 再升第二个；回滚即换回旧 tag 逐实例重启。
+- k8s 等价样例 [deploy/k8s-ha.yaml](../deploy/k8s-ha.yaml)（Deployment 2 副本 + `/health` 探针 +
+  独立 worker Deployment），生产需按环境补 Ingress TLS/HPA/PDB 并外置 PostgreSQL/Redis。
+
+### 8.3 告警接入（[deploy/prometheus-alerts.yml](../deploy/prometheus-alerts.yml)）
+
+指标名取自 `/metrics` 实际导出（`eap_requests_total` / `eap_request_latency_seconds_sum` /
+`eap_tasks_total` / `eap_circuit_state` / `eap_gateway_inflight` 等）。Prometheus 端 scrape 两个
+API 实例（`job="eap"`），`rule_files` 挂载该文件；规则含：实例宕机（`sum(up{job="eap"}) < 2`）、
+5xx 占比 > 5%、平均延迟（histogram 桶导出前为均值代理）、任务失败增速、熔断跳闸、网关在途。
+

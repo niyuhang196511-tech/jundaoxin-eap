@@ -1,0 +1,135 @@
+# EAP 双实例 HA 部署样例（M33 · 任务组 P4 `prod-ha-`，v0.9 生产化）
+#
+# 拓扑：nginx(80) → 2×API 实例（无状态，不发布端口，仅内网）→ 共享 PostgreSQL / Redis
+#       ＋ 1×独立 worker 实例（python -m eap.worker，任务队列经 Redis Streams 跨实例分发）
+#
+# 与单机版 eap/docker-compose.yml 的差异：
+#   - API 拆为两副本（同一镜像、无端口映射），由 nginx upstream 分流（见 nginx.conf）；
+#   - 任务执行收敛到独立 worker（API 实例 EAP_WORKER_COUNT=0）；
+#   - 不含 Milvus/etcd/minio/backup/console —— 需要向量路/控制台时按单机版补挂同网络服务，
+#     定时备份建议改用 scripts/drill_restore.py backup（runbook §8）。
+#
+# 使用：
+#   1. 将下方 image 占位改为实际 ghcr 镜像（晋升后的环境标签推荐 :prod，见 docs/11 §7），
+#      或 export EAP_IMAGE=ghcr.io/<owner>/<repo>/eap:prod；
+#   2. 复制 eap/.env.example 为 eap/.env 并更换密钥（EAP_SECRET_KEY 生成后不可更换）；
+#   3. docker compose -f deploy/docker-compose.ha.yml up -d
+#      启动顺序由 depends_on + healthcheck 保证：postgres/redis 先健康 → API → worker → nginx。
+#
+# 注：当前 eap/src/eap/main.py 的 lifespan 固定 task_engine.start(workers=2)（P1 交付时
+# API 内嵌 worker 的存量行为），EAP_WORKER_COUNT=0 要完全生效需该处改读 settings.worker_count；
+# 多副本多 worker 并发由租约/幂等键保证安全，本样例按目标状态书写。
+
+name: eap-ha
+
+# API 实例共享环境（YAML 锚点合并：各服务只覆盖差异项）
+x-eap-env: &eap-env
+  EAP_DB_URL: postgresql+psycopg://eap:${POSTGRES_PASSWORD:-eap}@postgres:5432/eap
+  EAP_REDIS_URL: redis://redis:6379/0          # 多副本必需：任务队列/事件广播/调度锁
+  EAP_HOST: 0.0.0.0
+  EAP_CORS_ORIGINS: ${EAP_CORS_ORIGINS:-http://localhost:3000}
+
+x-eap-api-common: &eap-api-common
+  image: ${EAP_IMAGE:-ghcr.io/CHANGE_ME/CHANGE_ME/eap:latest}   # * 改为实际镜像
+  restart: unless-stopped
+  networks: [eap-net]
+  # 依赖 postgres/redis 健康（启动顺序）；不发布宿主端口 —— 外部只经 nginx 访问
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  environment:
+    <<: *eap-env
+    EAP_WORKER_COUNT: "0"        # API 实例不内嵌 worker（见上方「注」）
+  env_file:
+    - path: ../eap/.env          # 密钥类（EAP_DEV_API_KEY/EAP_SESSION_SECRET/EAP_SECRET_KEY/OIDC…）
+      required: false
+  # 镜像自带同款 healthcheck（Dockerfile HEALTHCHECK）；显式写出便于按需调参
+  healthcheck:
+    test: ["CMD", "python", "-c",
+           "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8300/health')"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+
+services:
+  # ---- 共享有状态层 ----
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: eap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eap}   # * 生产必须更换，并与上方 EAP_DB_URL 同步
+      POSTGRES_DB: eap
+    volumes:
+      - postgres-data:/var/lib/postgresql/data        # 唯一持久化数据（备份/演练见 runbook §3/§8）
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eap -d eap"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [eap-net]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]  # AOF：队列瞬态数据重启不丢
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [eap-net]
+    restart: unless-stopped
+
+  # ---- 无状态 API × 2 ----
+  eap-api-1:
+    <<: *eap-api-common
+    container_name: eap-api-1
+
+  eap-api-2:
+    <<: *eap-api-common
+    container_name: eap-api-2
+
+  # ---- 独立任务 worker（EAP_WORKER_COUNT 为单进程内并发协程数）----
+  # 扩容：docker compose -f deploy/docker-compose.ha.yml up -d --scale eap-worker=3
+  eap-worker:
+    image: ${EAP_IMAGE:-ghcr.io/CHANGE_ME/CHANGE_ME/eap:latest}   # * 与 API 同一镜像
+    command: [".venv/bin/python", "-m", "eap.worker"]
+    environment:
+      <<: *eap-env
+      EAP_WORKER_COUNT: "2"
+    env_file:
+      - path: ../eap/.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [eap-net]
+    restart: unless-stopped
+
+  # ---- 反向代理（least_conn 分流 + SSE 不缓冲，见 nginx.conf）----
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"                    # 生产置于 TLS 反代/负载均衡之后（docs/06 §1）
+    depends_on:
+      - eap-api-1
+      - eap-api-2
+    networks: [eap-net]
+    restart: unless-stopped
+
+networks:
+  eap-net:
+    driver: bridge                 # 单机桥接；跨主机 HA 改 overlay/托管网络并外置 PG/Redis
+
+volumes:
+  postgres-data:
+  redis-data:

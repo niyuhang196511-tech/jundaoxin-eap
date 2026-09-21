@@ -1,0 +1,106 @@
+# EAP HA 告警规则样例（M33 · 任务组 P4 `prod-ha-`，v0.9 生产化）
+#
+# 指标名均来自 eap/src/eap/observability/metrics.py 实际导出（GET /metrics，Prometheus 文本格式）：
+#   eap_requests_total{method,path,status}     请求计数（status 为字符串状态码）
+#   eap_request_latency_seconds_sum{path}      请求延迟累计（仅 _sum，无 histogram 桶）
+#   eap_agent_invocations_total{agent,status}  Agent 调用计数（status=ok|error）
+#   eap_tasks_total{type,state}                任务状态迁移计数（RUNNING/COMPLETED/FAILED/WAITING_*）
+#   eap_circuit_state{model}                   熔断器状态 gauge（0 closed / 1 open / 2 half-open）
+#   eap_gateway_inflight                       网关在途请求 gauge（网关中间件启用时有意义）
+# 接入：Prometheus scrape 两个 API 实例（job 名下例用 eap，k8s 用 ServiceMonitor 对齐即可），
+#       将本文件放入 rule_files 目录（或 ConfigMap 挂载 prometheus）：
+#       rule_files: ["/etc/prometheus/rules/*.yml"]
+#
+# 诚实说明（样例限制）：
+#   - p95 延迟不可直接计算 —— 当前仅导出延迟 _sum 计数器、无 histogram 桶，下面用均值作代理，
+#     真分位数需 eap/observability/metrics.py 增加 bucket 导出（记入剩余工作）；
+#   - 任务队列积压（PENDING 深度）无对应 gauge 导出 —— eap_tasks_total 是状态迁移计数，
+#     无法表达「当前堆积多少」，暂以失败增速 + worker 存活规则兜底（记入剩余工作）。
+
+groups:
+  - name: eap-availability
+    rules:
+      # 实例宕机：up 由采集端生成（job 名对齐 scrape 配置；双实例形态下任一 <2 即降级）
+      - alert: EapInstanceDown
+        expr: sum(up{job="eap"}) < 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EAP 双实例降级为单实例（{{ $value }}/2 存活）"
+          description: "检查 {{ $labels.instance }} 容器/Pod 状态与 /health；单实例期间无冗余。"
+
+      - alert: EapAllInstancesDown
+        expr: sum(up{job="eap"}) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EAP 全部实例不可达"
+          description: "服务中断：检查 nginx/负载均衡与全部 eap-api 实例；必要时按 runbook §4 恢复。"
+
+  - name: eap-traffic
+    rules:
+      # 5xx 突增（对齐 docs/11 §5 既有建议；分母保护：请求为 0 时不误报）
+      - alert: EapHigh5xxRate
+        expr: |
+          sum(rate(eap_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(eap_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EAP 5xx 占比超过 5%（5 分钟窗口）"
+          description: "按 path/status 维度下钻 eap_requests_total 定位故障端点。"
+
+      # 延迟代理：无 histogram 桶，用 累计延迟增速/请求增速 = 平均延迟（秒）
+      - alert: EapLatencyHigh
+        expr: |
+          sum(rate(eap_request_latency_seconds_sum[5m]))
+            / clamp_min(sum(rate(eap_requests_total[5m])), 0.001) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EAP 平均请求延迟超过 2s（p95 需 histogram 桶后补充）"
+          description: "排查模型供应商延迟与熔断状态；持续偏高考虑扩 worker/API 副本。"
+
+  - name: eap-tasks
+    rules:
+      # 任务失败（对齐 docs/11 §5 既有建议）
+      - alert: EapTaskFailures
+        expr: sum(increase(eap_tasks_total{state="FAILED"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "15 分钟内出现失败任务（{{ $value }} 个）"
+          description: "结合审计与任务结果排查；持续失败检查 worker 存活与模型/连接器可用性。"
+
+      # 熔断跳闸：任一模型处于 open（eap_circuit_state 为实际导出的 gauge，语义 0/1/2）
+      - alert: EapCircuitOpen
+        expr: max(eap_circuit_state) >= 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "模型熔断器跳闸/半开（{{ $labels.model }}）"
+          description: "上游模型持续失败被剔除出降级链；检查供应商可用性。"
+
+      # Agent 调用错误增速（对齐 docs/11 §5 既有建议）
+      - alert: EapAgentErrors
+        expr: sum(increase(eap_agent_invocations_total{status="error"}[15m])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "15 分钟内 Agent 调用错误超过 5 次"
+          description: "按 agent 维度下钻；排查工具/知识库/模型链路。"
+
+      # 网关在途请求（仅启用并发上限中间件时有意义，见 EAP_GATEWAY_MAX_CONCURRENCY）
+      - alert: EapGatewayInflightHigh
+        expr: max(eap_gateway_inflight) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "网关在途请求持续高于 100"
+          description: "流量接近并发上限；考虑扩 API 副本或上调 EAP_GATEWAY_MAX_CONCURRENCY。"

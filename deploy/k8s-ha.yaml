@@ -1,0 +1,136 @@
+# EAP Kubernetes HA 部署样例（M33 · 任务组 P4 `prod-ha-`，v0.9 生产化）
+#
+# ⚠ 样例级：生产上线前必须按环境调整——
+#   - 镜像 tag（占位 CHANGE_ME；建议用晋升后的 :prod 环境标签，见 docs/11 §7）；
+#   - PostgreSQL / Redis 需自备并可达：托管 RDS/云 Redis，或集群内 CloudNativePG/Bitnami 等，
+#     本样例不含其清单；连接串经 Secret 注入（生产用 ExternalSecret/sealed-secrets 托管）；
+#   - Ingress（TLS 终止）与流量入口未包含 —— 由各环境既有网关接 eap-api Service:80；
+#   - 生产建议补充：HPA（API 无状态可水平扩）、PodDisruptionBudget（minAvailable: 1）、
+#     topologySpreadConstraints（跨节点打散双副本）。
+#
+# 依赖关系：API/worker 均需 PostgreSQL（EAP_DB_URL）与 Redis（EAP_REDIS_URL）就绪后才能
+# 通过 readinessProbe（应用启动时 init_db 自动迁移 + 连接 Redis）。
+# 注：EAP_WORKER_COUNT=0 使 API 实例不内嵌 worker（当前 main.py lifespan 固定 workers=2，
+# 完全生效需 eap/src 一行改动，见 deploy/docker-compose.ha.yml 头注）。
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eap-secrets
+  labels:
+    app: eap
+type: Opaque
+stringData:                       # * 生产必须全部更换；不要把真实值提交进仓库
+  EAP_DB_URL: "postgresql+psycopg://eap:CHANGE_ME@postgres:5432/eap"
+  EAP_REDIS_URL: "redis://redis:6379/0"
+  EAP_SESSION_SECRET: "CHANGE_ME"  # openssl rand -hex 32
+  EAP_SECRET_KEY: "CHANGE_ME"      # 秘密加密密钥，生成后不可更换（docs/11 §1）
+  EAP_DEV_API_KEY: "CHANGE_ME"     # 生产走 OIDC/SSO 时仅作兜底
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eap-api
+  labels:
+    app: eap
+    tier: api
+spec:
+  replicas: 2                      # 双实例 HA；无状态可继续水平扩
+  selector:
+    matchLabels:
+      app: eap
+      tier: api
+  template:
+    metadata:
+      labels:
+        app: eap
+        tier: api
+    spec:
+      containers:
+        - name: eap
+          image: ghcr.io/CHANGE_ME/CHANGE_ME/eap:latest   # * 改为实际镜像与环境标签
+          ports:
+            - containerPort: 8300
+          env:
+            - name: EAP_HOST
+              value: "0.0.0.0"
+            - name: EAP_WORKER_COUNT
+              value: "0"           # API 实例不内嵌 worker（任务收敛到 eap-worker）
+          envFrom:
+            - secretRef:
+                name: eap-secrets
+          readinessProbe:          # 就绪才接流量：/health 含 agents 启动状态
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:           # 无响应自动重启
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:               # 建议值：按实际负载压测后调整
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi          # 不设 CPU limit（避免流式响应被节流）
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eap-api
+  labels:
+    app: eap
+    tier: api
+spec:
+  type: ClusterIP                  # 流量入口：Ingress/网关 → Service:80 → 双 Pod（负载均衡）
+  selector:
+    app: eap
+    tier: api
+  ports:
+    - port: 80
+      targetPort: 8300
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eap-worker
+  labels:
+    app: eap
+    tier: worker
+spec:
+  replicas: 1                      # 多副本安全（Redis Streams + 租约/幂等键），按任务量扩
+  selector:
+    matchLabels:
+      app: eap
+      tier: worker
+  template:
+    metadata:
+      labels:
+        app: eap
+        tier: worker
+    spec:
+      containers:
+        - name: eap-worker
+          image: ghcr.io/CHANGE_ME/CHANGE_ME/eap:latest   # * 与 API 同一镜像
+          command: [".venv/bin/python", "-m", "eap.worker"]
+          env:
+            - name: EAP_WORKER_COUNT
+              value: "2"           # 单进程内并发协程数（优雅停：drain ≤30s）
+          envFrom:
+            - secretRef:
+                name: eap-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi

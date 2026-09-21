@@ -64,7 +64,8 @@ async def lifespan(app: FastAPI):
 
     load_plugins()  # 扩展开发体系：插件目录加载（单插件失败不阻断启动）
     registry_sync.start_subscriber(registry.apply_remote_event)  # M10：跨副本管理操作广播
-    await app.state.task_engine.start(workers=2)
+    # M32：worker 数取 EAP_WORKER_COUNT——HA 部署下 API 实例设 0（执行交给独立 worker 进程，deploy/compose）
+    await app.state.task_engine.start(workers=get_settings().worker_count)
     # 事件中心（M30）：先起事件总线，触发引擎再订阅（规则 CRUD 后经 reload 即时生效）
     app.state.trigger_engine = TriggerEngine(app.state.task_engine)
     await bus.start()
