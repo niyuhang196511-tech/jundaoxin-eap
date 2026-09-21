@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # 插件目录（扩展开发体系）：手写工具/RAG 组件/Agent 的目录发现点，启动与 /plugins/reload 时加载
     plugins_dir: str = "./plugins"
 
+    # IM 投递重试队列（M30 任务组 D）：进程内 asyncio 指数退避（无 Redis 依赖）。
+    # 退避间隔 = base * 2^(attempts-1)，封顶 max_seconds；poll_seconds 为空闲扫描周期
+    im_retry_max_attempts: int = 5
+    im_retry_base_seconds: float = 2.0
+    im_retry_max_seconds: float = 300.0
+    im_retry_poll_seconds: float = 5.0
+
 
 @lru_cache
 def get_settings() -> Settings:
