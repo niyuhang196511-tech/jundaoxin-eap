@@ -4,6 +4,7 @@
 数据权利：按用户批量遗忘与导出（admin）。
 M34/L7：scope 分层扩展（session|user|agent|org）、importance 权重、ttl_days TTL；
 不传新字段行为与 v0.9.0 一致（无破坏性变更）。
+M41-A：POST /consolidate 组织记忆沉淀 → KB 文档（docs/18 §五，幂等 + ACL 联动）。
 """
 
 from __future__ import annotations
@@ -137,3 +138,74 @@ def purge_expired(request: fastapi.Request, db: Session = fastapi.Depends(get_db
                  detail={"retention_days": retention, "deleted": count},
                  trace_id=getattr(request.state, "trace_id", ""))
     return {"deleted": count, "retention_days": retention}
+
+
+class MemoryConsolidate(BaseModel):
+    """组织记忆沉淀入参（M41-A，docs/18 §五）：org 层高价值记忆 → KB 文档进入三路检索。"""
+
+    kb_name: str = Field(default="org-memory", pattern=r"^[a-z][a-z0-9-]{2,40}$")  # KBCreate 同名规则
+    min_importance: float = Field(default=0.7, ge=0.0, le=1.0)  # 沉淀阈值
+    limit: int = Field(default=50, ge=1, le=500)  # 单次沉淀条数上限
+
+
+@router.post("/consolidate", dependencies=[fastapi.Depends(require_admin)])
+def consolidate(body: MemoryConsolidate, request: fastapi.Request,
+                db: Session = fastapi.Depends(get_db)):
+    """组织记忆沉淀（M41-A，docs/18 §五）：挑选 scope=org 且 importance ≥ 阈值且未沉淀过
+    的记忆（created_at 升序，上限 limit 条）→ 聚合为 markdown 文档（带批次号）→ 经既有
+    摄入管线（分块/嵌入/图谱）写入 KB（默认 org-memory，不存在自动创建，KBCreate 语义）；
+    文档自动带 role=* allow ACL（M36 复用：org 沉淀对全员可见，租户过滤仍生效）；
+    本批记忆 meta 标记 consolidated=true + consolidated_into=文档 id 防重复入选（幂等）。
+    无可沉淀记忆时返回 {consolidated: 0} 不建文档。admin + 审计 memory.consolidate。"""
+    from sqlalchemy import func, select
+
+    from ...knowledge import acl as kb_acl
+    from ...knowledge.service import ingest_text
+    from ...models import Document, DocumentACL, KB
+    from ...runtime.memory import utcnow as memory_utcnow
+
+    tenant_id = _tenant_of(request)
+    candidates = memory_service.consolidation_candidates(
+        db, tenant_id=tenant_id, min_importance=body.min_importance, limit=body.limit)
+    if not candidates:
+        audit.record("memory.consolidate", actor=audit.actor_of(request), target=body.kb_name,
+                     detail={"consolidated": 0, "kb": body.kb_name,
+                             "min_importance": body.min_importance},
+                     trace_id=getattr(request.state, "trace_id", ""))
+        return {"consolidated": 0, "kb": body.kb_name, "document_id": None, "title": None}
+
+    # KB 不存在自动创建（KBCreate 语义：JWT 通道归属该租户；API Key = 平台共享 NULL）
+    kb = db.scalar(select(KB).where(KB.name == body.kb_name))
+    if kb is None:
+        kb = KB(name=body.kb_name, title="组织记忆沉淀库", template="doc",
+                tenant_id=tenant_id if getattr(request.state, "auth_kind", "") == "jwt" else None)
+        db.add(kb)
+        db.flush()
+
+    batch_no = (db.scalar(select(func.count(Document.id)).where(
+        Document.kb_id == kb.id, Document.source == "memory-consolidate")) or 0) + 1
+    now = memory_utcnow()
+    title = f"组织记忆沉淀 {now:%Y-%m-%d %H:%M}（批次 {batch_no}）"
+    lines = "\n".join(
+        f"- {(r.created_at or now):%Y-%m-%d %H:%M} {r.content}" for r in candidates)
+    text = (f"本批沉淀 {len(candidates)} 条组织记忆"
+            f"（importance ≥ {body.min_importance}）：\n\n{lines}\n")
+    doc = ingest_text(db, kb, title, text, source="memory-consolidate",
+                      meta={"type": "memory-consolidate", "batch_no": batch_no,
+                            "count": len(candidates),
+                            "memory_ids": [r.id for r in candidates]})
+    # 幂等标记：本批记忆不再重复入选；consolidated_into 指向沉淀文档（可追溯）
+    for r in candidates:
+        r.meta = {**(r.meta or {}), "consolidated": True, "consolidated_into": doc.id}
+    # ACL 联动（M36）：org 沉淀对全员可见（role=* allow；租户过滤仍生效）
+    db.add(DocumentACL(kb_id=kb.id, document_id=doc.id, effect="allow",
+                       subject_type="role", subject="*",
+                       note="组织记忆沉淀自动放行（M41-A）"))
+    db.commit()
+    kb_acl.invalidate(kb.id)
+    audit.record("memory.consolidate", actor=audit.actor_of(request), target=kb.name,
+                 detail={"consolidated": len(candidates), "kb": kb.name,
+                         "min_importance": body.min_importance, "batch_no": batch_no,
+                         "document_id": doc.id, "memory_ids": [r.id for r in candidates]},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"consolidated": len(candidates), "kb": kb.name, "document_id": doc.id, "title": title}

@@ -5,7 +5,7 @@
 - scope 分层（M34/L7）：session（会话）| user（用户）| agent（智能体长期记忆，按 agent 列
   过滤）| org（租户内组织共享，session_id/user_id 为空）；不传 scope 时保持 v0.9.0 的
   session/user 原语义（向后兼容）
-- 组织记忆：走知识中心（特殊 KB），此处不重复
+- 组织记忆：走知识中心（特殊 KB，M41-A consolidation_candidates 供沉淀端点挑选），此处不重复
 """
 
 from __future__ import annotations
@@ -203,6 +203,23 @@ class MemoryService:
              "created_at": str(r.created_at)}
             for r in db.scalars(q).all()
         ]
+
+    # ---------- 组织记忆沉淀（M41-A，docs/18 §五） ----------
+
+    def consolidation_candidates(self, db: Session, *, tenant_id: int | None = None,
+                                 min_importance: float = 0.7,
+                                 limit: int = 50) -> list[MemoryRecord]:
+        """组织记忆沉淀候选：scope=org 且 importance ≥ 阈值且 meta 未标记 consolidated、
+        未过期（TTL 口径与 recall/list 一致）的记忆；按 created_at 升序取 limit 条
+        （先入先沉淀，分批稳定）。"""
+        q = select(MemoryRecord).where(MemoryRecord.scope == "org",
+                                       MemoryRecord.importance >= min_importance)
+        if tenant_id is not None:
+            q = q.where(MemoryRecord.tenant_id == tenant_id)
+        q = self._alive(q)
+        rows = [r for r in db.scalars(q).all() if not (r.meta or {}).get("consolidated")]
+        rows.sort(key=lambda r: (r.created_at or utcnow(), r.id))
+        return rows[:max(1, limit)]
 
     # ---------- 遗忘 ----------
 
