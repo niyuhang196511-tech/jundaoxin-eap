@@ -17,11 +17,11 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.9.0（已发布）+ M34 批次 6 与收尾接线（见下） |
-| 最新里程碑 | M34（批次 6 三线 + 泄漏/抖动修复 + 摘要压缩接线 + console 镜像/K8s 收尾） |
-| 代码 commit | 014c993 |
+| 平台版本 | v0.9.0（已发布）+ M34~M35（L 组可离线工程项全部落地，见下） |
+| 最新里程碑 | M35（mcp-M35 OAuth + 长连接复用） |
+| 代码 commit | 566fd36 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **330 passed, 8 skipped, 0 errors**（84s）——较 v0.9.0 基线 298 passed 增 32（三线新用例 31 + 接线测试 1）；另修复存量测试状态泄漏（498bdfd）与 scheduler 全量负载抖动（88c14b9） |
+| 测试基线 | **337 passed, 5 skipped, 3 errors**（128s）——较 M34 基线 329 passed 增 8（L8 新用例 7 + 接线测试 1）；3 errors 为 test_mcp 子进程 live_server 的 Windows 回环防火墙间歇问题（docs/13 §三，本轮复现；CI Linux 不受影响，另有 5 skipped 为 Redis/POSIX 条件跳过） |
 | 下一主线 | **L 组剩余项按外部条件逐项消化**（vLLM 需 GPU、Harness 需产品决策、IM 联调需外部账号、SLO 需生产环境、组织记忆联动 KB/RAG ACL 需设计）；v1.0 正式发布前置：seal 深度扫描补跑（docs/16 声明）+ 上述条件项清零或产品决策 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
@@ -208,7 +208,7 @@
 | L5 | 技能市场分发站点 + 技能包 scripts/assets 附件 | 🔶 附件包工程部分 ✅（M34，d550af3）：bundle 扩展 scripts/（仅 .py，执行走 M33 沙箱 script_tool）与 assets/（白名单扩展），sha256 清单随签名覆盖、安全校验镜像 M28、落盘/清单/下载/导出往返端点、scaffold 模板示例；**分发站点仍待产品决策** |
 | L6 | Permission-aware RAG 文档级 ACL | 租户过滤已做（M23）；缺文档/角色级 ACL，需权限模型设计 |
 | L7 | Memory 深化：LLM 摘要压缩、agent/组织层 scope、importance 权重、组织记忆联动知识中心 | 🔶 工程部分 ✅（M34，49a5ea4 + 6e0710f 接线）：scope 扩为 session\|user\|agent\|org（agent 按 agent 列过滤、org 租户内共享）、importance 0~1 加权召回打分（final = cos + 0.3\*overlap + 0.2\*importance）、ttl_days→expires_at TTL（recall/list 默认过滤过期，purge 一并清理）、`EAP_MEMORY_SUMMARY_COMPRESS` 开关的 LLM 摘要压缩（`runtime/context.py` compress_messages：hub.complete 生成摘要→kind=summary 落库→历史替换，失败回退字符截断）；**已接入生产调用链**——`ctx.run_loop` 新增 session_id 参数（order_agent 先行启用），接线测试覆盖摘要调用/替换/落库与未传对照；迁移 c0d3e5a7f9b4；剩余「组织记忆联动知识中心」 |
-| L8 | MCP 深化：OAuth（复用 OIDC 客户端）、长连接复用 | docs/10 遗留 |
+| L8 | MCP 深化：OAuth（复用 OIDC 客户端）、长连接复用 | ✅（M35，566fd36）：client_credentials 凭证托管（Fernet 加密缓存 + 30s margin 过期自动重取 + 手动刷新端点，模式同 M31 连接器）+ 认证头三级回退（OAuth bearer → api_key → 无）+ per (url, auth 指纹) 连接池长连接复用（token 刷新自动轮换实例）；validate 端点接入认证；完整 MCP 握手 OAuth 联调属 L3 式外部验证（mock IdP 离线 7 测试绿） |
 | L9 | 多租户计费细化（单价账单、配额分层） | 成本报表已有（M26），计费产品化待决策 |
 | L10 | 评测深化：人工抽检、在线影子流量、A/B 效果报表回流 | 🔶 A/B 报表回流工程部分 ✅（M34，b403ebd）：变体归因埋点（`runtime/prompts.py` resolve_template 实验命中即写审计 prompt.render[experiment/version_selected/picked/percent_b] + variant_scope contextvar；agents 同步调用完成/失败落 agent.run.completed 审计并携带 prompt_variant，经 trace_id 关联 usage_records）；报表 `GET /api/v1/prompts/experiments/{name}/report`（admin+审计 prompt.ab.report，分 variant 聚合渲染数与分流占比 vs percent_b 偏差、归因调用数/成功率、token/成本、延迟 p50/均值，支持 since_hours 时间窗，attribution 字段诚实标注口径）；结论辅助 `POST .../conclude`（admin+审计 prompt.ab.conclude，winner+reason 禁用实验，promote=true 复用版本流水线发布胜出版本）。**归因口径局限（如实）**：renders 精确；调用指标为近似——仅覆盖同步智能体调用内部渲染了实验 prompt 的调用（SSE 流式不落审计不计入；渲染前失败无变体可归因；一次调用渲染多实验按最近命中归因），无数据维度返回 0/null 不编造。零 schema 变更（指标全走审计日志 JSON 聚合）；迁移链修复：e2f5a7b9c3d6 down 改指 c0d3e5a7f9b4 恢复单头线性。剩余：人工抽检、在线影子流量 |
 | L11 | A2A 跨租户委派 | ✅ 已关闭——任务组 E ④ 已覆盖（跨租户委派默认拒绝 + `a2a-delegate-allowlist` 策略放行 + 审计，M30） |
