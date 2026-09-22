@@ -28,6 +28,7 @@ from .api.v1 import im as api_im
 from .api.v1 import evals as api_evals
 from .api.v1 import extensions as api_extensions
 from .api.v1 import kb as api_kb
+from .api.v1 import lora as api_lora
 from .api.v1 import memory as api_memory
 from .api.v1 import mcp_registry as api_mcp_registry
 from .api.v1 import models as api_models
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(api_extensions.router)
     app.include_router(api_mcp_registry.router)
     app.include_router(api_models.router)
+    app.include_router(api_lora.router)  # LoRA adapter 托管（M42-A）
     app.include_router(api_embed.router)
     app.include_router(api_im.router)
     app.include_router(api_tasks.router)

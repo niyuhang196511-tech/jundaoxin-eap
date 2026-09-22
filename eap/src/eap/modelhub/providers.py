@@ -297,6 +297,10 @@ def get_provider(provider_name: str) -> Provider:
         return _MOCK
     if provider_name == "openai_compat":
         return _OPENAI
+    if provider_name == "vllm":  # M42-A：vLLM（OpenAI 兼容 + LoRA 管理，见 modelhub/vllm.py）
+        from .vllm import get_vllm_provider
+
+        return get_vllm_provider()
     raise ProviderError(f"未知 provider: {provider_name}")
 
 

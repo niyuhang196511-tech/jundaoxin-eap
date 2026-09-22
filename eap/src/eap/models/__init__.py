@@ -566,6 +566,8 @@ class EvalRunRecord(Base):
 
     judge=rule：expected_any 关键词命中；judge=llm：LLM-as-Judge 多维评分（v0.6）。
     kind=rag：metrics 存 HitRate@K/Recall@K/MRR/NDCG（v0.6 RAG 评测）。
+    model 非空（M42-B）：模型直评（不经过 agent，用例逐条经 hub prefer=model 调用），
+    同时作为 eval-gate 路由门禁的判定输入（runtime/policy.py apply_eval_gate）。
     """
 
     __tablename__ = "eval_runs"
@@ -573,6 +575,7 @@ class EvalRunRecord(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     agent: Mapped[str] = mapped_column(String(64), index=True)
     dataset: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # M42-B 模型直评
     verdict: Mapped[str] = mapped_column(String(8), default="PENDING")  # PASS | FAIL | PENDING
     min_pass_rate: Mapped[float] = mapped_column(default=0.8)
     judge: Mapped[str] = mapped_column(String(8), default="rule")  # rule | llm
@@ -875,5 +878,29 @@ class WebhookDeliveryRecord(Base):
     status: Mapped[str] = mapped_column(String(8), default="pending", index=True)  # pending | done | dead
     response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 最近一次 HTTP 响应码
     error: Mapped[str] = mapped_column(String(512), default="")  # 最近一次失败原因（done 时清空）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class LoraAdapter(Base):
+    """LoRA adapter 托管注册表（M42-A，L1 工程部分；docs/10 遗留项 / docs/20 部署指南）。
+
+    - name 唯一，即 vLLM 上的 adapter/模型名（load 后经模型中心 provider=vllm 直接路由）
+    - source_path 为 GPU 宿主机（WSL2/容器内）上的 adapter 目录（平台侧不做文件校验）
+    - served_as：vLLM 上对外服务的模型名，默认与 name 相同（注册时落定）
+    - status 状态机：registered（登记）→ loaded（load 成功）/ failed（load/unload 失败，
+      note 记错误）→ unloaded（unload 成功）；可重复 load/unload 往返
+    """
+
+    __tablename__ = "lora_adapters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    base_model: Mapped[str] = mapped_column(String(128), default="")  # 基座模型（vLLM serve 的 model）
+    source_path: Mapped[str] = mapped_column(String(512), default="")  # GPU 宿主机上的 adapter 目录
+    served_as: Mapped[str] = mapped_column(String(64), default="")  # vLLM 上的模型名，默认=name
+    status: Mapped[str] = mapped_column(String(16), default="registered", index=True)
+    # registered | loaded | unloaded | failed
+    note: Mapped[str] = mapped_column(String(512), default="")  # 失败原因 / 运维备注
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
