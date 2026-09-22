@@ -661,12 +661,36 @@ class TaskEngine:
             raise
         except Exception as e:
             self._mark(task_id, "FAILED", {"error": str(e)})
+            await self._notify_done(task_id, task_type, "FAILED", {"error": str(e)})
             return
         finally:
             self._running.pop(task_id, None)
             self._cancel_requested.discard(task_id)
 
         self._mark(task_id, "COMPLETED", result)
+        await self._notify_done(task_id, task_type, "COMPLETED", result)
+
+    async def _notify_done(self, task_id: str, task_type: str, state: str,
+                           result: dict) -> None:
+        """M40-A（docs/18 §二.5「完成后卡片回执结果」）：任务终态 → IM 完成回执卡片。
+
+        仅 agent.invoke/agent.hitl 任务类型生效（docs/18 §二.5 移动远程操作范畴）；
+        懒 import 防循环依赖（模式同挂起点 notify_hitl 钩子）；summary 取
+        result.output（失败取 error，卡片内 ≤200 字符截断）；推送/入队失败只告警，
+        不影响任务引擎终态落库（非阻断）。
+        """
+        if task_type not in ("agent.invoke", "agent.hitl"):
+            return
+        try:
+            from .im_outbound import notify_task_done
+
+            data = result or {}
+            summary = str(data.get("output") or data.get("error") or "")
+            with SessionLocal() as ndb:
+                await notify_task_done(task_id, task_type, state, summary, ndb)
+        except Exception as e:
+            logging.getLogger("eap.tasks").warning(
+                "任务完成回执推送失败 task=%s: %s", task_id, e)
 
     def _mark(self, task_id: str, state: str, result: dict) -> None:
         from ..observability.metrics import incr

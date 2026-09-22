@@ -101,7 +101,7 @@ async def revoke_jwt(request: fastapi.Request, db: Session = fastapi.Depends(get
 
 @router.get("/devices", dependencies=[fastapi.Depends(resolve_tenant)])
 def list_devices(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
-    """本租户的 Harness 设备列表（设备名/状态/签发时间；明文 key 不可见）。"""
+    """本租户的 Harness 设备列表（设备名/归属用户/状态/签发时间；明文 key 不可见）。"""
     tenant_id = getattr(request.state, "tenant_id", None)
     if tenant_id is None:
         raise fastapi.HTTPException(status_code=403, detail="EAP-3003 仅凭证通道可见设备列表")
@@ -109,7 +109,8 @@ def list_devices(request: fastapi.Request, db: Session = fastapi.Depends(get_db)
         ApiKey.tenant_id == tenant_id,
         ApiKey.note.like("harness:%"),  # noqa: E712
         ApiKey.enabled == True)).all()  # noqa: E712
-    return [{"name": r.note.removeprefix("harness:"), "created_at": str(r.created_at) if hasattr(r, "created_at") else ""}
+    return [{"name": r.note.removeprefix("harness:"), "user": r.device_user,
+             "created_at": str(r.created_at) if hasattr(r, "created_at") else ""}
             for r in rows]
 
 
@@ -119,6 +120,8 @@ def register_device(body: dict, request: fastapi.Request, db: Session = fastapi.
 
     设备名全局唯一（note = harness:<name>，唯一索引保障）；重名且在用 → 409
     （吊销后可重用同名）。审计 harness.device.register。
+    M40-A 设备-用户配对（docs/18 §二.5）：body.user 显式指定归属人标识，缺省取
+    JWT 通道登录身份（request.state.user；API Key 通道无登录态则为 NULL）。
     """
     import secrets as _secrets
 
@@ -130,18 +133,22 @@ def register_device(body: dict, request: fastapi.Request, db: Session = fastapi.
     tenant_id = getattr(request.state, "tenant_id", None)
     if tenant_id is None:
         raise fastapi.HTTPException(status_code=403, detail="EAP-3003 仅凭证通道可注册设备")
+    user = (str((body or {}).get("user") or "").strip()
+            or str(getattr(request.state, "user", "") or "").strip() or None)
     note = f"harness:{name}"
     if db.scalar(select(ApiKey).where(ApiKey.note == note, ApiKey.enabled == True)):  # noqa: E712
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 设备 {name} 已注册（先吊销可重用同名）")
     plain = f"eap_d_{_secrets.token_urlsafe(24)}"
     from ...security_keys import key_hash
 
-    key = ApiKey(key_hash=key_hash(plain), tenant_id=tenant_id, note=note)
+    key = ApiKey(key_hash=key_hash(plain), tenant_id=tenant_id, note=note, device_user=user)
     db.add(key)
     db.commit()
     audit.record("harness.device.register", actor=audit.actor_of(request), target=name,
+                 detail={"user": user} if user else None,
                  trace_id=getattr(request.state, "trace_id", ""))
-    return {"name": name, "api_key": plain, "note": "明文仅此一次返回，请存入 Harness 凭据库"}
+    return {"name": name, "api_key": plain, "user": user,
+            "note": "明文仅此一次返回，请存入 Harness 凭据库"}
 
 
 @router.delete("/devices/{name}", dependencies=[fastapi.Depends(resolve_tenant)])

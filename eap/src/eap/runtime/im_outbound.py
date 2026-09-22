@@ -21,6 +21,12 @@ ActionInvoke(action, tool, args) → run_action）对齐：按钮点击回调回
 - 企微：群机器人 webhook template_card（button_interaction）。
 HTTP 发送统一经本模块 post_json（默认 httpx；测试 monkeypatch 注入 fake，不发真实请求）。
 
+## 任务完成回执（M40-A，docs/18 §二.5「完成后卡片回执结果」）
+任务到终态（runtime/tasks.py COMPLETED/FAILED 落库点）调 notify_task_done：向同批
+notify_hitl 开关渠道推送 ✅/❌ 回执卡片（task_id/任务类型/输出摘要 ≤200 字符/错误，
+无按钮——终态无需操作）；幂等键 done:{task_id}:{state}（重跑/重扫不重发）；
+发送失败走既有重试队列。
+
 ## 投递重试队列（进程内 asyncio，无 Redis 依赖）
 失败投递（HTTP 非 2xx / 平台业务码非 0 / 回调业务处理抛错）落 im_outbound_logs
 （direction=in|out），process_due/retry_loop 按指数退避重投
@@ -336,6 +342,63 @@ async def notify_hitl(task_id: str, agent: str, tool: str, db: Session, *,
             continue
         if find_active(db, ch.id, event_key) is not None:
             continue  # 幂等：该渠道已推送过本任务的审批卡片
+        status, error = "done", ""
+        try:
+            await send_card(ch, card, sender=sender)
+        except Exception as e:  # 首投失败 → pending 入队走后台重试
+            status, error = "pending", str(e)[:500]
+            pending = True
+        enqueue(db, channel_id=ch.id, direction="out", event_key=event_key,
+                payload=card, status=status, attempts=1, error=error)
+        pushed.append(ch.name)
+    db.commit()
+    if pending:
+        schedule_retry_loop()
+    return pushed
+
+
+# ---------- 任务完成回执卡片（M40-A，docs/18 §二.5「完成后卡片回执结果」） ----------
+
+_DONE_SUMMARY_MAX = 200  # 正文输出/错误摘要截断长度
+
+
+def build_done_card(task_id: str, task_type: str, state: str, summary: str) -> dict:
+    """任务终态回执卡片（平台无关结构）：标题按状态（✅ 已完成 / ❌ 失败），正文含
+    task_id / 任务类型 / 输出或错误摘要（≤200 字符截断）；终态无需操作，无按钮
+    （三平台适配器对空 actions 自然退化为纯通知卡片）。
+    """
+    ok = state != "FAILED"
+    status_word = "已完成" if ok else "执行失败"
+    lines = [f"任务 `{task_id}`（{task_type or '未知类型'}）{status_word}。"]
+    text = str(summary or "").strip()
+    if text:
+        lines.append(("输出：" if ok else "错误：") + text[:_DONE_SUMMARY_MAX])
+    return {"title": "✅ 已完成" if ok else "❌ 失败",
+            "text": "\n".join(lines), "actions": []}
+
+
+async def notify_task_done(task_id: str, task_type: str, state: str, summary: str,
+                           db: Session, *, sender=None) -> list[str]:
+    """任务终态 → IM 完成回执卡片推送（M40-A）：notify_hitl 开关渠道逐个推送。
+
+    与 notify_hitl 同渠道开关（extra["notify_hitl"]=true，移动远程同一批受众）；
+    幂等：event_key = done:{task_id}:{state}——同渠道已有同键 done/pending 投递
+    直接跳过（任务重跑/重扫不重发）；返回实际处理的渠道名列表（跳过的不含）。
+    失败走既有重试队列：首投失败 enqueue pending（指数退避重投，超限 dead），
+    并惰性拉起后台重试循环。传入会话由本函数 commit（终态点为独立会话）；
+    sender 可注入 fake 发送函数（签名同 post_json，测试用），缺省本模块 post_json。
+    """
+    channels = db.scalars(select(IMChannelRecord)
+                          .where(IMChannelRecord.enabled == True))  # noqa: E712
+    card = build_done_card(task_id, task_type, state, summary)
+    event_key = f"done:{task_id}:{state}"
+    pushed: list[str] = []
+    pending = False
+    for ch in channels:
+        if not (ch.extra or {}).get("notify_hitl"):
+            continue
+        if find_active(db, ch.id, event_key) is not None:
+            continue  # 幂等：该渠道已推送过本任务本终态的回执
         status, error = "done", ""
         try:
             await send_card(ch, card, sender=sender)

@@ -44,6 +44,8 @@ class ApiKey(Base):
     """凭证体系 M1 子集：服务间 API Key（用户 Token/EmbedToken 见 docs/07 §1）。
 
     M7 起 key_hash = sha256(key) 为认证依据；key 明文列仅为兼容期迁移保留（新铸造不落明文）。
+    M40-A 起 Harness 设备 Key（note=harness:<name>）附 device_user——设备归属用户标识
+    （docs/18 §二.5 设备-用户配对语义地基；存量 Key 为 NULL，行为不变）。
     """
 
     __tablename__ = "api_keys"
@@ -53,6 +55,7 @@ class ApiKey(Base):
     key_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     note: Mapped[str] = mapped_column(String(128), default="")
+    device_user: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 设备归属用户（仅设备 Key 使用）
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
