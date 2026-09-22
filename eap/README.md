@@ -1,6 +1,6 @@
-# EAP 平台代码（v0.9.0）
+# EAP 平台代码（v1.0.0）
 
-企业级 Agent 智能体平台可运行工程（v0.9.0）：**模型 / 知识 / Agent Runtime / Workflow（版本化+四环境）/ 交互引擎 / 发布治理 / 扩展平台 / 企业集成（事件-Webhook-IM-A2A-网关）/ 生产化（Worker 池-沙箱-HA-CI/CD）**。
+企业级 Agent 智能体平台可运行工程（v1.0.0）：**模型 / 知识 / Agent Runtime / Workflow（版本化+四环境）/ 交互引擎 / 发布治理 / 扩展平台 / 企业集成（事件-Webhook-IM-A2A-网关）/ 生产化（Worker 池-沙箱-HA-CI/CD）**。
 架构设计见上级目录 [docs/](../docs/)（三面七层、领域模型、API 规范、路线图）。
 
 ## 环境与启动（uv + Python 3.12）
@@ -201,4 +201,4 @@ class MyAgent(AgentApp):
 
 权威进度账本：[docs/progress-plan.md](../docs/progress-plan.md)——14 个能力域 × 状态、逐项完成描述（含关键文件证据）、剩余工作与验收标准、并行任务分组。
 
-版本路线：**v0.5 Agent Application / v0.6 Platform Governance / v0.7 Extension Platform / v0.8 企业集成 / v0.9 生产化均已落地**（里程碑 M18–M33，收版审计 docs/12/13/15）；长期悬置项（vLLM multi-LoRA、Harness 桌面端、IM 真实凭证联调等）见账本 L 组。
+版本路线：**v0.5 Agent Application / v0.6 Platform Governance / v0.7 Extension Platform / v0.8 企业集成 / v0.9 生产化 / v1.0 收官均已落地**（里程碑 M18–M35，收版审计 docs/12/13/15/16）；长期悬置项（vLLM multi-LoRA、Harness 桌面端、IM 真实凭证联调等）见账本 L 组。
