@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | v0.9.0（已发布）+ M34~M35（L 组可离线工程项全部落地，见下） |
-| 最新里程碑 | M35（mcp-M35 OAuth + 长连接复用） |
-| 代码 commit | 566fd36 |
+| 平台版本 | **v1.0.0（已发布，tag v1.0.0）**——14 能力域全 ✅；M34~M35 含 L 组可离线工程项 |
+| 最新里程碑 | M35 + v1.0.0 收版（release 6186583） |
+| 代码 commit | 6186583 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **337 passed, 5 skipped, 3 errors**（128s）——较 M34 基线 329 passed 增 8（L8 新用例 7 + 接线测试 1）；3 errors 为 test_mcp 子进程 live_server 的 Windows 回环防火墙间歇问题（docs/13 §三，本轮复现；CI Linux 不受影响，另有 5 skipped 为 Redis/POSIX 条件跳过） |
-| 下一主线 | **L 组剩余项按外部条件逐项消化**（vLLM 需 GPU、Harness 需产品决策、IM 联调需外部账号、SLO 需生产环境、组织记忆联动 KB/RAG ACL 需设计）；v1.0 正式发布前置：seal 深度扫描补跑（docs/16 声明）+ 上述条件项清零或产品决策 |
+| 测试基线 | **337 passed, 8 skipped, 0 errors**（100s）——发布复验；test_mcp 子进程 errors 为 Windows 回环防火墙间歇问题（docs/13 §三），本轮未复现 |
+| 下一主线 | **批次 7（当前）：M36 = L6 RAG 文档级 ACL**（设计方案 docs/17，待用户批准后实施）→ Harness 桌面端 v1.1 主线（形态已决策，见 L2）；L 组其余项按外部条件逐项消化（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -36,7 +36,7 @@
 | v0.7 | Extension Platform（统一 Manifest/注册表/Bundle/SDK 契约） | ✅ 完成 | M27–M29 | docs/15 |
 | **v0.8** | **Enterprise Integration（Connector/Webhook/Event/IM/A2A/Discovery/Gateway）** | ✅ 完成（七项全部落地：M30 批次 1 + M31 批次 2；真实凭证/外网联调遗留 → L3/L4） | M30–M31 | 待收版审计 docs/16 |
 | v0.9 | Production（分布式 Worker/Sandbox/HA/环境体系/CI-CD） | ✅ 完成（P1 Worker/P3 环境体系/P5 CI-CD/P2 沙箱/P4 HA-DR 全部落地） | M32–M33 | docs/16 ✅ |
-| v1.0 | Enterprise Agent Platform 收尾整合 | 🔶 收尾中（v0.9.0 已发布 + docs/16 审计 + 文档全量同步；剩 seal 补扫与 L 组悬置项消化后正式发布） | — | docs/16 |
+| **v1.0** | **Enterprise Agent Platform** | ✅ **v1.0.0 已发布**（2026-09-21，tag v1.0.0；14 能力域全 ✅；seal 门禁决策=接受 docs/16 替代，见 docs/16 §三） | M34–M35 + 收版 | docs/16 |
 
 ---
 
@@ -202,7 +202,7 @@
 | 编号 | 项 | 阻塞原因 / 说明 |
 |---|---|---|
 | L1 | vLLM multi-LoRA 托管 + 评测门禁接入模型路由 | 需 GPU 环境（docs/10 遗留） |
-| L2 | Harness 桌面端（Tauri，订阅同步、沙箱） | docs/09 M3 验收项，至今零进展，需产品决策 |
+| L2 | Harness 桌面端（Tauri） | **产品形态已决策（2026-09-21，用户确认）**：订阅+快捷调用壳 + **用户数据私有化**（本地数据不出端策略）+ **自定义本地技能**（本地技能目录加载）。工程量大（Tauri 壳/订阅同步协议/本地技能运行时/隐私边界），建议作为 v1.1 主线拆批实施 |
 | L3 | IM 真实凭证联调（飞书/钉钉/企微生产账号） | 需外部账号；代码侧由任务组 D 交付 |
 | L4 | SLO 99.9% 验收 + DR 实战演练 | 需生产环境；依赖 P4 |
 | L5 | 技能市场分发站点 + 技能包 scripts/assets 附件 | 🔶 附件包工程部分 ✅（M34，d550af3）：bundle 扩展 scripts/（仅 .py，执行走 M33 沙箱 script_tool）与 assets/（白名单扩展），sha256 清单随签名覆盖、安全校验镜像 M28、落盘/清单/下载/导出往返端点、scaffold 模板示例；**分发站点仍待产品决策** |
@@ -224,7 +224,10 @@
 | **批次 3 ✅** | P1 `prod-worker-` ＋ P3 `prod-env-` ＋ P5 `ci-` | 已完成（d6b03c8 / 22d7a24 / e49cff6），全量回归 288 passed；P5 顺带修复 ci.yml 自 M13.1 起的 YAML 解析错误 |
 | **批次 4 ✅** | P2 `prod-sandbox-` ＋ P4 `prod-ha-` | 已完成（94dc33b / a2928f8），全量回归 298 passed——**v0.9 五组全部收官**（main.py worker 数接 EAP_WORKER_COUNT 收尾项一并落地） |
 | **批次 5 ✅** | V `v1.0-` 收版整合 | 已完成（v0.9.0 发布 + docs/16 审计 + README 双侧同步 + 回归 298 passed）；v1.0 正式发布剩 seal 补扫与 L 组 |
-| **批次 6 ✅** | L 组工程部分：memory（L7）＋ evals A/B 报表（L10）＋ skills 附件包（L5）＋ 测试泄漏/调度抖动修复 | 已完成（49a5ea4 / b403ebd / d550af3 + 498bdfd / 88c14b9），全量回归 329 passed；剩余为纯外部条件项 |
-| **批次 7（按条件开工）** | L 组剩余外部条件项 | vLLM multi-LoRA（GPU）/ Harness 桌面端（产品决策）/ IM 真实联调（外部账号）/ SLO 验收（生产环境）/ RAG 文档级 ACL（权限模型设计）/ MCP OAuth / 多租户计费——条件就绪即开工；v1.0 正式发布前置 seal 补扫 |
+| **批次 6 ✅** | L 组工程部分：memory（L7）＋ evals A/B 报表（L10）＋ skills 附件包（L5）＋ 测试泄漏/调度抖动修复 | 已完成（49a5ea4 / b403ebd / d550af3 + 498bdfd / 88c14b9），全量回归 329 passed |
+| **批次 6.5 ✅** | L7 接线（摘要压缩入 run_loop）＋ console 镜像/K8s 补齐（P5/P4 未尽）＋ L8 MCP OAuth | 已完成（6e0710f / 014c993 / 566fd36），回归 337 passed |
+| **收版 ✅** | **v1.0.0 发布**（6186583，tag v1.0.0）+ docs/16 门禁决策（无 seal 环境，docs/16 替代） | **14 能力域收官，v1.0 达成** |
+| **批次 7（当前）** | M36：L6 RAG 文档级 ACL | 设计方案 docs/17 已出，待用户批准后实施 |
+| 批次 8+ | Harness 桌面端 v1.1 主线（形态已决策：订阅+快捷调用 + 数据私有化 + 本地技能）＋ L 组其余外部条件项 | vLLM（GPU）/ IM 联调（外部账号）/ SLO（生产环境）/ 计费（产品决策）/ 组织记忆联动 KB |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
