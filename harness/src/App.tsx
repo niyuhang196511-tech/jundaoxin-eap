@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 type Agent = { name: string; description?: string; status?: string };
-type Settings = { baseUrl: string; deviceKey: string; deviceName: string };
+type DataMode = "local" | "cloud-personal" | "cloud-org";
+type Settings = { baseUrl: string; deviceKey: string; deviceName: string; dataMode: DataMode };
 
 const STORE_KEY = "harness.settings";
 
@@ -10,7 +12,7 @@ function loadSettings(): Settings {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) return JSON.parse(raw) as Settings;
   } catch { /* 忽略坏数据 */ }
-  return { baseUrl: "http://localhost:8300", deviceKey: "", deviceName: "" };
+  return { baseUrl: "http://localhost:8300", deviceKey: "", deviceName: "", dataMode: "local" };
 }
 
 export default function App() {
@@ -21,6 +23,8 @@ export default function App() {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [view, setView] = useState<"quick" | "privacy">("quick");
+  const [privacy, setPrivacy] = useState<{ sessions: number; memories: number } | null>(null);
 
   useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }, [settings]);
 
@@ -69,6 +73,21 @@ export default function App() {
         }
         buf = buf.slice(buf.lastIndexOf("\n") + 1);
       }
+      // 本地留存（M38）：会话写本地仓（不出端）
+      try {
+        await invoke("save_session", { id: `s-${Date.now()}`, agent: active, input, answer });
+      } catch { /* 本地留存失败不阻断 */ }
+      if (settings.dataMode !== "local" && input.trim()) {
+        try {  // 云端档：经验上行（cloud-personal=user / cloud-org=org 共享）
+          const scope = settings.dataMode === "cloud-org" ? "org" : "user";
+          await fetch(`${settings.baseUrl}/api/v1/memory`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
+            body: JSON.stringify({ scope, user_id: "harness", content: `Q: ${input}
+A: ${answer.slice(0, 500)}`, importance: 0.5 }),
+          });
+        } catch { /* 云端同步失败静默（本地已有副本） */ }
+      }
     } catch (e) {
       setError(`调用失败：${(e as Error).message}`);
     } finally {
@@ -94,9 +113,54 @@ export default function App() {
     }
   }
 
+  async function loadPrivacy() {
+    const sessions = await invoke<{ length: number }>("list_sessions", { limit: 1000 });
+    const memories = await invoke<{ length: number }>("list_memory", { limit: 1000 });
+    setPrivacy({ sessions: sessions.length, memories: memories.length });
+  }
+  useEffect(() => { if (view === "privacy") void loadPrivacy(); /* eslint-disable-line */ }, [view]);
+
+  async function clearScope(scope: string) {
+    await invoke("clear_local", { scope });
+    await loadPrivacy();
+  }
+
+  if (view === "privacy") {
+    return (
+      <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        <h2 style={{ margin: 0 }}>隐私清单 <small style={{ color: "#888" }}>数据存哪、一键清除</small></h2>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead><tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+            <th style={{ padding: 6 }}>数据类别</th><th>存哪</th><th>谁能看</th><th>条数</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            <tr><td style={{ padding: 6 }}>会话历史</td><td>本机 SQLite</td><td>仅本机</td>
+              <td>{privacy?.sessions ?? "…"}</td>
+              <td><button onClick={() => clearScope("sessions")}>清除</button></td></tr>
+            <tr><td style={{ padding: 6 }}>本地记忆</td><td>本机 SQLite</td><td>仅本机</td>
+              <td>{privacy?.memories ?? "…"}</td>
+              <td><button onClick={() => clearScope("memories")}>清除</button></td></tr>
+            <tr><td style={{ padding: 6 }}>云端记忆（{settings.dataMode === "cloud-org" ? "org 共享" : settings.dataMode === "cloud-personal" ? "user 个人" : "未开启"}）</td>
+              <td>平台库</td><td>按 scope</td><td>—</td>
+              <td><button disabled={settings.dataMode === "local"}
+                onClick={() => setError("云端清除请到平台控制台 → Memory 页操作（按 scope/user 过滤）")}>前往平台清除</button></td></tr>
+            <tr><td style={{ padding: 6 }}>技能执行审计</td><td>本机 SQLite</td><td>仅本机</td><td>—</td>
+              <td><button onClick={() => clearScope("audit")}>清除</button></td></tr>
+          </tbody>
+        </table>
+        <button onClick={() => clearScope("all")} style={{ color: "#c0392b" }}>一键清除全部本地数据</button>
+        <button onClick={() => setView("quick")}>← 返回快捷调用</button>
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, display: "flex", flexDirection: "column", gap: 12, height: "100vh", boxSizing: "border-box" }}>
-      <h2 style={{ margin: 0 }}>EAP Harness <small style={{ color: "#888" }}>v1.0（M37）</small></h2>
+      <h2 style={{ margin: 0 }}>EAP Harness <small style={{ color: "#888" }}>v1.0</small>
+        <button style={{ marginLeft: 12 }} onClick={() => setView(view === "quick" ? "privacy" : "quick")}>
+          {view === "quick" ? "隐私清单 →" : "← 快捷调用"}
+        </button>
+      </h2>
 
       <details>
         <summary>连接设置</summary>
@@ -107,6 +171,12 @@ export default function App() {
           <input value={settings.deviceName} onChange={e => setSettings(s => ({ ...s, deviceName: e.target.value }))} placeholder="workstation-1" />
           <label>设备 Key</label>
           <input value={settings.deviceKey} onChange={e => setSettings(s => ({ ...s, deviceKey: e.target.value }))} placeholder="eap_d_…（注册后自动填入）" />
+          <label>数据模式</label>
+          <select value={settings.dataMode} onChange={e => setSettings(s => ({ ...s, dataMode: e.target.value as DataMode }))}>
+            <option value="local">本地（默认，不出端）</option>
+            <option value="cloud-personal">云端·个人（记忆上行 scope=user）</option>
+            <option value="cloud-org">云端·共享（记忆上行 scope=org，团队可见）</option>
+          </select>
         </div>
         <button onClick={registerDevice}>注册/重置设备凭证</button>{" "}
         <button onClick={loadAgents}>刷新 Agent 目录</button>

@@ -1,9 +1,11 @@
-//! EAP Harness 桌面壳（M37，设计 docs/18）：
+//! EAP Harness 桌面壳（M37/M38，设计 docs/18）：
 //! - 系统托盘：显示/隐藏主窗口、退出
 //! - 全局快捷键 Alt+Space：唤起快捷调用窗口
-//! 关闭按钮 → 隐藏到托盘（员工桌面常驻形态），托盘菜单退出才真正退出。
+//! - 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端（local_db.rs）
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod local_db;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -30,6 +32,9 @@ fn main() {
             })
             .build())
         .setup(|app| {
+            // 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端
+            local_db::init(app)?;
+
             // 托盘菜单：显示 / 退出
             let show = MenuItem::with_id(app, "show", "显示 Harness", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -48,6 +53,14 @@ fn main() {
             app.global_shortcut().register("Alt+Space")?;
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            local_db::save_session,
+            local_db::list_sessions,
+            local_db::delete_session,
+            local_db::save_memory,
+            local_db::list_memory,
+            local_db::clear_local,
+        ])
         .on_window_event(|window, event| {
             // 关闭按钮 → 隐藏到托盘（常驻）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
