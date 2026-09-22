@@ -17,12 +17,12 @@
 
 | 项 | 值 |
 |---|---|
-| 平台版本 | **v1.0.0（已发布，tag v1.0.0）**——14 能力域全 ✅；M34~M35 含 L 组可离线工程项 |
-| 最新里程碑 | M35 + v1.0.0 收版（release 6186583） |
-| 代码 commit | 6186583 |
+| 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
+| 最新里程碑 | M36（kb-M36 文档级 ACL） |
+| 代码 commit | ce4f97e |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **337 passed, 8 skipped, 0 errors**（100s）——发布复验；test_mcp 子进程 errors 为 Windows 回环防火墙间歇问题（docs/13 §三），本轮未复现 |
-| 下一主线 | **批次 7（当前）：M36 = L6 RAG 文档级 ACL**（设计方案 docs/17，待用户批准后实施）→ Harness 桌面端 v1.1 主线（形态已决策，见 L2）；L 组其余项按外部条件逐项消化（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策） |
+| 测试基线 | **342 passed, 8 skipped, 0 errors**（92s）——较 v1.0.0 基线 337 passed 增 5（ACL 新用例） |
+| 下一主线 | **Harness 桌面端 v1.1 主线**（形态已决策：订阅+快捷调用 + 数据私有化 + 本地技能，见 L2——建议先出壳工程与隐私边界设计再实施）；L 组其余按外部条件消化（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策、组织记忆联动 KB 可并入后续） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -206,7 +206,7 @@
 | L3 | IM 真实凭证联调（飞书/钉钉/企微生产账号） | 需外部账号；代码侧由任务组 D 交付 |
 | L4 | SLO 99.9% 验收 + DR 实战演练 | 需生产环境；依赖 P4 |
 | L5 | 技能市场分发站点 + 技能包 scripts/assets 附件 | 🔶 附件包工程部分 ✅（M34，d550af3）：bundle 扩展 scripts/（仅 .py，执行走 M33 沙箱 script_tool）与 assets/（白名单扩展），sha256 清单随签名覆盖、安全校验镜像 M28、落盘/清单/下载/导出往返端点、scaffold 模板示例；**分发站点仍待产品决策** |
-| L6 | Permission-aware RAG 文档级 ACL | 租户过滤已做（M23）；缺文档/角色级 ACL，需权限模型设计 |
+| L6 | Permission-aware RAG 文档级 ACL | ✅（M36，ce4f97e，设计 docs/17 已批准）：document_acls 表（deny 优先→allow→默认可见，KB 级默认+文档级覆盖）+ 三路检索单点过滤（Reranker 前，计数不泄露） + 图谱概览同步过滤 + 管理 4 端点（admin+审计）+ 前端访问控制弹窗；chunk 级 ACL/group 主体为设计预留 |
 | L7 | Memory 深化：LLM 摘要压缩、agent/组织层 scope、importance 权重、组织记忆联动知识中心 | 🔶 工程部分 ✅（M34，49a5ea4 + 6e0710f 接线）：scope 扩为 session\|user\|agent\|org（agent 按 agent 列过滤、org 租户内共享）、importance 0~1 加权召回打分（final = cos + 0.3\*overlap + 0.2\*importance）、ttl_days→expires_at TTL（recall/list 默认过滤过期，purge 一并清理）、`EAP_MEMORY_SUMMARY_COMPRESS` 开关的 LLM 摘要压缩（`runtime/context.py` compress_messages：hub.complete 生成摘要→kind=summary 落库→历史替换，失败回退字符截断）；**已接入生产调用链**——`ctx.run_loop` 新增 session_id 参数（order_agent 先行启用），接线测试覆盖摘要调用/替换/落库与未传对照；迁移 c0d3e5a7f9b4；剩余「组织记忆联动知识中心」 |
 | L8 | MCP 深化：OAuth（复用 OIDC 客户端）、长连接复用 | ✅（M35，566fd36）：client_credentials 凭证托管（Fernet 加密缓存 + 30s margin 过期自动重取 + 手动刷新端点，模式同 M31 连接器）+ 认证头三级回退（OAuth bearer → api_key → 无）+ per (url, auth 指纹) 连接池长连接复用（token 刷新自动轮换实例）；validate 端点接入认证；完整 MCP 握手 OAuth 联调属 L3 式外部验证（mock IdP 离线 7 测试绿） |
 | L9 | 多租户计费细化（单价账单、配额分层） | 成本报表已有（M26），计费产品化待决策 |
