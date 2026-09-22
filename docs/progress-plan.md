@@ -18,11 +18,11 @@
 | 项 | 值 |
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
-| 最新里程碑 | M39（harness-M39A 本地技能运行时 + im-M39B 移动远程审批/触发） |
-| 代码 commit | 2af88fc |
+| 最新里程碑 | M40（im-M40A 完成回执+设备配对 / harness-M40B 移动监控 UI）——**Harness v1.1 四期全落地** |
+| 代码 commit | 9417cc4 |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **355 passed, 8 skipped, 0 errors**（91s）——较 M38 基线 342 增 13（M39-A Rust 13 cargo test 在 harness 仓、平台侧增量=M39-B 9 用例+迁移后 agent 测试归位）；Harness 侧以 cargo test 13 绿 + tauri build 为验收 |
-| 下一主线 | **M39 本地自定义技能 + 移动远程审批**（签名包安装/四域权限提示/沙箱执行 + HITL→IM 卡片，docs/18）→ M40 远程触发/移动监控/GA；组织记忆联动 KB（小批次）可插入；L 组其余按外部条件消化（vLLM/IM 联调/SLO/计费） |
+| 测试基线 | **366 passed, 8 skipped, 0 errors**（99s）——较 M39 基线 355 增 11（M40-A 新用例） |——较 M38 基线 342 增 13（M39-A Rust 13 cargo test 在 harness 仓、平台侧增量=M39-B 9 用例+迁移后 agent 测试归位）；Harness 侧以 cargo test 13 绿 + tauri build 为验收 |
+| 下一主线 | **组织记忆联动 KB**（L7 剩余小批次，docs/18 §五）可随时插入；L 组其余按外部条件消化（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -228,7 +228,7 @@
 | **批次 6.5 ✅** | L7 接线（摘要压缩入 run_loop）＋ console 镜像/K8s 补齐（P5/P4 未尽）＋ L8 MCP OAuth | 已完成（6e0710f / 014c993 / 566fd36），回归 337 passed |
 | **收版 ✅** | **v1.0.0 发布**（6186583，tag v1.0.0）+ docs/16 门禁决策（无 seal 环境，docs/16 替代） | **14 能力域收官，v1.0 达成** |
 | **批次 7 ✅** | M36 L6 文档级 ACL（ce4f97e）＋ **M37 Harness 壳工程基座**（d68359c/250c4cf） | M36 已批准实施完成；M37：Tauri 2 壳（托盘/Alt+Space 热键/关闭驻留）+ 设备绑定认证 （签发/列表/吊销，4 测试）+ Agent 目录订阅与流式快捷调用 MVP；**tauri build 全链路验证通过**（NSIS 安装包产出；本机 winget 安装 VS Build Tools 后） |
-| **批次 8（当前）** | **M38 数据私有化 ✅**（998da0f：本地 SQLite 仓/三档数据模式/隐私清单页）；**M39-A 本地技能运行时 ✅（2af88fc）**（harness/skills.rs：Ed25519 验签安装+附件 sha256 复核+四域授权弹窗+沙箱执行，跨语言验签夹具锚定 skill_pkg；cargo test 13 用例/typecheck/tauri build 三绿）；**M39-B 移动远程审批+触发 ✅（2af88fc 同批）**（平台侧，docs/18 §二.5：HITL 挂起→IM 审批卡片推送 notify_hitl（渠道 extra.notify_hitl 开关+event_key hitl:{task_id} 幂等+失败入既有重试队列）、回调识别保留字 task.approve（飞书 value/钉钉 actionURL GET/企微 EventKey）→ 引擎 approve+审计 harness.remote.approve、/task 前缀远程触发 agent.invoke（payload 补 _acl 快照）；test_im_remote 9 用例+存量 im/tasks 回归 24 passed）；**M40-B 移动监控 UI ✅（待提交）**（harness/src/MonitorView.tsx + App.tsx「监控」视图接线：任务列表/审批待办 WAITING_HUMAN 置顶（pending_tool 标注 + payload/result 展开）/状态徽章（PENDING 灰/RUNNING 蓝/COMPLETED 绿/FAILED 红/WAITING_* 黄）+过滤下拉/会话历史本机+平台并列（来源标注「本机/平台」，平台会话展开懒拉 messages 回放）/平台不可达→「平台不可达，显示本地缓存」降级仅本地+任务区平台离线横幅/30s 轮询（可视时）+手动刷新/≤600px 单列响应式；typecheck/vite build/tauri build 三绿）；**M40-A 完成回执+设备 user ✅（待提交）**（平台侧，docs/18 §二.5「完成后卡片回执结果」+设备-用户配对：任务终态→IM 回执卡片 notify_task_done（✅ 已完成/❌ 失败按状态、正文 task_id/类型/输出摘要≤200 字符/错误，幂等键 done:{task_id}:{state}，失败入既有重试队列；仅 agent.invoke/agent.hitl 挂钩，tasks.py 终态点非阻断懒 import）、api_keys 加 device_user 列（迁移 c1d3e5f7a9b1，幂等 add_column）+ POST /auth/devices body.user（JWT 通道缺省 request.state.user）注册响应/列表透出+审计 detail 记 user；test_m40_receipt 11 用例+存量 im_remote/harness_devices/tasks 回归 30 passed；设备↔IM 身份强绑定（需 IM 通讯录映射）如实记 M40 剩余）→ **M40 远程触发回执/设备-用户配对/GA** | Harness v1.1 主线（docs/18） |
+| **批次 8（当前）** | **M38 数据私有化 ✅**（998da0f：本地 SQLite 仓/三档数据模式/隐私清单页）；**M39-A 本地技能运行时 ✅（2af88fc）**（harness/skills.rs：Ed25519 验签安装+附件 sha256 复核+四域授权弹窗+沙箱执行，跨语言验签夹具锚定 skill_pkg；cargo test 13 用例/typecheck/tauri build 三绿）；**M39-B 移动远程审批+触发 ✅（2af88fc 同批）**（平台侧，docs/18 §二.5：HITL 挂起→IM 审批卡片推送 notify_hitl（渠道 extra.notify_hitl 开关+event_key hitl:{task_id} 幂等+失败入既有重试队列）、回调识别保留字 task.approve（飞书 value/钉钉 actionURL GET/企微 EventKey）→ 引擎 approve+审计 harness.remote.approve、/task 前缀远程触发 agent.invoke（payload 补 _acl 快照）；test_im_remote 9 用例+存量 im/tasks 回归 24 passed）；**M40-B 移动监控 UI ✅（9417cc4）**（harness/src/MonitorView.tsx + App.tsx「监控」视图接线：任务列表/审批待办 WAITING_HUMAN 置顶（pending_tool 标注 + payload/result 展开）/状态徽章（PENDING 灰/RUNNING 蓝/COMPLETED 绿/FAILED 红/WAITING_* 黄）+过滤下拉/会话历史本机+平台并列（来源标注「本机/平台」，平台会话展开懒拉 messages 回放）/平台不可达→「平台不可达，显示本地缓存」降级仅本地+任务区平台离线横幅/30s 轮询（可视时）+手动刷新/≤600px 单列响应式；typecheck/vite build/tauri build 三绿）；**M40-A 完成回执+设备 user ✅（34654b9）**（平台侧，docs/18 §二.5「完成后卡片回执结果」+设备-用户配对：任务终态→IM 回执卡片 notify_task_done（✅ 已完成/❌ 失败按状态、正文 task_id/类型/输出摘要≤200 字符/错误，幂等键 done:{task_id}:{state}，失败入既有重试队列；仅 agent.invoke/agent.hitl 挂钩，tasks.py 终态点非阻断懒 import）、api_keys 加 device_user 列（迁移 c1d3e5f7a9b1，幂等 add_column）+ POST /auth/devices body.user（JWT 通道缺省 request.state.user）注册响应/列表透出+审计 detail 记 user；test_m40_receipt 11 用例+存量 im_remote/harness_devices/tasks 回归 30 passed；设备↔IM 身份强绑定（需 IM 通讯录映射）如实记 M40 剩余）→ **M40 全部完成**（回执 ✅ / 设备配对最小实现 ✅（IM 身份强绑定留外部联调）/ 移动监控 ✅）；GA 项（审计上报/离线降级/自动更新）后置 | Harness v1.1 主线（docs/18） |
 | 批次 8+ | Harness 桌面端 v1.1 主线（形态已决策：订阅+快捷调用 + 数据私有化 + 本地技能）＋ L 组其余外部条件项 | vLLM（GPU）/ IM 联调（外部账号）/ SLO（生产环境）/ 计费（产品决策）/ 组织记忆联动 KB |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
