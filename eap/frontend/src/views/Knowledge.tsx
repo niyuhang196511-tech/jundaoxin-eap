@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BookOpen, FileText, Plus, Search, Trash2, Upload } from 'lucide-react'
+import { BookOpen, FileText, Plus, Search, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import {
   Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Skeleton,
   Textarea, toast,
@@ -22,6 +22,16 @@ interface DocItem {
   title: string
   source: string
   meta: Record<string, unknown>
+}
+
+interface AclRule {
+  id: number
+  effect: 'allow' | 'deny'
+  subject_type: 'role' | 'user'
+  subject: string
+  document_id: number | null
+  document: string
+  note: string
 }
 
 interface Hit {
@@ -144,6 +154,10 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [previewDoc, setPreviewDoc] = useState<{ id: number; title: string } | null>(null)
+  const [aclOpen, setAclOpen] = useState(false)
+  const [acls, setAcls] = useState<AclRule[]>([])
+  const [aclForm, setAclForm] = useState<{ effect: string; subject_type: string; subject: string; document_id: string }>(
+    { effect: 'deny', subject_type: 'role', subject: '', document_id: '' })
   const [labels, setLabels] = useState<Record<number, boolean>>({})
   const [savingDataset, setSavingDataset] = useState(false)
 
@@ -296,6 +310,12 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
               <Button variant="primary" onClick={() => setIngestOpen(true)}>
                 <Plus className="size-3.5" />粘贴文本
               </Button>
+              <Button variant="secondary" onClick={async () => {
+                setAclOpen(true)
+                setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
+              }}>
+                <ShieldCheck className="size-3.5" />访问控制
+              </Button>
             </div>
           </div>
           <div className="rounded-[--radius-card] border border-line bg-surface">
@@ -396,6 +416,76 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
           <div>
             <Label>正文（空行分段有助于分块质量）</Label>
             <Textarea rows={10} value={ingestText} onChange={e => setIngestText(e.target.value)} />
+          </div>
+        </div>
+      </DialogContent>
+
+<DialogContent open={aclOpen} onOpenChange={setAclOpen}
+        title={`访问控制 · ${name}`} description="deny 优先 → allow → 默认可见（无规则对租户内全部可见）"
+        footer={<Button variant="ghost" onClick={() => setAclOpen(false)}>关闭</Button>}>
+        <div className="space-y-3">
+          <div className="grid grid-cols-[80px_90px_1fr_1fr_auto] items-end gap-2">
+            <div>
+              <Label>效果</Label>
+              <select value={aclForm.effect} onChange={e => setAclForm({ ...aclForm, effect: e.target.value })}
+                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+                <option value="deny">deny</option>
+                <option value="allow">allow</option>
+              </select>
+            </div>
+            <div>
+              <Label>主体类型</Label>
+              <select value={aclForm.subject_type}
+                onChange={e => setAclForm({ ...aclForm, subject_type: e.target.value })}
+                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+                <option value="role">角色</option>
+                <option value="user">用户</option>
+              </select>
+            </div>
+            <div>
+              <Label>主体（* = 所有）</Label>
+              <Input value={aclForm.subject}
+                onChange={e => setAclForm({ ...aclForm, subject: e.target.value })}
+                placeholder="member / u-123 / *" />
+            </div>
+            <div>
+              <Label>文档（空=整库默认）</Label>
+              <select value={aclForm.document_id}
+                onChange={e => setAclForm({ ...aclForm, document_id: e.target.value })}
+                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+                <option value="">整库默认</option>
+                {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+              </select>
+            </div>
+            <Button variant="primary" disabled={!aclForm.subject} loading={false}
+              onClick={async () => {
+                try {
+                  await api('POST', `/api/v1/kb/${encodeURIComponent(name)}/acls`, {
+                    effect: aclForm.effect, subject_type: aclForm.subject_type,
+                    subject: aclForm.subject,
+                    document_id: aclForm.document_id ? Number(aclForm.document_id) : null})
+                  setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
+                  setAclForm({ ...aclForm, subject: '' })
+                  toast.success('ACL 规则已创建')
+                } catch (e) { toast.error(`创建失败：${(e as Error).message}`) }
+              }}>添加</Button>
+          </div>
+          <div className="divide-y divide-line rounded-lg border border-line">
+            {acls.length === 0 ? (
+              <p className="p-3 text-[12px] text-ink-3">暂无规则（默认可见）</p>
+            ) : acls.map(a => (
+              <div key={a.id} className="flex items-center gap-2 px-3 py-2 text-[12px]">
+                <Badge tone={a.effect === 'deny' ? 'red' : 'green'}>{a.effect}</Badge>
+                <span className="text-ink">{a.subject_type}:{a.subject}</span>
+                <span className="text-ink-3">→ {a.document}</span>
+                <Button size="xs" variant="ghost" className="ml-auto" onClick={async () => {
+                  try {
+                    await api('DELETE', `/api/v1/kb/acls/${a.id}`)
+                    setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
+                  } catch (e) { toast.error(`删除失败：${(e as Error).message}`) }
+                }}><Trash2 className="size-3.5" /></Button>
+              </div>
+            ))}
           </div>
         </div>
       </DialogContent>

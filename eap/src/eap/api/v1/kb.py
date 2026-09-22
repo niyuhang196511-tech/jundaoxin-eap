@@ -1,8 +1,9 @@
-"""知识中心 API：KB 生命周期 + 摄入 + 混合检索。"""
+"""知识中心 API：KB 生命周期 + 摄入 + 混合检索 + 文档级 ACL（M36/L6）。"""
 
 from __future__ import annotations
 
 import fastapi
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,13 @@ from ...schemas import (
 )
 from ..deps import require_api_key, resolve_tenant
 
+
+def require_admin_kb(request: fastapi.Request) -> None:
+    """ACL 管理写端点的 admin 依赖（语义同 require_api_key 的 JWT admin 判定）。"""
+    roles = getattr(request.state, "roles", [])
+    if roles and "admin" not in roles:
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3003 该操作需要 admin 角色")
+
 router = fastapi.APIRouter(prefix="/api/v1/kb",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
 
@@ -23,6 +31,22 @@ def _get_kb(db: Session, name: str) -> KB:
     if kb is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 知识库 {name} 不存在")
     return kb
+
+
+def _acl_from_state(request: fastapi.Request):
+    """request.state → AclContext（M36/L6）：JWT 用 user/roles；API Key 平台管理员语义；
+    嵌入会话 end-user 语义。与 deps._set_acl 的三通道语义保持一致。"""
+    from ...knowledge.acl import AclContext
+
+    kind = getattr(request.state, "auth_kind", "")
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if kind == "jwt":
+        return AclContext(tenant_id=tenant_id,
+                          user_id=str(getattr(request.state, "user", "") or ""),
+                          roles=tuple(getattr(request.state, "roles", []) or []))
+    if kind == "api_key":
+        return AclContext(tenant_id=tenant_id, roles=("admin",))
+    return AclContext(tenant_id=tenant_id, roles=("embed",))
 
 
 @router.get("")
@@ -138,9 +162,13 @@ def ingest_faq(name: str, body: FAQIngest, db: Session = fastapi.Depends(get_db)
 
 
 @router.post("/{name}/retrieve")
-def retrieve(name: str, body: RetrieveRequest, db: Session = fastapi.Depends(get_db)):
+def retrieve(name: str, body: RetrieveRequest, request: fastapi.Request,
+             db: Session = fastapi.Depends(get_db)):
     kb = _get_kb(db, name)
-    hits = kb_svc.retrieve(db, kb, body.query, top_k=body.top_k, rerank=body.rerank)
+    # ACL 主体（M36/L6）：sync 端点线程池上下文拷贝不回传 ContextVar——从 request.state
+    # 显式构建（resolve_tenant 已下发三通道身份语义，见 deps._set_acl）
+    acl = _acl_from_state(request)
+    hits = kb_svc.retrieve(db, kb, body.query, top_k=body.top_k, rerank=body.rerank, acl=acl)
     return RetrieveResponse(
         kb=kb.name,
         hits=[RetrieveHit(
@@ -151,12 +179,22 @@ def retrieve(name: str, body: RetrieveRequest, db: Session = fastapi.Depends(get
 
 
 @router.get("/{name}/graph")
-def graph_overview(name: str, db: Session = fastapi.Depends(get_db)):
-    """图谱概览：实体节点 + 高权重共现边（三路索引之图谱路观测）。"""
+def graph_overview(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """图谱概览：实体节点 + 高权重共现边（三路索引之图谱路观测）。ACL（M36）：无权限
+    文档的节点/边过滤（保留计数不泄露——按过滤后计）。"""
     kb = _get_kb(db, name)
+    from ...knowledge import acl as kb_acl
     from ...knowledge.graph import graph_overview as overview
 
-    return {"kb": kb.name, **overview(db, kb.id)}
+    acl = _acl_from_state(request)
+    data = {"kb": kb.name, **overview(db, kb.id)}
+    doc_ids = [n.get("document_id") for n in data.get("nodes", []) if isinstance(n, dict)]
+    if doc_ids:
+        allowed, _n = kb_acl.filter_doc_ids(db, kb.id, doc_ids, ctx=acl)
+        if allowed != set(d for d in doc_ids if d is not None):
+            data["nodes"] = [n for n in data.get("nodes", [])
+                             if not isinstance(n, dict) or n.get("document_id") in allowed]
+    return data
 
 
 @router.delete("/{name}/documents/{doc_id}")
@@ -202,3 +240,80 @@ def reingest_document(name: str, doc_id: int, request: fastapi.Request,
     task_id = _engine(request).submit(db, "kb.ingest", payload)
     return {"task_id": task_id, "kb": kb.name, "document_id": doc_id,
             "note": "重摄入异步执行，经任务端点轮询"}
+
+
+# ---------- 文档级 ACL（M36/L6，设计 docs/17）：deny 优先 → allow → 默认可见 ----------
+
+class ACLRule(BaseModel):
+    effect: str = Field(pattern=r"^(allow|deny)$")
+    subject_type: str = Field(pattern=r"^(role|user)$")
+    subject: str = Field(min_length=1, max_length=128)  # 角色名/用户 id/"*"
+    document_id: int | None = None  # None = KB 级默认规则
+    note: str = ""
+
+
+def _acl_guard(request: fastapi.Request) -> None:
+    """ACL 管理仅 admin（require_api_key 语义：JWT 需 admin 角色；API Key 平台管理员）。"""
+    roles = getattr(request.state, "roles", [])
+    if roles and "admin" not in roles:
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3003 ACL 管理需要 admin 角色")
+
+
+@router.get("/{name}/acls")
+def list_acls(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    _acl_guard(request)
+    kb = _get_kb(db, name)
+    from ...models import DocumentACL, Document
+
+    titles = {d.id: d.title for d in db.scalars(select(Document).where(Document.kb_id == kb.id)).all()}
+    rules = db.scalars(select(DocumentACL).where(DocumentACL.kb_id == kb.id)
+                       .order_by(DocumentACL.id)).all()
+    return [{"id": r.id, "effect": r.effect, "subject_type": r.subject_type,
+             "subject": r.subject, "document_id": r.document_id,
+             "document": titles.get(r.document_id, "") if r.document_id else "(整库默认)",
+             "note": r.note} for r in rules]
+
+
+@router.post("/{name}/acls", dependencies=[fastapi.Depends(require_admin_kb)])
+def create_acl(name: str, body: ACLRule, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    kb = _get_kb(db, name)
+    if body.document_id is not None:
+        from ...models import Document
+
+        if db.get(Document, body.document_id) is None or \
+                db.get(Document, body.document_id).kb_id != kb.id:
+            raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 文档 {body.document_id} 不存在")
+    from ...models import DocumentACL
+    from ...knowledge import acl as kb_acl
+
+    rule = DocumentACL(kb_id=kb.id, document_id=body.document_id, effect=body.effect,
+                       subject_type=body.subject_type, subject=body.subject, note=body.note)
+    db.add(rule)
+    db.commit()
+    kb_acl.invalidate(kb.id)
+    from ...observability import audit
+
+    audit.record("kb.acl.create", actor=audit.actor_of(request), target=kb.name,
+                 detail={"effect": body.effect, "subject": f"{body.subject_type}:{body.subject}",
+                         "document_id": body.document_id},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"id": rule.id, "kb": kb.name, "status": "created"}
+
+
+@router.delete("/acls/{acl_id}", dependencies=[fastapi.Depends(require_admin_kb)])
+def delete_acl(acl_id: int, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    from ...models import DocumentACL
+    from ...knowledge import acl as kb_acl
+
+    rule = db.get(DocumentACL, acl_id)
+    if rule is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 ACL 规则 {acl_id} 不存在")
+    kb_name = db.get(KB, rule.kb_id).name
+    db.delete(rule)
+    db.commit()
+    kb_acl.invalidate(rule.kb_id)
+    from ...observability import audit
+
+    audit.record("kb.acl.delete", actor=audit.actor_of(request), target=kb_name,
+                 detail={"acl_id": acl_id}, trace_id=getattr(request.state, "trace_id", ""))
+    return {"id": acl_id, "status": "deleted"}

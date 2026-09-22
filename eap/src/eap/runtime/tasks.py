@@ -792,6 +792,10 @@ class TaskEngine:
         from .policy import agent_scope
 
         agent_token = agent_scope.set(payload["agent"])
+        from ..knowledge.acl import acl_from_payload, reset_acl_context, set_acl_context
+
+        acl = acl_from_payload(payload)
+        acl_token = set_acl_context(acl) if acl is not None else None
         try:
             with SessionLocal() as db:
                 resp = await registry.invoke(db, payload["agent"],
@@ -802,6 +806,8 @@ class TaskEngine:
         finally:
             if token is not None:
                 reset_tenant(token)
+            if acl_token is not None:
+                reset_acl_context(acl_token)
             agent_scope.reset(agent_token)
 
     async def _h_agent_hitl(self, payload: dict, prev_result: dict) -> dict:
@@ -815,6 +821,10 @@ class TaskEngine:
         from .policy import agent_scope
 
         agent_token = agent_scope.set(payload["agent"])
+        from ..knowledge.acl import acl_from_payload, reset_acl_context, set_acl_context
+
+        acl = acl_from_payload(payload)
+        acl_token = set_acl_context(acl) if acl is not None else None
         app = registry.get(payload["agent"]).instance
         if app is None:
             raise RuntimeError(f"智能体 {payload['agent']} 未启动")
@@ -830,6 +840,8 @@ class TaskEngine:
         finally:
             if tenant_token is not None:
                 reset_tenant(tenant_token)
+            if acl_token is not None:
+                reset_acl_context(acl_token)
             agent_scope.reset(agent_token)
         return {"output": result.content, "citations": [c.model_dump() for c in result.citations],
                 "steps": result.steps, "usage": result.usage}

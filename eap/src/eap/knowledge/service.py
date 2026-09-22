@@ -79,11 +79,16 @@ def ingest_faq(db: Session, kb: KB, items: list[dict]) -> int:
     return count
 
 
-def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None = None) -> list[dict]:
+def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None = None,
+             acl: "AclContext | None" = None) -> list[dict]:
     """三路混合检索 + 可选两阶段重排（docs/04 §1.3）：
 
     BM25（稀疏）+ 向量（稠密，Milvus 或本地余弦）+ 图谱（多跳扩展）
     → RRF 融合（召回池 = top_k×3 至少 10 条）→ rerank="lexical"/"llm" 头部精排 → top_k。
+
+    acl（M36/L6）：文档级 ACL 主体上下文——显式传入优先（sync 端点从 request.state
+    构建），未传回退 ContextVar（异步链路：API 下发 → agent retriever 同任务可见）；
+    两者皆无 → 默认可见（内部/测试路径，存量兼容）。
 
     M15：OTel 启用时包 `kb.retrieve` span（挂在当前请求 span 下）。
     """
@@ -95,7 +100,7 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None
         span.set_attribute("kb.name", kb.name)
         span.set_attribute("kb.query", query[:120])
     try:
-        return _retrieve_inner(db, kb, query, top_k, rerank)
+        return _retrieve_inner(db, kb, query, top_k, rerank, acl=acl)
     except Exception as e:
         if span is not None:
             span.record_exception(e)
@@ -105,7 +110,8 @@ def retrieve(db: Session, kb: KB, query: str, top_k: int = 5, rerank: str | None
             span_cm.__exit__(None, None, None)
 
 
-def _retrieve_inner(db: Session, kb: KB, query: str, top_k: int, rerank: str | None) -> list[dict]:
+def _retrieve_inner(db: Session, kb: KB, query: str, top_k: int, rerank: str | None,
+                    acl: "AclContext | None" = None) -> list[dict]:
     settings = get_settings()
     embedder = get_embedder(kb.embedding_provider or settings.embedding_provider, settings)
     store = get_vector_store(settings)
@@ -129,6 +135,14 @@ def _retrieve_inner(db: Session, kb: KB, query: str, top_k: int, rerank: str | N
 
     fused = rrf_combine([top_n(bm25, len(chunks)), top_n(vec_scores, len(chunks)),
                          top_n(graph_scores, len(chunks))])
+
+    # 文档级 ACL 过滤（M36/L6，设计 docs/17）：RRF 后池选取前单点过滤——BM25/向量/图谱
+    # 三路全生效，被滤 chunk 不进池不占名额，计数按过滤后计（不泄露隐藏量）。
+    from .acl import filter_doc_ids
+
+    allowed_docs, _filtered = filter_doc_ids(db, kb.id, [c.doc_id for c in chunks], ctx=acl)
+    fused = {idx: score for idx, score in fused.items() if chunks[idx].doc_id in allowed_docs}
+
     pool_n = max(top_k * 3, 10)
     fused_top = sorted(fused.items(), key=lambda kv: -kv[1])[:pool_n]
 

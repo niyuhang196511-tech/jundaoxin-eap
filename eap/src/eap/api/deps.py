@@ -59,6 +59,7 @@ def resolve_tenant(
         request.state.auth_kind = "embed_session"
         request.state.embed_agent = payload.get("agent", "")
         request.state.tenant_id = tenant.id
+        _set_acl(request, tenant.id)
         return tenant
 
     # ② API Key：优先 key_hash（M7 哈希存储）；兼容期回退明文列（存量未迁移凭证）
@@ -74,6 +75,7 @@ def resolve_tenant(
         if tenant:
             request.state.auth_kind = "api_key"
             request.state.tenant_id = tenant.id
+            _set_acl(request, tenant.id)
             return tenant
 
     # ③ 外部 IdP JWT（形如 JWT 且未命中本地凭证时尝试；OIDC 未配置则跳过）
@@ -97,6 +99,7 @@ def resolve_tenant(
             request.state.tenant_id = tenant.id
             request.state.user = identity["user"]
             request.state.roles = identity["roles"]
+            _set_acl(request, tenant.id)
             # PostgreSQL RLS（M9）：会话变量为行级隔离依据（策略 fail-closed）
             if db.get_bind().dialect.name == "postgresql":
                 from sqlalchemy import text as _text
@@ -105,6 +108,24 @@ def resolve_tenant(
             return tenant
 
     raise fastapi.HTTPException(status_code=401, detail="EAP-1001 无效 API Key")
+
+
+def _set_acl(request: fastapi.Request, tenant_id: int) -> None:
+    """检索 ACL 主体上下文（M36/L6）下发——resolve_tenant 单点覆盖三通道：
+
+    JWT → user/roles 原样；API Key → 平台管理员语义（roles=["admin"]，与 require_admin
+    判定一致）；嵌入会话 → end-user 语义（roles=["embed"]，无平台身份）。
+    """
+    from ..knowledge.acl import AclContext, set_acl_context
+
+    if request.state.auth_kind == "jwt":
+        ctx = AclContext(tenant_id=tenant_id, user_id=str(getattr(request.state, "user", "") or ""),
+                         roles=tuple(getattr(request.state, "roles", []) or []))
+    elif request.state.auth_kind == "api_key":
+        ctx = AclContext(tenant_id=tenant_id, roles=("admin",))
+    else:  # embed_session
+        ctx = AclContext(tenant_id=tenant_id, roles=("embed",))
+    set_acl_context(ctx)
 
 
 def require_api_key(request: fastapi.Request) -> None:

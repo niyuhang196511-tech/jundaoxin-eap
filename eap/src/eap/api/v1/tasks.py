@@ -61,6 +61,11 @@ async def submit_task(body: TaskSubmit, request: fastapi.Request, db: Session = 
     # trace 传播（M11）：提交方 trace_id 注入 payload，task.run span 属性关联
     payload = dict(body.payload or {})
     payload.setdefault("_trace_id", getattr(request.state, "trace_id", ""))
+    # ACL 上下文（M36/L6）：提交方身份快照进 payload，任务通道执行时重建检索过滤边界
+    # （与 M24 _tenant_id 策略上下文同法；embed/api_key 通道 roles 语义见 deps.resolve_tenant）
+    payload.setdefault("_acl", {"tenant_id": getattr(request.state, "tenant_id", None),
+                                "user_id": getattr(request.state, "user", None),
+                                "roles": getattr(request.state, "roles", [])})
     # 任务幂等键（M32）：body 字段透传（HTTP 层的 Idempotency-Key 头由网关幂等中间件处理）
     try:
         submitted = await _engine(request).submit(db, body.type, payload,

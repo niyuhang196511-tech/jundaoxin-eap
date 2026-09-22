@@ -154,6 +154,26 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class DocumentACL(Base):
+    """文档级访问控制（M36/L6，设计 docs/17）：deny 优先 → allow → 默认可见。
+
+    document_id=None 为 KB 级默认规则；subject_type=role|user，subject="*" 通配。
+    过滤点在 knowledge/service 检索管线（RRF 后池选取前），与租户过滤叠加。
+    """
+
+    __tablename__ = "document_acls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kb_id: Mapped[int] = mapped_column(ForeignKey("kbs.id"), index=True)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"),
+                                                    nullable=True, index=True)
+    effect: Mapped[str] = mapped_column(String(8))  # allow | deny
+    subject_type: Mapped[str] = mapped_column(String(8))  # role | user
+    subject: Mapped[str] = mapped_column(String(128))  # 角色名/用户 id/"*"
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Chunk(Base):
     __tablename__ = "chunks"
 
