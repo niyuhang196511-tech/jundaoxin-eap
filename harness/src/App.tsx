@@ -11,10 +11,12 @@ type Settings = {
   dataMode: DataMode;
   skillPubKey: string; // 平台技能签名公钥（hex，GET /api/v1/skills/public-key）
   pythonPath: string;  // 沙箱执行用 Python 解释器（默认 "python" 走 PATH）
+  reportAudit: boolean; // M41-B 审计上报（企业可选，默认关闭；仅技能执行类）
 };
 type Domain = "filesystem" | "network" | "process" | "browser";
 type Grants = Record<Domain, boolean>;
 type AssetMeta = { path: string; size: number; sha256: string };
+type AuditEntry = { id: number; action: string; detail: string; created_at: string };
 type SkillEntry = {
   name: string;
   version: string;
@@ -69,6 +71,7 @@ function defaults(): Settings {
     dataMode: "local",
     skillPubKey: "",
     pythonPath: "",
+    reportAudit: false,
   };
 }
 
@@ -98,6 +101,11 @@ export default function App() {
   const [runTimeout, setRunTimeout] = useState(30);
   const [runOut, setRunOut] = useState<RunResult | null>(null);
   const [runBusy, setRunBusy] = useState(false);
+
+  // ---- 审计上报（M41-B）状态 ----
+  const [reportMsg, setReportMsg] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
+  const [unreported, setUnreported] = useState<AuditEntry[]>([]);
 
   useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }, [settings]);
 
@@ -190,12 +198,47 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
     const sessions = await invoke<{ length: number }>("list_sessions", { limit: 1000 });
     const memories = await invoke<{ length: number }>("list_memory", { limit: 1000 });
     setPrivacy({ sessions: sessions.length, memories: memories.length });
+    try {  // 审计上报状态（M41-B）：未上报条目数随隐私页加载
+      const pending = await invoke<AuditEntry[]>("harness_audit_unreported", { limit: 500 });
+      setUnreported(pending);
+    } catch { setUnreported([]); }
   }
   useEffect(() => { if (view === "privacy") void loadPrivacy(); /* eslint-disable-line */ }, [view]);
 
   async function clearScope(scope: string) {
     await invoke("clear_local", { scope });
     await loadPrivacy();
+  }
+
+  // 审计上报（M41-B，企业可选·显式开启）：本地读取未上报 → 前端 fetch 上报平台 → 标记已上报。
+  // 仅上报技能执行类（action 以 skill 开头），不含会话/记忆/清除动作（更不含对话内容）。
+  function reportableSkillEntries(entries: AuditEntry[]): AuditEntry[] {
+    return entries.filter(e => e.action.startsWith("skill")).slice(0, 500);
+  }
+
+  async function reportAuditNow() {
+    setReportBusy(true); setReportMsg(""); setError("");
+    try {
+      const candidates = reportableSkillEntries(unreported);
+      if (candidates.length === 0) { setReportMsg("没有待上报的技能执行审计"); return; }
+      const r = await fetch(`${settings.baseUrl}/api/v1/audit/harness-report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
+        body: JSON.stringify({
+          entries: candidates.map(e => ({ action: e.action, detail: e.detail, created_at: e.created_at })),
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      const ids = candidates.map(e => e.id);
+      const marked = await invoke<number>("harness_audit_mark_reported", { ids });
+      setReportMsg(`已上报 ${j.accepted ?? ids.length} 条（本地标记 ${marked} 条）`);
+      await loadPrivacy();
+    } catch (e) {
+      setReportMsg(`上报失败：${(e as Error).message}（本地标记未动，可重试）`);
+    } finally {
+      setReportBusy(false);
+    }
   }
 
   // ---- 技能（M39-A）：列表 / 拉取 / 验签 / 四域批准 / 安装 / 执行 / 删除 ----
@@ -476,6 +519,31 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
           </tbody>
         </table>
         <button onClick={() => clearScope("all")} style={{ color: "#c0392b" }}>一键清除全部本地数据</button>
+
+        {/* 审计上报（M41-B，docs/18 GA 项）：企业可选 · 用户可见 · 显式开启 */}
+        <fieldset>
+          <legend>审计上报 <small style={{ color: "#888" }}>企业可选 · 默认关闭（M41-B）</small></legend>
+          <p style={{ margin: "4px 0", color: "#555" }}>
+            开启后可把本机「技能执行类审计」（安装/运行/拒绝的动作名与时间）批量上报到平台，
+            供企业安全侧留存。<strong>不包含对话内容、记忆与参数</strong>；未开启时审计数据仅存本机。
+            上报使用上方连接设置（平台地址 + 设备 Key），平台侧动作强制 harness. 前缀、只认设备凭证。
+          </p>
+          <label>
+            <input type="checkbox" checked={settings.reportAudit}
+              onChange={e => setSettings(s => ({ ...s, reportAudit: e.target.checked }))} />{" "}
+            开启审计上报（显式同意后才可上报）
+          </label>
+          <p style={{ margin: "4px 0" }}>
+            上报状态：<strong>{settings.reportAudit ? "已开启" : "关闭（数据不出端）"}</strong>
+            {" · "}未上报技能审计：<strong>{reportableSkillEntries(unreported).length}</strong> 条
+          </p>
+          <button onClick={reportAuditNow} disabled={!settings.reportAudit || reportBusy || !settings.deviceKey}>
+            {reportBusy ? "上报中…" : "立即上报"}
+          </button>{" "}
+          {!settings.deviceKey && <small style={{ color: "#c0392b" }}>需先在连接设置配置设备 Key</small>}
+          {reportMsg && <p style={{ margin: "4px 0", color: reportMsg.startsWith("上报失败") ? "#c0392b" : "#1e7e34" }}>{reportMsg}</p>}
+        </fieldset>
+
         <button onClick={() => setView("quick")}>← 返回快捷调用</button>
       </div>
     );

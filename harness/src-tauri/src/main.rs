@@ -64,6 +64,8 @@ fn main() {
             local_db::save_memory,
             local_db::list_memory,
             local_db::clear_local,
+            local_db::harness_audit_unreported,
+            local_db::harness_audit_mark_reported,
             skills::skill_inspect,
             skills::skill_install,
             skills::skill_list,
