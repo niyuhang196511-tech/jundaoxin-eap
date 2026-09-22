@@ -2,10 +2,12 @@
 //! - 系统托盘：显示/隐藏主窗口、退出
 //! - 全局快捷键 Alt+Space：唤起快捷调用窗口
 //! - 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端（local_db.rs）
+//! - 本地技能运行时（M39-A）：签名技能包安装/四域授权/沙箱执行（skills.rs）
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod local_db;
+mod skills;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -34,6 +36,8 @@ fn main() {
         .setup(|app| {
             // 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端
             local_db::init(app)?;
+            // 本地技能仓（M39-A）：harness-skills/ 目录 + skills.json 索引
+            skills::init(app)?;
 
             // 托盘菜单：显示 / 退出
             let show = MenuItem::with_id(app, "show", "显示 Harness", true, None::<&str>)?;
@@ -60,6 +64,11 @@ fn main() {
             local_db::save_memory,
             local_db::list_memory,
             local_db::clear_local,
+            skills::skill_inspect,
+            skills::skill_install,
+            skills::skill_list,
+            skills::skill_remove,
+            skills::skill_run,
         ])
         .on_window_event(|window, event| {
             // 关闭按钮 → 隐藏到托盘（常驻）

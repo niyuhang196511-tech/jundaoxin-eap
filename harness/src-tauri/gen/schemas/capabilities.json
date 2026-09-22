@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Harness 默认能力：窗口/托盘 + 全局快捷键（M37 壳工程）","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-hide","core:window:allow-show","core:window:allow-set-focus","global-shortcut:allow-register","global-shortcut:allow-unregister"]}}

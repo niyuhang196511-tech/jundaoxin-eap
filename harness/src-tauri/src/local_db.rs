@@ -66,6 +66,15 @@ fn audit_log(conn: &Connection, action: &str, detail: &str) {
     );
 }
 
+/// 跨模块审计写入（M39-A 技能安装/运行复用同一 audit 表）；失败静默不阻断业务
+pub fn record_audit(app: &AppHandle, action: &str, detail: &str) {
+    if let Some(db) = app.try_state::<LocalDb>() {
+        if let Ok(conn) = db.0.lock() {
+            audit_log(&conn, action, detail);
+        }
+    }
+}
+
 fn chrono_now() -> String {
     // RFC3339 UTC；避免引入 chrono 依赖：用 std 时间换算（秒精度足够）
     let secs = std::time::SystemTime::now()

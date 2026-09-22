@@ -10,10 +10,21 @@
 M30 新增管理端点（admin + 审计）：
 - POST /channels/{name}/credentials：应用级凭据配置（Fernet 加密存储，响应不回显明文）
 - POST /channels/{id}/send-card：出站卡片消息（平台无关卡片 → 三平台适配，event_key 幂等）
+
+M39-B 新增（docs/18 §二.5 移动远程操作，回调处理内、路由到智能体之前）：
+- 卡片按钮点击回调识别保留字 task.approve → 直调任务引擎 approve（远程审批等价
+  HITL 决策，落审计 harness.remote.approve），回执「已批准/已拒绝，任务续跑」；
+  找不到任务/状态不对 → 回执错误文本（仍 2xx，平台要求快速应答）
+- 文本以「/task 」前缀 → /task <agent> <input...> 远程触发：直达任务引擎
+  （agent.invoke 异步执行，payload 补 _acl 身份快照），回执「任务已受理 {task_id}」；
+  异步完成回执为 M40（远程监控），本版不推
 """
 
 from __future__ import annotations
 
+import base64
+import json
+import re
 import uuid
 
 import fastapi
@@ -198,13 +209,121 @@ async def test_push(name: str, db: Session = fastapi.Depends(get_db)):
 
 # ---------- 回调端点（IM 平台服务器调用，无 API Key） ----------
 
+def _xml_cdata(xml: str, tag: str) -> str:
+    """企微回调 XML 的单字段提取（EventKey 等，CDATA 形态同 runtime/im.wecom_parse_xml）。"""
+    return next(iter(re.findall(rf"<{tag}><!\[CDATA\[(.*?)\]\]></{tag}>", xml, re.S)), "")
+
+
+def _extract_action_ref(platform: str, *, payload: dict | None = None,
+                        xml: str = "", query=None) -> dict | None:
+    """按钮回调引用还原（im_outbound.build_action_value / build_action_url 的逆）。
+
+    三平台按钮点击到达形态各异，统一还原为 {"action", "channel"?, "args"?}：
+    - 飞书：卡片按钮点击事件 payload.action.value（或 event.action.value）为 JSON dict
+    - 企业微信：template_card_event 的 EventKey（XML CDATA）为 JSON 串
+    - 钉钉：actionURL 点击请求 query 携带 action + base64url(JSON args)
+    非按钮回调（普通文本消息等）返回 None。
+    """
+    raw: object = None
+    if platform == "feishu":
+        p = payload or {}
+        action = p.get("action") or (p.get("event") or {}).get("action") or {}
+        raw = action.get("value") if isinstance(action, dict) else None
+    elif platform == "wecom":
+        try:
+            raw = json.loads(_xml_cdata(xml, "EventKey"))
+        except ValueError:
+            raw = None
+    elif platform == "dingtalk" and query is not None:
+        action = query.get("action")
+        if action:
+            ref: dict = {"action": str(action)}
+            try:
+                b64 = query.get("args") or ""
+                ref["args"] = json.loads(base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)))
+                raw = ref
+            except (ValueError, json.JSONDecodeError):
+                raw = None
+    if not isinstance(raw, dict) or not raw.get("action"):
+        return None
+    return raw
+
+
+async def _push_receipt(record: IMChannelRecord, reply_url: str | None, text: str) -> dict:
+    """回执文本推送：钉钉发回调携带的 sessionWebhook，其余发渠道群 webhook。"""
+    url = reply_url or record.webhook_url
+    if not url:
+        return {"status": 0, "body": "no-webhook"}
+    return await im_rt.post_json(url, im_rt.format_push(record.platform, text))
+
+
+async def _handle_button(db: Session, record: IMChannelRecord, platform: str, *,
+                         request: fastapi.Request, payload: dict | None = None,
+                         xml: str = "", query=None, sender: str = "",
+                         reply_url: str | None = None) -> dict | None:
+    """卡片按钮点击回调（路由到智能体之前）：保留字 task.approve → 远程审批决策（M39-B）。
+
+    value 形如 {"action": "task.approve", "channel", "args": {task_id, decision}}——
+    调任务引擎 approve（合并决定 → PENDING 续跑）+ 审计 harness.remote.approve
+    （docs/18 §二.5：远程审批等价 HITL 决策，detail 标 im 渠道/决策），回执
+    「已批准/已拒绝，任务续跑」。找不到任务/状态不对 → 回执错误文本（不 5xx）。
+    非该保留字的引用/普通消息返回 None → 走既有链路。
+    """
+    ref = _extract_action_ref(platform, payload=payload, xml=xml, query=query)
+    if ref is None or ref.get("action") != im_out.TASK_APPROVE_ACTION:
+        return None
+    args = ref.get("args") if isinstance(ref.get("args"), dict) else {}
+    task_id = str(args.get("task_id") or "")
+    decision = bool(args.get("decision"))
+    try:
+        state = await request.app.state.task_engine.approve(task_id, decision)
+        reply = f"已{'批准' if decision else '拒绝'}，任务续跑（{task_id} → {state}）"
+    except KeyError:
+        reply = f"审批失败：未找到任务 {task_id or '（空）'}"
+    except ValueError as e:
+        reply = f"审批失败：{e}"
+    audit.record("harness.remote.approve",
+                 actor=f"im:{record.platform}/{record.name}/{sender or 'anonymous'}",
+                 target=task_id,
+                 detail={"channel": record.name, "platform": record.platform,
+                         "decision": decision, "via": "im-card"},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return await _push_receipt(record, reply_url, reply)
+
+
+async def _submit_remote_task(db: Session, record: IMChannelRecord, text: str,
+                              reply_url: str | None, request: fastapi.Request) -> dict:
+    """/task <agent> <input...> 远程触发（M39-B）：IM 消息直达任务引擎异步执行。
+
+    鉴权沿用渠道回调既有安全（三平台签名已验）；payload 补 _acl 身份快照（M36 任务
+    通道同法——IM 通道无登录态，如实记 None/空 roles，文档检索走默认可见语义）。
+    回执「任务已受理 {task_id}」；异步完成回执为 M40（远程监控），本版不推。
+    """
+    parts = text[len("/task"):].strip().split(None, 1)
+    agent = str(parts[0]) if parts else ""
+    task_input = parts[1] if len(parts) > 1 else ""
+    if agent not in registry.names():
+        return await _push_receipt(record, reply_url,
+                                   f"远程触发失败：智能体 {agent or '（空）'} 未注册")
+    payload = {"agent": agent, "input": task_input,
+               "_acl": {"tenant_id": getattr(request.state, "tenant_id", None),
+                        "user_id": getattr(request.state, "user", None),
+                        "roles": getattr(request.state, "roles", [])}}
+    task_id = await request.app.state.task_engine.submit(db, "agent.invoke", payload)
+    return await _push_receipt(record, reply_url, f"任务已受理 {task_id}")
+
+
 async def _route_to_agent(db: Session, record: IMChannelRecord, text: str,
-                          sender: str, reply_url: str | None) -> dict:
+                          sender: str, reply_url: str | None,
+                          request: fastapi.Request | None = None) -> dict:
     """消息 → 绑定智能体 → 回复推送。失败不抛（IM 回调需快速 2xx）。
 
+    「/task 」前缀文本 → 远程触发（M39-B）：直达任务引擎不经智能体对话。
     业务处理抛错 → 入重试队列（runtime/im_outbound，direction=in；幂等键按
     平台:渠道:内容派生，平台重复投递同键跳过），由后台循环指数退避重投。
     """
+    if request is not None and text.startswith("/task "):
+        return await _submit_remote_task(db, record, text, reply_url, request)
     try:
         resp = await registry.invoke(db, record.agent, InvokeRequest(input=text, user_id=sender or None))
         reply = resp.output
@@ -235,8 +354,12 @@ async def feishu_webhook(name: str, payload: dict, request: fastapi.Request,
     if not im_rt.feishu_verify_token(payload, decrypt_secret(record.secret)):
         raise fastapi.HTTPException(status_code=401, detail="EAP-7205 Verification Token 校验失败")
     text, sender = im_rt.feishu_parse_message(payload)
+    handled = await _handle_button(db, record, "feishu", request=request, payload=payload,
+                                   sender=sender, reply_url=None)
+    if handled is not None:
+        return handled
     if text:
-        await _route_to_agent(db, record, text, sender, None)
+        await _route_to_agent(db, record, text, sender, None, request)
     return {"ok": True}  # 官方要求快速 2xx，异步处理由平台侧重试兜底
 
 
@@ -252,9 +375,33 @@ async def dingtalk_webhook(name: str, payload: dict, request: fastapi.Request,
         if not timestamp or not im_rt.dingtalk_verify(decrypt_secret(record.secret), timestamp, sign):
             raise fastapi.HTTPException(status_code=401, detail="EAP-7205 加签校验失败")
     text, sender, session_webhook = im_rt.parse_inbound("dingtalk", payload)
+    handled = await _handle_button(db, record, "dingtalk", request=request,
+                                   query=request.query_params, sender=sender,
+                                   reply_url=session_webhook)
+    if handled is not None:
+        return handled
     if text and session_webhook:
-        return await _route_to_agent(db, record, text, sender, session_webhook)
+        return await _route_to_agent(db, record, text, sender, session_webhook, request)
     return {"ok": True}
+
+
+@router.get("/dingtalk/{name}/webhook")
+async def dingtalk_action_click(name: str, request: fastapi.Request,
+                                db: Session = fastapi.Depends(get_db)):
+    """钉钉 actionCard 按钮 actionURL 点击（浏览器 GET 本端点）：识别审批按钮并回执（M39-B）。
+
+    点击请求无钉钉加签头（头由机器人服务器回调携带），鉴权依赖回调引用不可猜测性
+    （task_id 为 uuid4 十六进制不可枚举）+ 审计留痕；生产加固（actionURL 一次性
+    token）留待 M40 真实联调。
+    """
+    record = _get(db, name)
+    if record.platform != "dingtalk" or not record.enabled:
+        raise fastapi.HTTPException(status_code=409, detail="EAP-7204 渠道不可用")
+    handled = await _handle_button(db, record, "dingtalk", request=request,
+                                   query=request.query_params)
+    if handled is None:
+        return {"ok": True, "note": "非按钮回调（query 无 action 参数）"}
+    return handled
 
 
 @router.get("/wecom/{name}/webhook")
@@ -293,6 +440,11 @@ async def wecom_webhook(name: str, request: fastapi.Request,
         inner = im_rt.wecom_parse_xml(plain_xml)
     except ValueError as e:
         raise fastapi.HTTPException(status_code=401, detail=f"EAP-7205 {e}") from e
+    handled = await _handle_button(db, record, "wecom", request=request, xml=plain_xml,
+                                   sender=inner.get("from_user", ""))
+    if handled is not None:
+        return fastapi.responses.PlainTextResponse("success")
     if inner.get("content"):
-        await _route_to_agent(db, record, inner["content"], inner.get("from_user", ""), None)
+        await _route_to_agent(db, record, inner["content"], inner.get("from_user", ""), None,
+                              request)
     return fastapi.responses.PlainTextResponse("success")  # 官方约定应答

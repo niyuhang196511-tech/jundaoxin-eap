@@ -28,6 +28,13 @@ HTTP 发送统一经本模块 post_json（默认 httpx；测试 monkeypatch 注�
 幂等：同 channel+event_key 已 done/pending 的重复投递直接跳过（enqueue 返回 None）。
 循环惰性启动（schedule_retry_loop()，由 API 层入队后调用，不改 main.py lifespan），
 随事件循环存活，单轮失败不影响循环存活。
+
+## HITL 审批卡片推送（M39-B，docs/18 §二.5 移动远程审批）
+任务挂起 WAITING_HUMAN 时（runtime/tasks.py 挂起点）调 notify_hitl：向 enabled 且
+extra["notify_hitl"]=true 的渠道推送「审批待办」卡片（agent/工具/task_id 摘要 +
+批准/拒绝两按钮）。按钮复用 Action 协议编码，action 取保留字 task.approve、args 携带
+task_id + decision；回调端点（api/v1/im.py）识别后直调任务引擎 approve 续跑。
+幂等键 hitl:{task_id}；发送失败走既有重试队列。
 """
 
 from __future__ import annotations
@@ -279,6 +286,69 @@ async def send_card(channel: IMChannelRecord, card: dict, *, sender=None) -> dic
     if platform == "dingtalk":
         return await _send_dingtalk(channel, card, send)
     return await _send_wecom(channel, card, send)
+
+
+# ---------- HITL 审批卡片推送（M39-B，docs/18 §二.5 移动远程审批） ----------
+
+# 按钮编码保留字：action 除业务动作/工具名外新增的保留动作——按钮 value 携带
+# {"action": "task.approve", "channel", "args": {task_id, decision}}，回调端点
+# （api/v1/im.py）识别后直调任务引擎 approve，不经智能体（远程审批等价 HITL 决策）。
+TASK_APPROVE_ACTION = "task.approve"
+
+
+def build_hitl_card(task_id: str, agent: str, tool: str) -> dict:
+    """审批待办卡片（平台无关结构）：批准/拒绝两按钮复用 M30 Action 协议编码。
+
+    按钮 action 取保留字 task.approve，args 携带 task_id + decision；三平台适配
+    （飞书 value / 钉钉 actionURL / 企微 key）由既有 _feishu_card/_dingtalk_card/
+    _wecom_card 承担，回调引用还原见 api/v1/im._extract_action_ref。
+    """
+    def _act(decision: bool) -> dict:
+        return {"label": "批准" if decision else "拒绝", "action": TASK_APPROVE_ACTION,
+                "args": {"task_id": task_id, "decision": decision}}
+
+    return {"title": "审批待办",
+            "text": (f"智能体 **{agent or '未知'}** 请求调用工具 **{tool or '未知'}**，"
+                     f"任务 `{task_id}` 等待人工审批。"),
+            "actions": [_act(True), _act(False)]}
+
+
+async def notify_hitl(task_id: str, agent: str, tool: str, db: Session, *,
+                      sender=None) -> list[str]:
+    """HITL 待办 → IM 审批卡片推送（M39-B）：notify_hitl 开关渠道逐个推送。
+
+    - 渠道筛选：enabled 且 extra["notify_hitl"]=true（复用 extra JSON 列，零迁移）
+    - 幂等：event_key = hitl:{task_id}——同渠道已有同键 done/pending 投递直接跳过
+      （任务重复挂起/重扫不重发）；返回实际处理的渠道名列表（跳过的不含）
+    - 失败走既有重试队列：首投失败 enqueue pending（指数退避重投，超限 dead），
+      并惰性拉起后台重试循环
+    - 传入会话由本函数 commit（挂起点为独立会话、无环境事务）；sender 可注入
+      fake 发送函数（签名同 post_json，测试用），缺省本模块 post_json
+    """
+    channels = db.scalars(select(IMChannelRecord)
+                          .where(IMChannelRecord.enabled == True))  # noqa: E712
+    card = build_hitl_card(task_id, agent, tool)
+    event_key = f"hitl:{task_id}"
+    pushed: list[str] = []
+    pending = False
+    for ch in channels:
+        if not (ch.extra or {}).get("notify_hitl"):
+            continue
+        if find_active(db, ch.id, event_key) is not None:
+            continue  # 幂等：该渠道已推送过本任务的审批卡片
+        status, error = "done", ""
+        try:
+            await send_card(ch, card, sender=sender)
+        except Exception as e:  # 首投失败 → pending 入队走后台重试
+            status, error = "pending", str(e)[:500]
+            pending = True
+        enqueue(db, channel_id=ch.id, direction="out", event_key=event_key,
+                payload=card, status=status, attempts=1, error=error)
+        pushed.append(ch.name)
+    db.commit()
+    if pending:
+        schedule_retry_loop()
+    return pushed
 
 
 # ---------- 投递日志 / 重试队列 ----------

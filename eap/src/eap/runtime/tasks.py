@@ -625,6 +625,19 @@ class TaskEngine:
                 "pending": {"tool": sus.pending_tool, "arguments": sus.pending_args},
                 "approvals": prev_result.get("approvals", {}),
             })
+            # M39-B（docs/18 §二.5 移动远程审批）：挂起即推 IM 审批卡片到手机。
+            # 仅 agent.hitl/agent.invoke 任务生效；懒 import 防循环依赖（模式同
+            # _mark 的 emit_event）；推送/入队失败只告警，不影响挂起状态。
+            if task_type in ("agent.hitl", "agent.invoke"):
+                try:
+                    from .im_outbound import notify_hitl
+
+                    with SessionLocal() as ndb:
+                        await notify_hitl(task_id, str(payload.get("agent") or ""),
+                                          sus.pending_tool, ndb)
+                except Exception as e:
+                    logging.getLogger("eap.tasks").warning(
+                        "HITL 审批卡片推送失败 task=%s: %s", task_id, e)
             return
         except InteractionRequested as ir:
             # 交互引擎（v0.5-④）：结构化输入挂起 → WAITING_INPUT + 快照，interact 端点提交后续跑
