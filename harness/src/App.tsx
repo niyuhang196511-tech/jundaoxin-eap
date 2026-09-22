@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import MonitorView from "./MonitorView";
 
 type Agent = { name: string; description?: string; status?: string };
 type DataMode = "local" | "cloud-personal" | "cloud-org";
@@ -81,7 +82,7 @@ export default function App() {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [view, setView] = useState<"quick" | "skills" | "privacy">("quick");
+  const [view, setView] = useState<"quick" | "skills" | "privacy" | "monitor">("quick");
   const [privacy, setPrivacy] = useState<{ sessions: number; memories: number } | null>(null);
 
   // ---- 技能（M39-A）状态 ----
@@ -309,6 +310,16 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
   const runEntry = skills.find(s => s.name === runName);
   const runScripts = runEntry ? runEntry.files.filter(f => f.path.startsWith("scripts/")).map(f => f.path) : [];
 
+  if (view === "monitor") {
+    return (
+      <MonitorView
+        baseUrl={settings.baseUrl}
+        deviceKey={settings.deviceKey}
+        onNavigate={v => setView(v)}
+      />
+    );
+  }
+
   if (view === "skills") {
     return (
       <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, display: "flex", flexDirection: "column", gap: 12, height: "100vh", boxSizing: "border-box", overflow: "auto" }}>
@@ -475,6 +486,7 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
       <h2 style={{ margin: 0 }}>EAP Harness <small style={{ color: "#888" }}>v1.0</small>
         <button style={{ marginLeft: 12 }} onClick={() => setView("skills")}>技能 →</button>
         <button onClick={() => setView("privacy")}>隐私清单 →</button>
+        <button onClick={() => setView("monitor")}>监控 →</button>
       </h2>
 
       <details>
