@@ -14,8 +14,10 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...models import ApiKey, UserRecord
+from ...observability import audit
 from ...runtime import oidc
 from ...config import get_settings
+from ..deps import resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/auth", dependencies=[fastapi.Depends(get_db)])
 
@@ -93,3 +95,67 @@ async def revoke_jwt(request: fastapi.Request, db: Session = fastapi.Depends(get
     expires_at = datetime.utcfromtimestamp(int(claims.get("exp", 0)))
     revoke_token(token, expires_at, reason="self-revoke")
     return {"revoked": True, "expires_at": expires_at.isoformat() + "Z"}
+
+
+# ---------- 设备绑定（M37 Harness）：员工为桌面端签发/吊销专属设备 Key ----------
+
+@router.get("/devices", dependencies=[fastapi.Depends(resolve_tenant)])
+def list_devices(request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """本租户的 Harness 设备列表（设备名/状态/签发时间；明文 key 不可见）。"""
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if tenant_id is None:
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3003 仅凭证通道可见设备列表")
+    rows = db.scalars(select(ApiKey).where(
+        ApiKey.tenant_id == tenant_id,
+        ApiKey.note.like("harness:%"),  # noqa: E712
+        ApiKey.enabled == True)).all()  # noqa: E712
+    return [{"name": r.note.removeprefix("harness:"), "created_at": str(r.created_at) if hasattr(r, "created_at") else ""}
+            for r in rows]
+
+
+@router.post("/devices", dependencies=[fastapi.Depends(resolve_tenant)])
+def register_device(body: dict, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """为当前租户签发 Harness 设备专属 API Key（明文仅本次返回，落库只存哈希）。
+
+    设备名全局唯一（note = harness:<name>，唯一索引保障）；重名且在用 → 409
+    （吊销后可重用同名）。审计 harness.device.register。
+    """
+    import secrets as _secrets
+
+    name = str((body or {}).get("name") or "").strip()
+    import re as _re
+
+    if not _re.fullmatch(r"[a-zA-Z0-9_-]{2,40}", name):
+        raise fastapi.HTTPException(status_code=422, detail="EAP-4000 设备名须为 2~40 位字母数字-_")
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if tenant_id is None:
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3003 仅凭证通道可注册设备")
+    note = f"harness:{name}"
+    if db.scalar(select(ApiKey).where(ApiKey.note == note, ApiKey.enabled == True)):  # noqa: E712
+        raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 设备 {name} 已注册（先吊销可重用同名）")
+    plain = f"eap_d_{_secrets.token_urlsafe(24)}"
+    from ...security_keys import key_hash
+
+    key = ApiKey(key_hash=key_hash(plain), tenant_id=tenant_id, note=note)
+    db.add(key)
+    db.commit()
+    audit.record("harness.device.register", actor=audit.actor_of(request), target=name,
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": name, "api_key": plain, "note": "明文仅此一次返回，请存入 Harness 凭据库"}
+
+
+@router.delete("/devices/{name}", dependencies=[fastapi.Depends(resolve_tenant)])
+def revoke_device(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """吊销设备 Key（enabled=False，审计 harness.device.revoke；远程吊销地基）。"""
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if tenant_id is None:
+        raise fastapi.HTTPException(status_code=403, detail="EAP-3003 仅凭证通道可吊销设备")
+    note = f"harness:{name}"
+    key = db.scalar(select(ApiKey).where(ApiKey.note == note, ApiKey.enabled == True))  # noqa: E712
+    if key is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 设备 {name} 不存在或已吊销")
+    key.enabled = False
+    db.commit()
+    audit.record("harness.device.revoke", actor=audit.actor_of(request), target=name,
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": name, "status": "revoked"}

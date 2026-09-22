@@ -25,3 +25,8 @@ eap/media/
 eap/media-test-*/
 # 本地向量索引持久化缓存（npz per KB）
 eap/vector-cache/
+
+# Harness 构建产物（M37）
+harness/dist/
+harness/src-tauri/target/
+node_modules/

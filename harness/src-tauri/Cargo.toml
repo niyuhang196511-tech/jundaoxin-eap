@@ -1,0 +1,14 @@
+[package]
+name = "eap-harness"
+version = "1.0.0"
+description = "EAP Harness 桌面端：订阅云端 Agent/技能并本地执行的员工客户端（docs/18）"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
