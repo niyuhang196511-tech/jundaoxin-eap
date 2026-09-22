@@ -18,11 +18,11 @@
 | 项 | 值 |
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
-| 最新里程碑 | M37（kb-M36 ACL + harness-M37 壳工程基座） |
-| 代码 commit | 250c4cf |
+| 最新里程碑 | M38（harness-M38 数据私有化） |
+| 代码 commit | 998da0f |
 | 快照日期 | 2026-09-21 |
-| 测试基线 | **342 passed, 8 skipped, 0 errors**（92s）——较 v1.0.0 基线 337 passed 增 5（ACL）；Harness 设备绑定 4 测试；tauri build 产出 NSIS 安装包（VS Build Tools 已装） |
-| 下一主线 | **M38 数据私有化**（本地 SQLite 仓/三档数据模式/隐私清单页，docs/18）→ M39 本地技能+远程审批 → M40 远程触发/GA；组织记忆联动 KB（小批次）可插入；L 组其余按外部条件消化（vLLM/IM 联调/SLO/计费） |
+| 测试基线 | **342 passed, 8 skipped, 0 errors**（92s，平台侧）——Harness M37/M38 以 tauri build + 前端 typecheck/vitest 为验收（本地仓 Rust 单元随 cargo check） |
+| 下一主线 | **M39 本地自定义技能 + 移动远程审批**（签名包安装/四域权限提示/沙箱执行 + HITL→IM 卡片，docs/18）→ M40 远程触发/移动监控/GA；组织记忆联动 KB（小批次）可插入；L 组其余按外部条件消化（vLLM/IM 联调/SLO/计费） |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -228,6 +228,7 @@
 | **批次 6.5 ✅** | L7 接线（摘要压缩入 run_loop）＋ console 镜像/K8s 补齐（P5/P4 未尽）＋ L8 MCP OAuth | 已完成（6e0710f / 014c993 / 566fd36），回归 337 passed |
 | **收版 ✅** | **v1.0.0 发布**（6186583，tag v1.0.0）+ docs/16 门禁决策（无 seal 环境，docs/16 替代） | **14 能力域收官，v1.0 达成** |
 | **批次 7 ✅** | M36 L6 文档级 ACL（ce4f97e）＋ **M37 Harness 壳工程基座**（d68359c/250c4cf） | M36 已批准实施完成；M37：Tauri 2 壳（托盘/Alt+Space 热键/关闭驻留）+ 设备绑定认证 （签发/列表/吊销，4 测试）+ Agent 目录订阅与流式快捷调用 MVP；**tauri build 全链路验证通过**（NSIS 安装包产出；本机 winget 安装 VS Build Tools 后） |
+| **批次 8（当前）** | **M38 数据私有化 ✅**（998da0f：本地 SQLite 仓/三档数据模式/隐私清单页）→ M39 本地技能+移动远程审批 → M40 远程触发/GA | Harness v1.1 主线（docs/18） |
 | 批次 8+ | Harness 桌面端 v1.1 主线（形态已决策：订阅+快捷调用 + 数据私有化 + 本地技能）＋ L 组其余外部条件项 | vLLM（GPU）/ IM 联调（外部账号）/ SLO（生产环境）/ 计费（产品决策）/ 组织记忆联动 KB |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
