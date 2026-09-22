@@ -775,6 +775,18 @@ class TaskEngine:
                                 .where(EvalDatasetRecord.name == dataset_name))
             if run is None or dataset is None:
                 return {"status": "failed", "error": "运行或数据集不存在"}
+            # 模型直评（M42-B）：payload.model 非空 → 用例逐条经 hub prefer=model 调用
+            if payload.get("model"):
+                from ..api.v1.evals import execute_model_evaluation
+
+                result = await execute_model_evaluation(db, str(payload["model"]), dataset_name,
+                                                        min_rate, judge)
+                run = db.get(EvalRunRecord, run_id)
+                run.verdict = result["verdict"]
+                run.pass_rate = result["pass_rate"]
+                run.scores = result["scores"]
+                db.commit()
+                return {"status": "ok", "run_id": run_id, "verdict": result["verdict"]}
             if dataset.kind != "rag":
                 from ..api.v1.evals import execute_evaluation
 

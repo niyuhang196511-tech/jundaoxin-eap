@@ -100,7 +100,7 @@ class ModelHub:
 
             prefer = current_model_override()  # canary 灰度覆盖（显式 prefer 优先）
         from ..observability.tracing import enabled as otel_enabled, tracer
-        from ..runtime.policy import check_prompt, enforce_chain
+        from ..runtime.policy import apply_eval_gate, check_prompt, enforce_chain
 
         check_prompt(db, messages)  # Policy Engine：单次调用 prompt 上限
         chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
@@ -113,6 +113,17 @@ class ModelHub:
         chain = [r for r in chain if breaker.allow(r.name)]
         if not chain:
             raise ProviderError(f"[{capability}] 链上模型均处于熔断状态，请稍后重试")
+        # 评测门禁（M42-B，docs/10 遗留项）：未过评测的模型从候选链剔除，
+        # 自然落到降级链下一个（与熔断过滤同位同模式），剔除明细落审计
+        chain, gate_blocked = apply_eval_gate(db, chain)
+        for item in gate_blocked:
+            from ..observability import audit
+
+            audit.record("model.eval_gate.blocked", target=item["model"],
+                         detail={"reason": item["reason"], "policy": item["policy"],
+                                 "capability": capability})
+        if not chain:
+            raise ProviderError(f"[{capability}] 链上模型均未通过评测门禁，请先在评测中心通过评测")
         errors: list[str] = []
         for record in chain:
             span_cm = tracer().start_as_current_span(
@@ -162,7 +173,7 @@ class ModelHub:
             from ..runtime.canary import current_model_override
 
             prefer = current_model_override()
-        from ..runtime.policy import check_prompt, enforce_chain
+        from ..runtime.policy import apply_eval_gate, check_prompt, enforce_chain
 
         if system:
             messages = [{"role": "system", "content": system}, *messages]
@@ -177,6 +188,16 @@ class ModelHub:
         chain = [r for r in chain if breaker.allow(r.name)]
         if not chain:
             raise ProviderError(f"[{capability}] 链上模型均处于熔断状态，请稍后重试")
+        # 评测门禁（M42-B）：与 complete 同位同模式，剔除落审计、不抛错
+        chain, gate_blocked = apply_eval_gate(db, chain)
+        for item in gate_blocked:
+            from ..observability import audit
+
+            audit.record("model.eval_gate.blocked", target=item["model"],
+                         detail={"reason": item["reason"], "policy": item["policy"],
+                                 "capability": capability})
+        if not chain:
+            raise ProviderError(f"[{capability}] 链上模型均未通过评测门禁，请先在评测中心通过评测")
         errors: list[str] = []
         for record in chain:
             from ..observability.tracing import enabled as otel_enabled, tracer

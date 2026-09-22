@@ -4,6 +4,8 @@
 - 裁判：rule（关键词）/ llm（LLM-as-Judge，多维 1-5 分 + 总体 passed，judge_model 可配）
 - 执行：eval.run 任务（后台异步），运行历史列表 + 详情 + 回归对比（对齐 docs/08 §3）
 - RAG 指标：HitRate@K / Recall@K / MRR / NDCG（确定性纯函数，见 runtime/rag_eval.py）
+- 模型直评（M42-B）：run 请求带 model 时直接评测模型（不经过 agent，用例逐条经 hub
+  prefer=model 调用），结果落 eval_runs.model 列，作为 eval-gate 路由门禁的判定输入
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ class EvalDatasetCreate(BaseModel):
 
 class EvalRunRequest(BaseModel):
     agent: str = ""
+    model: str = Field(default="", description="M42-B 模型直评：指定模型名时直接评测该模型（agent 须留空）")
     dataset: str
     min_pass_rate: float = Field(default=0.8, ge=0.0, le=1.0)
     judge: str = Field(default="rule", pattern=r"^(rule|llm)$",
@@ -82,24 +85,36 @@ def list_datasets(db: Session = fastapi.Depends(get_db)):
 
 @router.post("/runs", dependencies=[fastapi.Depends(require_admin)])
 async def run_evaluation(body: EvalRunRequest, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
-    """异步评测：提交 eval.run 任务立即返回 run_id（PENDING→RUNNING→PASS/FAIL）。"""
+    """异步评测：提交 eval.run 任务立即返回 run_id（PENDING→RUNNING→PASS/FAIL）。
+
+    M42-B 模型直评：body.model 非空时评测对象为模型本身（agent 留空，仅支持 agent 数据集）。
+    """
     engine = request.app.state.task_engine
 
     dataset = db.scalar(select(EvalDatasetRecord).where(EvalDatasetRecord.name == body.dataset))
     if dataset is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 数据集 {body.dataset} 不存在")
-    if dataset.kind == "rag":
+    if body.model:
+        if body.agent:
+            raise fastapi.HTTPException(status_code=400,
+                                        detail="EAP-4000 agent 与 model 二选一：模型直评时 agent 须留空")
+        if dataset.kind != "agent":
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="EAP-4000 模型直评仅支持 agent 数据集（rag 评测经知识库检索，与模型无关）")
+    elif dataset.kind == "rag":
         _require_agent(db, body.agent)
     run = EvalRunRecord(id=uuid.uuid4().hex, agent=body.agent, dataset=body.dataset,
-                        kind=dataset.kind, verdict="PENDING",
+                        model=body.model or None, kind=dataset.kind, verdict="PENDING",
                         min_pass_rate=body.min_pass_rate, judge=body.judge)
     db.add(run)
     db.commit()
-    payload = {"run_id": run.id, "agent": body.agent, "dataset": body.dataset,
+    payload = {"run_id": run.id, "agent": body.agent, "model": body.model, "dataset": body.dataset,
                "judge": body.judge, "min_pass_rate": body.min_pass_rate, "top_k": body.top_k}
     await engine.submit(db, "eval.run", payload)
     audit.record("eval.run.submit", actor=audit.actor_of(request), target=run.id,
-                 detail={"agent": body.agent, "dataset": body.dataset, "kind": dataset.kind},
+                 detail={"agent": body.agent, "model": body.model,
+                         "dataset": body.dataset, "kind": dataset.kind},
                  trace_id=getattr(request.state, "trace_id", ""))
     return {"run_id": run.id, "status": "PENDING"}
 
@@ -117,13 +132,17 @@ def _require_agent(db: Session, agent: str) -> None:
 
 
 @router.get("/runs")
-def list_runs(agent: str | None = None, limit: int = 50, db: Session = fastapi.Depends(get_db)):
+def list_runs(agent: str | None = None, model: str | None = None, limit: int = 50,
+              db: Session = fastapi.Depends(get_db)):
+    """运行历史；agent/model 可选过滤（M42-B：按模型筛模型直评记录）。"""
     query = select(EvalRunRecord).order_by(EvalRunRecord.created_at.desc()).limit(min(limit, 200))
     if agent:
         query = query.where(EvalRunRecord.agent == agent)
+    if model:
+        query = query.where(EvalRunRecord.model == model)
     return [
-        {"run_id": r.id, "agent": r.agent, "dataset": r.dataset, "kind": r.kind,
-         "verdict": r.verdict, "judge": r.judge, "pass_rate": r.pass_rate,
+        {"run_id": r.id, "agent": r.agent, "model": r.model or "", "dataset": r.dataset,
+         "kind": r.kind, "verdict": r.verdict, "judge": r.judge, "pass_rate": r.pass_rate,
          "metrics": r.metrics, "created_at": str(r.created_at)}
         for r in db.scalars(query).all()
     ]
@@ -136,12 +155,44 @@ async def execute_evaluation(db: Session, agent: str, dataset_name: str,
     if dataset is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 数据集 {dataset_name} 不存在")
 
+    async def produce_output(case: dict) -> str:
+        resp = await _invoke(db, agent, case["input"])
+        return resp["output"]
+
+    return await _finish_evaluation(db, dataset, produce_output, min_pass_rate, judge, agent=agent)
+
+
+async def execute_model_evaluation(db: Session, model: str, dataset_name: str,
+                                   min_pass_rate: float = 0.8, judge: str = "rule") -> dict:
+    """模型直评（M42-B）：不经过 agent，用例逐条经 hub（prefer=model）调用后按 judge 评分。
+
+    评分/判定/落库复用 agent 评测的同一流程（_finish_evaluation），结果落 model 列，
+    作为 eval-gate 路由门禁的判定输入。eval.run 在任务引擎内执行（平台内部模式，
+    无租户上下文），路由链不受 eval-gate 策略自我拦截。
+    """
+    from ...modelhub.router import hub
+
+    dataset = db.scalar(select(EvalDatasetRecord).where(EvalDatasetRecord.name == dataset_name))
+    if dataset is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 数据集 {dataset_name} 不存在")
+
+    async def produce_output(case: dict) -> str:
+        completion = await hub.complete(db, [{"role": "user", "content": case["input"]}],
+                                        capability="chat", prefer=model)
+        return completion.result.content or ""
+
+    return await _finish_evaluation(db, dataset, produce_output, min_pass_rate, judge, model=model)
+
+
+async def _finish_evaluation(db: Session, dataset: EvalDatasetRecord,
+                             produce_output, min_pass_rate: float, judge: str,
+                             *, agent: str = "", model: str | None = None) -> dict:
+    """逐用例评分 → verdict/pass_rate 判定 → EvalRunRecord 落库（agent/模型直评共用）。"""
     scores = []
     passed = 0
     for case in dataset.cases:
         try:
-            resp = await _invoke(db, agent, case["input"])
-            output = resp["output"]
+            output = await produce_output(case)
         except Exception as e:
             scores.append({"input": case["input"], "passed": False, "error": str(e)[:200]})
             continue
@@ -158,13 +209,13 @@ async def execute_evaluation(db: Session, agent: str, dataset_name: str,
 
     rate = passed / len(dataset.cases) if dataset.cases else 0.0
     verdict = "PASS" if rate >= min_pass_rate else "FAIL"
-    run = EvalRunRecord(id=uuid.uuid4().hex, agent=agent, dataset=dataset_name,
+    run = EvalRunRecord(id=uuid.uuid4().hex, agent=agent, dataset=dataset.name, model=model,
                         verdict=verdict, min_pass_rate=min_pass_rate, judge=judge, scores=scores,
                         pass_rate=round(rate, 4))
     db.add(run)
     db.commit()
-    return {"run_id": run.id, "agent": agent, "dataset": dataset_name, "judge": judge,
-            "verdict": verdict, "pass_rate": round(rate, 4), "scores": scores}
+    return {"run_id": run.id, "agent": agent, "model": model or "", "dataset": dataset.name,
+            "judge": judge, "verdict": verdict, "pass_rate": round(rate, 4), "scores": scores}
 
 
 def _keywords_criteria(case: dict) -> str:
@@ -209,7 +260,8 @@ def get_run(run_id: str, compare: str | None = None, db: Session = fastapi.Depen
     run = db.get(EvalRunRecord, run_id)
     if run is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 评测运行 {run_id} 不存在")
-    result = {"run_id": run.id, "agent": run.agent, "dataset": run.dataset, "kind": run.kind,
+    result = {"run_id": run.id, "agent": run.agent, "model": run.model or "",
+              "dataset": run.dataset, "kind": run.kind,
               "verdict": run.verdict, "judge": run.judge, "min_pass_rate": run.min_pass_rate,
               "pass_rate": run.pass_rate, "metrics": run.metrics, "scores": run.scores}
     if compare:

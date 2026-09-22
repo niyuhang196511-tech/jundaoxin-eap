@@ -310,7 +310,19 @@ def test_migration_single_head_and_full_chain(tmp_path):
     from sqlalchemy import inspect as sa_inspect
 
     sd = ScriptDirectory(str(_EAP_DIR / "migrations"))
-    assert sd.get_heads() == ["c1d3e5f7a9b1"]
+    # 单头 + 全链线性（与具体版本号解耦——M42 起新迁移会持续推进 head）
+    import os
+
+    heads = sd.get_heads()
+    assert len(heads) == 1, f"迁移链多头: {heads}"
+    # 全链线性：从 head 沿 down_revision 走到 base，步数 == 迁移文件数（无分叉/孤儿）
+    revs, cur = [], str(heads[0])
+    while cur:
+        revs.append(cur)
+        cur = sd.get_revision(cur).down_revision or None
+    files = {f.split("_", 1)[0] for f in os.listdir(str(_EAP_DIR / "migrations" / "versions"))
+             if f.endswith(".py") and not f.startswith("__") and f != "env.py"}
+    assert set(revs) == files, f"链与迁移文件不一致：链 {len(revs)} vs 文件 {len(files)}"
 
     db_path = _alembic_upgrade(tmp_path, "head")
     engine = create_engine(f"sqlite:///{db_path.as_posix()}")
@@ -318,7 +330,7 @@ def test_migration_single_head_and_full_chain(tmp_path):
         assert "device_user" in [c["name"] for c in sa_inspect(engine).get_columns("api_keys")]
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        assert ver == "c1d3e5f7a9b1"
+        assert ver == heads[0]
     finally:
         engine.dispose()
 

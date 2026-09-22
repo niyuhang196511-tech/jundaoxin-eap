@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..modelhub.providers import approx_tokens
-from ..models import ModelRecord, PolicyRecord
+from ..models import EvalRunRecord, ModelRecord, PolicyRecord
 
 tenant_scope: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "eap_policy_tenant", default=None)
@@ -176,3 +176,58 @@ def check_a2a_delegate(db: Session, endpoint: str, target_agent: str = "") -> No
     raise PolicyDenied(
         f"EAP-7102 A2A 外部委派默认拒绝：endpoint {endpoint or '∅'} / agent {target_agent or '∅'} "
         f"不在租户 {tenant_id} 的 a2a-delegate-allowlist 放行名单内{where}")
+
+
+def apply_eval_gate(db: Session, records: list[ModelRecord]) -> tuple[list[ModelRecord], list[dict]]:
+    """评测门禁（M42-B，docs/10 遗留项）：清单内模型须过评测方可路由，与熔断过滤同位。
+
+    kind=eval-gate，config={"models": [...], "require_eval": bool, "min_pass_rate": 0.8}：
+    - 清单内模型：无 model 评测记录且 require_eval=true → 剔除；
+      有记录但最新一条 verdict != PASS 或 pass_rate < min_pass_rate → 剔除；
+    - 清单外模型不受影响（存量零破坏）；无 eval-gate 策略时原链原样返回。
+
+    返回（过滤后链，被剔除明细 [{model, reason, policy}]）——剔除不抛错，由路由器
+    落审计 model.eval_gate.blocked 后自然落到降级链下一个（M31 熔断过滤同模式）。
+    """
+    tenant_id = tenant_scope.get()
+    gates = [p for p in _policies_for(db, tenant_id) if p.kind == "eval-gate"]
+    if not gates or not records:
+        return records, []
+    blocked: list[dict] = []
+    chain = list(records)
+    for policy in gates:
+        cfg = policy.config or {}
+        gated = {str(m) for m in (cfg.get("models") or [])}
+        if not gated:
+            continue
+        require_eval = bool(cfg.get("require_eval", True))
+        min_rate = float(cfg.get("min_pass_rate") or 0.0)
+        kept: list[ModelRecord] = []
+        for record in chain:
+            if record.name not in gated:
+                kept.append(record)
+                continue
+            latest = db.scalars(
+                select(EvalRunRecord)
+                .where(EvalRunRecord.model == record.name)
+                .order_by(EvalRunRecord.created_at.desc())
+                .limit(1)
+            ).first()
+            if latest is None:
+                if require_eval:
+                    blocked.append({"model": record.name, "policy": policy.name,
+                                    "reason": "清单内模型无评测记录且 require_eval=true"})
+                else:
+                    kept.append(record)
+                continue
+            if latest.verdict != "PASS":
+                blocked.append({"model": record.name, "policy": policy.name,
+                                "reason": f"最新评测 verdict={latest.verdict}（非 PASS）"})
+                continue
+            if latest.pass_rate is not None and latest.pass_rate < min_rate:
+                blocked.append({"model": record.name, "policy": policy.name,
+                                "reason": f"评测通过率 {latest.pass_rate} 低于门禁 {min_rate}"})
+                continue
+            kept.append(record)
+        chain = kept
+    return chain, blocked

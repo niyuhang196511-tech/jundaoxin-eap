@@ -4,6 +4,8 @@
 - model-allowlist：{"models": [...]}
 - provider-allowlist：{"providers": [...]}（数据不出域）
 - max-prompt-tokens：{"limit": N}
+- eval-gate（M42-B，docs/10 评测门禁接入模型路由）：
+  {"models": [...], "require_eval": bool, "min_pass_rate": 0.8}
 """
 
 from __future__ import annotations
@@ -22,14 +24,16 @@ router = fastapi.APIRouter(prefix="/api/v1/policies",
                            dependencies=[fastapi.Depends(resolve_tenant), fastapi.Depends(require_api_key)])
 
 _KINDS = ("model-allowlist", "provider-allowlist", "max-prompt-tokens",
-          "tool-allowlist", "tool-risk-approval", "agent-allowlist", "tool-sandbox")
+          "tool-allowlist", "tool-risk-approval", "agent-allowlist", "tool-sandbox",
+          "eval-gate")
 
 
 class PolicyCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,40}$")
     tenant_id: int = Field(default=0, ge=0, description="0 = 平台默认策略")
     kind: str = Field(pattern=r"^(model-allowlist|provider-allowlist|max-prompt-tokens|"
-                              r"tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox)$")
+                              r"tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox|"
+                              r"eval-gate)$")
     config: dict = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
     notes: str = Field(default="", max_length=256)
@@ -72,6 +76,15 @@ def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fa
         raise fastapi.HTTPException(status_code=400, detail="EAP-7102 provider-allowlist 需要 config.providers 列表")
     if body.kind == "max-prompt-tokens" and not isinstance(cfg.get("limit"), int):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7102 max-prompt-tokens 需要 config.limit 整数")
+    if body.kind == "eval-gate":
+        # M42-B：{"models": [...], "require_eval": bool, "min_pass_rate": 0~1}
+        if not isinstance(cfg.get("models"), list):
+            raise fastapi.HTTPException(status_code=400, detail="EAP-7102 eval-gate 需要 config.models 列表")
+        if "require_eval" in cfg and not isinstance(cfg["require_eval"], bool):
+            raise fastapi.HTTPException(status_code=400, detail="EAP-7102 eval-gate 的 require_eval 须为布尔")
+        min_rate = cfg.get("min_pass_rate")
+        if min_rate is not None and (not isinstance(min_rate, (int, float)) or not 0 <= float(min_rate) <= 1):
+            raise fastapi.HTTPException(status_code=400, detail="EAP-7102 eval-gate 的 min_pass_rate 须为 0~1 数值")
     if body.kind not in _KINDS:
         raise fastapi.HTTPException(status_code=400, detail=f"EAP-7102 未知策略类型 {body.kind}")
     record = PolicyRecord(name=body.name, tenant_id=body.tenant_id, kind=body.kind,
