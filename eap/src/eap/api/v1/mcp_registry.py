@@ -15,6 +15,8 @@ from ...db import get_db
 from ...observability import audit
 from ...models import MCPServerRecord
 from ...runtime.mcp_client import load_mcp_tools, load_mcp_tools_stdio
+from ...runtime.mcp_auth import build_mcp_headers, get_mcp_token
+from ...security_crypto import encrypt_secret
 from ..deps import require_admin, require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/mcp/servers",
@@ -29,6 +31,11 @@ class ServerCreate(BaseModel):
     args: list[str] = Field(default_factory=list)
     header_name: str = "Authorization"
     api_key: str | None = None
+    # OAuth 客户端凭证（M34/L8）：oauth_token_url 非空即启用（api_key 回退保留）
+    oauth_token_url: str = ""
+    oauth_client_id: str = ""
+    oauth_client_secret: str | None = None
+    oauth_scopes: str = ""
     enabled: bool = True
 
 
@@ -54,6 +61,9 @@ def register_server(body: ServerCreate, request: fastapi.Request, db: Session = 
         name=body.name, url=body.url, transport=body.transport,
         command=body.command, args=body.args,
         header_name=body.header_name, api_key=body.api_key, enabled=body.enabled,
+        oauth_token_url=body.oauth_token_url, oauth_client_id=body.oauth_client_id,
+        oauth_client_secret_enc=encrypt_secret(body.oauth_client_secret) if body.oauth_client_secret else None,
+        oauth_scopes=body.oauth_scopes,
     )
     db.add(record)
     db.commit()
@@ -74,7 +84,10 @@ async def validate_server(name: str, db: Session = fastapi.Depends(get_db)):
             tools = await load_mcp_tools_stdio(record.command, record.args, prefix=name)
         else:
             url = record.url.rstrip("/") + "/mcp" if "/mcp" not in record.url else record.url
-            tools = await load_mcp_tools(url, prefix=name)
+            # 认证（M34/L8）：OAuth token（过期自动重取）优先，回退 api_key，再退无认证
+            token = await get_mcp_token(db, record)
+            headers = build_mcp_headers(record, token)
+            tools = await load_mcp_tools(url, prefix=name, headers=headers or None)
         tool_infos = [{"name": t.name, "description": t.description, "parameters": t.parameters}
                       for t in tools]
         record.status = "verified"
@@ -85,6 +98,23 @@ async def validate_server(name: str, db: Session = fastapi.Depends(get_db)):
         record.status = "unreachable"
         db.commit()
         return {"name": name, "status": "unreachable", "error": str(e)[:200]}
+
+
+@router.post("/{name}/oauth/token", dependencies=[fastapi.Depends(require_admin)])
+async def refresh_token(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """手动刷新 OAuth access token（admin + 审计；响应不回显明文 token）。"""
+    record = db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == name))
+    if record is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 MCP Server {name} 不存在")
+    if not record.oauth_token_url:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-7004 MCP Server {name} 未配置 OAuth token_url")
+    try:
+        await get_mcp_token(db, record, force=True)
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=502, detail=str(e))
+    audit.record("mcp.oauth.refresh", actor=audit.actor_of(request), target=name,
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": name, "status": "refreshed", "expires_at": str(record.oauth_expires_at)}
 
 
 @router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])

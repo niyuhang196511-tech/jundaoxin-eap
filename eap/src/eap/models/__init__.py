@@ -577,6 +577,13 @@ class MCPServerRecord(Base):
     args: Mapped[list] = mapped_column(JSON, default=list)  # stdio：启动参数
     header_name: Mapped[str] = mapped_column(String(64), default="Authorization")
     api_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # OAuth 客户端凭证（M34/L8，模式同 M31 连接器）：token_url 非空即启用 OAuth
+    oauth_token_url: Mapped[str] = mapped_column(String(256), default="")
+    oauth_client_id: Mapped[str] = mapped_column(String(128), default="")
+    oauth_client_secret_enc: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    oauth_scopes: Mapped[str] = mapped_column(String(256), default="")  # 空格分隔
+    oauth_access_token_enc: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    oauth_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tools: Mapped[list] = mapped_column(JSON, default=list)  # 上次验证时发现的工具名
     status: Mapped[str] = mapped_column(String(16), default="registered")  # registered|verified|unreachable
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
