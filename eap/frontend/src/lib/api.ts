@@ -220,3 +220,113 @@ export const workflowVersionsApi = {
     api<{ id: number; version: number; env: WfEnv; state: string }>(
       'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/rollback`, { env }),
 }
+
+/* ---------- 影子流量（M44-A 在线评测） + 人工抽检（M44-B） ---------- */
+
+export type ShadowConfig = {
+  name: string
+  source_agent: string
+  shadow_agent: string
+  sample_rate: number
+  enabled: boolean
+  note: string
+  judge: boolean
+  created_at: string
+}
+
+export type ShadowRun = {
+  id: number
+  config: string
+  trace_id: string
+  source_agent: string
+  shadow_agent: string
+  input: string
+  primary_latency_ms: number
+  shadow_latency_ms: number
+  shadow_ok: boolean
+  shadow_error: string
+  created_at: string
+}
+
+export type ShadowRunDetail = ShadowRun & {
+  primary_output: string
+  shadow_output: string
+}
+
+export type ShadowReport = {
+  config: string
+  source_agent: string
+  shadow_agent: string
+  sample_rate: number
+  report: {
+    total: number
+    shadow_ok?: number
+    shadow_fail?: number
+    shadow_fail_rate?: number
+    primary_latency_avg_ms?: number
+    shadow_latency_avg_ms?: number
+    primary_latency_p50_ms?: number
+    shadow_latency_p50_ms?: number
+    exact_match_rate?: number
+    exact_match_note?: string
+    note?: string
+    judge?: {
+      criteria: string
+      pairs: number
+      primary_pass_rate: number
+      shadow_pass_rate: number
+      details: { shadow_run_id: number; primary_judge: Record<string, unknown>; shadow_judge: Record<string, unknown> }[]
+    }
+  }
+}
+
+export const shadowApi = {
+  configs: () => api<ShadowConfig[]>('GET', '/api/v1/evals/shadow-configs'),
+  create: (body: { name: string; source_agent: string; shadow_agent: string; sample_rate: number; judge_criteria?: string; note?: string }) =>
+    api<ShadowConfig>('POST', '/api/v1/evals/shadow-configs', body),
+  patch: (name: string, body: Partial<{ shadow_agent: string; sample_rate: number; judge_criteria: string; enabled: boolean; note: string }>) =>
+    api<ShadowConfig>('PATCH', `/api/v1/evals/shadow-configs/${encodeURIComponent(name)}`, body),
+  remove: (name: string) => api<{ name: string; status: string }>('DELETE', `/api/v1/evals/shadow-configs/${encodeURIComponent(name)}`),
+  runs: (config: string) => api<ShadowRun[]>('GET', `/api/v1/evals/shadow-runs?config=${encodeURIComponent(config)}`),
+  run: (id: number) => api<ShadowRunDetail>('GET', `/api/v1/evals/shadow-runs/${id}`),
+  report: (name: string, judge: boolean, limit = 10) =>
+    api<ShadowReport>('GET', `/api/v1/evals/shadow-configs/${encodeURIComponent(name)}/report?judge=${judge}&limit=${limit}`),
+}
+
+export type ReviewSample = {
+  id: number
+  agent: string
+  status: string
+  source_id: string
+  input: string
+  output: string
+  scores: Record<string, number>
+  note: string
+  reviewed_by: string
+  created_at: string
+}
+
+export type ReviewReport = {
+  agent: string
+  total: number
+  reviewed: number
+  pending: number
+  avg_scores: Record<string, number | null>
+  positive_rate: number | null
+}
+
+export const reviewApi = {
+  sample: (taskId: string) => api<{ id: number; agent: string; status: string }>('POST', '/api/v1/evals/reviews/sample', { task_id: taskId }),
+  list: (params: { status?: string; agent?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params.status) q.set('status', params.status)
+    if (params.agent) q.set('agent', params.agent)
+    q.set('limit', String(params.limit ?? 50))
+    return api<ReviewSample[]>('GET', `/api/v1/evals/reviews?${q.toString()}`)
+  },
+  get: (id: number) => api<ReviewSample & { source: string; reviewed_at: string | null }>('GET', `/api/v1/evals/reviews/${id}`),
+  submit: (id: number, body: { scores: Record<string, number>; note?: string }) =>
+    api<{ id: number; status: string; scores: Record<string, number> }>('POST', `/api/v1/evals/reviews/${id}/review`, body),
+  report: (agent?: string) =>
+    api<ReviewReport>('GET', `/api/v1/evals/reviews/report${agent ? `?agent=${encodeURIComponent(agent)}` : ''}`),
+}
