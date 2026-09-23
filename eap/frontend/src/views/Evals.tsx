@@ -651,7 +651,8 @@ function ReviewTab() {
                 </div>
                 <div>
                   <Label>备注</Label>
-                  <Textarea rows={2} value={note} onChange={e => setNote(e.target.value)} />
+                  <Textarea rows={2} value={note} onChange={e => setNote(e.target.value)}
+                    placeholder="评审备注（可选）" />
                 </div>
                 <Button variant="primary" className="w-full" onClick={submit}>提交评审</Button>
               </>

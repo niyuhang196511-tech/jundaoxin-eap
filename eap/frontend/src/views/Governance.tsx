@@ -220,7 +220,10 @@ const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
 function PoliciesTab() {
   const [list, setList] = useState<Policy[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ name: '', tenantId: 1, kind: 'model-allowlist', config: '{}', priority: 10 })
+  const [form, setForm] = useState({
+    name: '', tenantId: 1, kind: 'model-allowlist',
+    config: JSON.stringify(POLICY_TEMPLATES['model-allowlist'] ?? {}, null, 2), priority: 10,
+  })
 
   const load = useCallback(async () => {
     try {
