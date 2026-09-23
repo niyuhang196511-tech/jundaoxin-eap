@@ -18,11 +18,11 @@
 | 项 | 值 |
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
-| 最新里程碑 | M44（evals-M44AB 在线影子流量+人工抽检 / observability-M44C 延迟 histogram+队列深度 gauge+告警）——L10 评测深化收官、P4 剩余工作收官 |
-| 代码 commit | 3b5ef36 |
+| 最新里程碑 | M45（a2a-M45A 异步任务推送挂钩 / evals-M45B 直评直连 provider）——任务组 E 收官、M42-B 已知局限清零 |
+| 代码 commit | 584f00e |
 | 快照日期 | 2026-09-23 |
-| 测试基线 | **404 passed, 8 skipped**（95s）——较 M43 基线 393 增 11（M44-A 影子 5 / M44-B 抽检 4 / M44-C 观测 2）；Harness 侧 cargo test 22 + tauri build NSIS 绿（M43） |
-| 下一主线 | L 组外部条件项按条件消化（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策）；剩余小项：A2A 异步任务推送挂钩、M42-B 直评直连 provider（小批次可随时插入） |
+| 测试基线 | **413 passed, 8 skipped**（108s）——较 M44 基线 404 增 9（M45-A A2A 推送 7 / M45-B 直评直连 2）；Harness 侧 cargo test 22 + tauri build NSIS 绿（M43） |
+| 下一主线 | L 组全部为外部条件项（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策）——工程侧无立即可开工的账本内任务，新需求照单追加 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -242,5 +242,8 @@
 | **M44-A ✅** | **在线影子流量**（L10 评测深化「在线影子流量」，6c82bd6） | `runtime/shadow.py` + shadow_configs/shadow_runs 两表（迁移 e5b7d9f1a3c7 接 d1b3f5a7c9e1，单头线性）；挂钩点=agent 调用完成点（API 同步 + SSE 两通道，交互挂起不触发）——查启用配置 → 抽样率门（random）→ asyncio 后台任务经 registry.invoke 全量执行影子 agent：独立 DB 会话（SessionLocal）+ 独立策略租户上下文，影子 trace = 主 trace + "-shadow"（usage_records 成本独立归属不与主调用混计），任何失败只落 shadow_runs.shadow_error 绝不影响主调用（任务本体永不抛错 + done_callback 兜底日志）；API（/api/v1/evals 域内）：配置 CRUD（admin+审计 shadow.*，source/shadow agent 须存在于 agents 表）、运行列表/详情、对比报表（总量/影子成功率/延迟均值与 p50/exact_match 朴素口径；judge=true 对最近 N 对成功运行做双侧 LLM 裁判评分对比，未配 judge_criteria → 400 不静默降级）。**诚实边界**：影子流量有真实 token 成本（配置人须知）、不经限流与预算熔断（内部调用）、任务通道（agent.invoke 任务）不挂钩仅 API 通道。测试 test_shadow_traffic 5 用例（CRUD+RBAC/rate=1.0 配对落库/rate=0 与停用不触发/失效配置失败落库主调用不受影响/judge 校验）离线绿 |
 | **M44-B ✅** | **人工抽检**（L10 评测深化「人工抽检」，6c82bd6 同笔） | review_samples 表（迁移 f7d9b1c3e5a2 接 e5b7d9f1a3c7）；抽样：POST /evals/reviews/sample 从 agent.invoke/agent.hitl 任务快照（input/output 冗余落库，任务清理不影响抽检记录；同源 (source,source_id) 防重复 409；其他任务类型 400）；评审：POST /evals/reviews/{id}/review（admin+审计 eval.review.*，维度限 correctness/relevance/format 各 1-5 可部分评分，越界/未知维度/空 scores 400，已评 409 不可重评，pending→reviewed + reviewed_by/at）；报表：GET /evals/reviews/report?agent=（总量/已评/待评/维度均值/好评率=全部已评维度 ≥4 占比——人工口径与 LLM 裁判分位不同如实标注）。**诚实边界**：评审人=管理员（细粒度审阅角色后置）。测试 test_eval_reviews 4 用例（抽样+防重+评分校验+已评不可重评/专属 agent 报表聚合精确断言/非 agent 任务 400/RBAC member 403）离线绿 |
 | **M44-C ✅** | **观测指标补全**（P4 剩余工作：p95 延迟告警与任务积压告警所需的 histogram/gauge，agent 并行线，3b5ef36） | ① `eap_request_latency_seconds` histogram（12 桶 0.01~60s；labels 仅 method+route 路由模板——原始路径高基数、网关拒绝与未命中落 unmatched）：新 observability/latency.py RequestLatencyMiddleware 最外层打点（finally 覆盖 4xx/5xx/异常），替代 TraceMiddleware 均值代理计数器（并入 histogram _sum 消除同名双 TYPE 冲突）；**顺带修复 Windows time.monotonic ~15ms 粒度致快速请求观测值恰为 0 的问题（改用高分辨率 perf_counter，全量回归下的确定性测试污染即此）**；② `eap_task_queue_depth{state}` gauge：/metrics 抓取时按 TaskRecord.state 惰性 GROUP BY 计数（共享 DB 真值；多副本各自刷新会互相覆盖同库视图故不做引擎周期刷新），已知 7 态显式补零；③ 告警 8→10 条：EapLatencyP95High（histogram_quantile>5s）+ EapTaskQueueBacklog（PENDING>100，**max 口径**——双副本各导出同值 sum 会翻倍），原均值规则保留（口径互补）改用 histogram _sum/_count。无新增依赖（metrics 为进程内手写实现非 prometheus_client）。test_metrics 2 新用例（exposition 形态/桶累计单调+Inf==_count；队列深度与 DB 计数一致含补零与清理） |
+| **批次 10 ✅（M45）** | **账本小项清零**：M45-A A2A 异步任务推送挂钩（任务组 E 收官，a2a/tasks 域 agent 并行线）＋ M45-B 模型直评直连（M42-B 已知局限修正，evals/modelhub 域） | 详见下方两行；验证基线：平台回归 413 passed |
+| **M45-A ✅** | **A2A 异步任务推送挂钩**（任务组 E「推送回执覆盖 RPC 内同步完成场景，异步任务引擎完成点未挂钩」的清账，c5e8a08） | message/send 新增 `params.metadata.async_task=true` 平台扩展分支：registry.get 预校验 → 任务引擎 submit（type=agent.invoke，payload 携带 _tenant_id 既有约定）→ 返回 A2A Task state=working（taskId=引擎 task_id），推送配置按引擎 task_id 预登记 `_A2A_PUSH`；任务引擎终态挂点（TaskEngine._run_one_inner 的 M40-A 回执同位）COMPLETED/FAILED 后 `_notify_a2a` 命中配置即构造 Task 快照经 deliver_push 签名投递（懒 import 防循环依赖、非阻断样式：miss 静默/异常仅告警）；tasks/get 内存 miss 回退引擎映射（8 态→A2A state 映射，payload._tenant_id 租户比对不匹配 -32001 不泄漏存在性，completed artifacts 取 result.output）。**诚实边界**：_A2A_PUSH/_A2A_TASKS 进程内内存态——多副本下执行副本查不到配置即不投递（与多副本 oauth state 同性质）；异步回执失败仅告警不重试（可后挂 IM 重试队列同款机制）。test_a2a_push 7 用例（提交/预拦截/完成回执/失败回执/状态映射/租户隔离/无配置不投递）+ 存量 a2a_v2/m40_receipt/worker 全绿 |
+| **M45-B ✅** | **模型直评直连**（M42-B 已知局限「直评经 hub prefer=model 沿链调用，首选失败会落到后续模型应答」的修正，584f00e） | hub.complete/_complete_chain 新增 `only_prefer` 参数：prefer 显式指定时把链钉死为该模型一个元素，供应商失败直抛 ProviderError 不降级——直评测到的必须是目标模型本身（否则门禁输入失真）；execute_model_evaluation 接线 only_prefer=True。直评语义变化（诚实）：目标模型供应商失败 → 逐用例落 error 判 FAIL（此前静默降级可能 PASS/FAIL 双向失真）；熔断/门禁过滤仍作用在钉死后单元素链上；普通调用链不受影响（默认 False）。test_eval_gate 2 新用例（dead-model 直评全用例 error/FAIL 且无降级应答，对照组普通调用同场景降级 mock-llm；直连不存在模型 FAIL 且 error 含模型名） |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
