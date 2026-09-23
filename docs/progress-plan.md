@@ -18,10 +18,10 @@
 | 项 | 值 |
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
-| 最新里程碑 | M45（a2a-M45A 异步任务推送挂钩 / evals-M45B 直评直连 provider）——任务组 E 收官、M42-B 已知局限清零 |
-| 代码 commit | 584f00e |
+| 最新里程碑 | M46（console-M46A 评测中心三页签/影子流量/人工抽检界面 / harness-M46B 更新下载进度条 / console-M46C 政策模板补齐九 kinds）——M44 两域从仅 API 补成可操作 |
+| 代码 commit | 171796a |
 | 快照日期 | 2026-09-23 |
-| 测试基线 | **413 passed, 8 skipped**（108s）——较 M44 基线 404 增 9（M45-A A2A 推送 7 / M45-B 直评直连 2）；Harness 侧 cargo test 22 + tauri build NSIS 绿（M43） |
+| 测试基线 | **414 passed, 8 skipped**（114s）——较 M45 基线 413 增 1（M46-C a2a-delegate kind 可创建回归）；Harness cargo test 23 + tauri build NSIS 绿；控制台 typecheck/build 绿 |
 | 下一主线 | L 组全部为外部条件项（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策）——工程侧无立即可开工的账本内任务，新需求照单追加 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
@@ -245,5 +245,9 @@
 | **批次 10 ✅（M45）** | **账本小项清零**：M45-A A2A 异步任务推送挂钩（任务组 E 收官，a2a/tasks 域 agent 并行线）＋ M45-B 模型直评直连（M42-B 已知局限修正，evals/modelhub 域） | 详见下方两行；验证基线：平台回归 413 passed |
 | **M45-A ✅** | **A2A 异步任务推送挂钩**（任务组 E「推送回执覆盖 RPC 内同步完成场景，异步任务引擎完成点未挂钩」的清账，c5e8a08） | message/send 新增 `params.metadata.async_task=true` 平台扩展分支：registry.get 预校验 → 任务引擎 submit（type=agent.invoke，payload 携带 _tenant_id 既有约定）→ 返回 A2A Task state=working（taskId=引擎 task_id），推送配置按引擎 task_id 预登记 `_A2A_PUSH`；任务引擎终态挂点（TaskEngine._run_one_inner 的 M40-A 回执同位）COMPLETED/FAILED 后 `_notify_a2a` 命中配置即构造 Task 快照经 deliver_push 签名投递（懒 import 防循环依赖、非阻断样式：miss 静默/异常仅告警）；tasks/get 内存 miss 回退引擎映射（8 态→A2A state 映射，payload._tenant_id 租户比对不匹配 -32001 不泄漏存在性，completed artifacts 取 result.output）。**诚实边界**：_A2A_PUSH/_A2A_TASKS 进程内内存态——多副本下执行副本查不到配置即不投递（与多副本 oauth state 同性质）；异步回执失败仅告警不重试（可后挂 IM 重试队列同款机制）。test_a2a_push 7 用例（提交/预拦截/完成回执/失败回执/状态映射/租户隔离/无配置不投递）+ 存量 a2a_v2/m40_receipt/worker 全绿 |
 | **M45-B ✅** | **模型直评直连**（M42-B 已知局限「直评经 hub prefer=model 沿链调用，首选失败会落到后续模型应答」的修正，584f00e） | hub.complete/_complete_chain 新增 `only_prefer` 参数：prefer 显式指定时把链钉死为该模型一个元素，供应商失败直抛 ProviderError 不降级——直评测到的必须是目标模型本身（否则门禁输入失真）；execute_model_evaluation 接线 only_prefer=True。直评语义变化（诚实）：目标模型供应商失败 → 逐用例落 error 判 FAIL（此前静默降级可能 PASS/FAIL 双向失真）；熔断/门禁过滤仍作用在钉死后单元素链上；普通调用链不受影响（默认 False）。test_eval_gate 2 新用例（dead-model 直评全用例 error/FAIL 且无降级应答，对照组普通调用同场景降级 mock-llm；直连不存在模型 FAIL 且 error 含模型名） |
+| **批次 11 ✅（M46）** | **可操作性补齐三线并行**：M46-A 评测中心三页签（影子流量/人工抽检控制台界面）＋ M46-B Harness 更新下载进度条 ＋ M46-C 政策模板补齐九 kinds（连带修复 a2a-delegate-allowlist 后端登记缺口） | 详见下方三行；验证基线：平台回归 414 + Harness cargo 23/tauri build NSIS + 控制台 typecheck/build |
+| **M46-A ✅** | **评测中心三页签**（M44-A 影子流量 / M44-B 人工抽检从仅 API 补成控制台可操作，821b6ae） | Evals 页改 TabBar（Integrations 同款模式）：运行评测（原有能力整体抽为页签）/影子流量/人工抽检。影子流量页签：配置表（生产→影子对/抽样率/裁判标记/启停/删除）+ 创建对话框（含选填评分标准）+ 配对运行表（点行详情：输入/主影输出与错误分栏）+ 对比报表（运行量/失败率/主影延迟均值与 p50/输出一致率；LLM 裁判对比按钮按配置 judge 标记禁用并带对数上限）。人工抽检页签：报表摘要条（总量/已评/待评/三维均值/好评率，agent 过滤联动）+ task_id 抽样入口 + 队列表 + 评审对话框（待评三维 1-5 可部分填写；已评只读回显）。顺带修复 run() 成功 toast 读旧 state 致通过率恒 0% 的存量小缺陷；lib/api.ts 增 shadowApi/reviewApi。零后端改动 |
+| **M46-B ✅** | **Harness 更新下载进度条**（M43-C 留待增强收官，171796a） | install_update 的 download_and_install 进度回调落地：on_chunk 累计 downloaded 后 emit `update://progress {downloaded, total|null}`（total=Content-Length，分块传输缺失为 null），下载完成发 `update://installing`；emit 失败静默不影响安装闭环。前端 installUpdateNow 先挂 listen 再 invoke（防小包漏事件）：total 已知渲染百分比进度条，未知诚实降级为已下载 MB 计数不假装百分比；unlisten 双保险。事件名/回调签名对照 tauri-plugin-updater 2.12.0 与 tauri 2.11.6 源码核实。**诚实边界**：进度只覆盖下载阶段，验签/NSIS 安装无回调仅显示文案直至进程重启。新增 payload 形状单测，cargo test 23 绿 |
+| **M46-C ✅** | **政策配置模板补齐九 kinds + 后端登记缺口修复**（4b67264） | Governance 政策表单 kind 模板/下拉从 v0.6 三种补齐到九种：+tool-sandbox（M33）/a2a-delegate-allowlist（M30，endpoints/agents 双键——按运行时 check_a2a_delegate 语义预填）/eval-gate（M42-B）；空态文案同步。**连带修复 agent 发现的后端缺口**：a2a-delegate-allowlist 运行时真实生效但 PolicyCreate.kind 正则与 _KINDS 漏登记——控制台创建被 422 拒绝（存量测试绕过 API 直插库未暴露）；补登记 + config 校验（endpoints/agents 至少一项列表）+ API 可创建回归用例（test_a2a_push 8 用例） |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
