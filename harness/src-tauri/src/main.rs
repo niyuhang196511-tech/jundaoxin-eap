@@ -3,11 +3,13 @@
 //! - 全局快捷键 Alt+Space：唤起快捷调用窗口
 //! - 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端（local_db.rs）
 //! - 本地技能运行时（M39-A）：签名技能包安装/四域授权/沙箱执行（skills.rs）
+//! - 自动更新（M43-C）：tauri-plugin-updater 接线，端内检查/下载安装/重启（updater.rs）
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod local_db;
 mod skills;
+mod updater;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -33,6 +35,8 @@ fn main() {
                 }
             })
             .build())
+        // M43-C 自动更新：updater 插件（endpoint/pubkey 运行时注入见 updater.rs）
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端
             local_db::init(app)?;
@@ -71,6 +75,8 @@ fn main() {
             skills::skill_list,
             skills::skill_remove,
             skills::skill_run,
+            updater::check_update,
+            updater::install_update,
         ])
         .on_window_event(|window, event| {
             // 关闭按钮 → 隐藏到托盘（常驻）

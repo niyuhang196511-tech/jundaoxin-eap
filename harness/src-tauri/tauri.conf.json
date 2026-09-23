@@ -28,5 +28,10 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.png"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "d95f4gvLbHQxVTrWvL9wxbGdREukFUlbBcXvo+olWd4"
+    }
   }
 }
