@@ -96,9 +96,13 @@ const CSS = `
 export default function MonitorView(props: {
   baseUrl: string;
   deviceKey: string;
+  /** M43-A：父级（App）持有的凭证失效状态——探针或本页 401 检测触发 */
+  revoked?: boolean;
+  /** M43-A：本页请求遇 401 时上抛（远程吊销传播检测点之一） */
+  onRevoked?: () => void;
   onNavigate: (view: NavView) => void;
 }) {
-  const { baseUrl, deviceKey, onNavigate } = props;
+  const { baseUrl, deviceKey, revoked = false, onRevoked, onNavigate } = props;
   const hasKey = deviceKey.trim().length > 0;
 
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
@@ -130,13 +134,24 @@ export default function MonitorView(props: {
       setPlatformOffline(false);
       setPlatformError("");
     } catch (e) {
+      const msg = (e as Error).name === "AbortError" ? "请求超时" : (e as Error).message;
+      if (msg === "HTTP 401") {
+        // M43-A 远程吊销传播：凭证失效 ≠ 平台不可达——平台在线但拒绝本设备，
+        // 上抛父级置全局状态（红色横幅），本页按「凭证失效」降级渲染。
+        onRevoked?.();
+        setTasks(null);
+        setPlatformConvos(null);
+        setPlatformOffline(false);
+        setPlatformError("设备凭证已失效（可能被远程吊销）");
+        return;
+      }
       // 离线降级：清空平台数据，仅渲染本地（保留错误细节供提示）
       setTasks(null);
       setPlatformConvos(null);
       setPlatformOffline(true);
-      setPlatformError((e as Error).name === "AbortError" ? "请求超时" : (e as Error).message);
+      setPlatformError(msg);
     }
-  }, [baseUrl, deviceKey]);
+  }, [baseUrl, deviceKey, onRevoked]);
 
   const loadLocal = useCallback(async () => {
     try {
@@ -169,13 +184,17 @@ export default function MonitorView(props: {
         `${baseUrl}/api/v1/conversations/${encodeURIComponent(c.session_id)}/messages`, deviceKey);
       setPlatformMsgs(m => ({ ...m, [c.session_id]: msgs }));
     } catch (e) {
-      setMsgError((e as Error).message);
+      const msg = (e as Error).message;
+      if (msg === "HTTP 401") onRevoked?.(); // M43-A：吊销传播（父级置全局状态，30s 轮询会收敛渲染）
+      setMsgError(msg);
     } finally {
       setMsgLoading(false);
     }
   }
 
   // ---- 派生数据：审批待办（WAITING_HUMAN 置顶）+ 过滤后任务列表 ----
+  // M43-A：凭证失效与平台离线同样「平台侧不可用」，但横幅语义不同（红/黄分开）
+  const platformDown = platformOffline || revoked;
   const all = tasks ?? [];
   const waiting = all.filter(t => t.state === "WAITING_HUMAN");
   const listRows = filter === "ALL"
@@ -270,23 +289,30 @@ export default function MonitorView(props: {
       {!hasKey && (
         <p className="m40-hint">未配置设备 Key（快捷调用页「连接设置」注册后可拉取平台数据；本机会话不受影响）</p>
       )}
+      {revoked && (
+        <p style={{ color: "#fff", background: "#c0392b", padding: "8px 12px", borderRadius: 8, margin: 0 }}>
+          设备凭证已失效（可能被<strong>远程吊销</strong>）——本机会话不受影响，请到快捷调用页「连接设置」重新注册。
+        </p>
+      )}
       {hasKey && platformOffline && (
         <p className="m40-banner">平台不可达，显示本地缓存{platformError ? `（${platformError}）` : ""}</p>
       )}
 
       <fieldset>
-        <legend>审批待办（WAITING_HUMAN 置顶）{hasKey && !platformOffline && waiting.length > 0 ? ` · ${waiting.length} 项` : ""}</legend>
+        <legend>审批待办（WAITING_HUMAN 置顶）{hasKey && !platformDown && waiting.length > 0 ? ` · ${waiting.length} 项` : ""}</legend>
         {!hasKey && <p className="m40-hint">（未配置设备 Key）</p>}
         {hasKey && platformOffline && <p className="m40-banner">平台离线——审批待办不可用</p>}
-        {hasKey && !platformOffline && waiting.length === 0 && <p className="m40-hint">（无待审批任务）</p>}
-        {hasKey && !platformOffline && waiting.map(t => taskRow(t, true))}
+        {hasKey && revoked && <p className="m40-banner">凭证失效——审批待办不可用（重新注册后恢复）</p>}
+        {hasKey && !platformDown && waiting.length === 0 && <p className="m40-hint">（无待审批任务）</p>}
+        {hasKey && !platformDown && waiting.map(t => taskRow(t, true))}
       </fieldset>
 
       <fieldset>
         <legend>任务列表（平台 · 最近 50 条）</legend>
         {!hasKey && <p className="m40-hint">（未配置设备 Key——「连接设置」注册后可拉取）</p>}
         {hasKey && platformOffline && <p className="m40-banner">平台离线——任务数据仅存平台，恢复连接后自动刷新</p>}
-        {hasKey && !platformOffline && (
+        {hasKey && revoked && <p className="m40-banner">凭证失效——任务数据不可用（重新注册后恢复）</p>}
+        {hasKey && !platformDown && (
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
               <label>状态过滤</label>
@@ -311,12 +337,13 @@ export default function MonitorView(props: {
             {localSessions.map(localRow)}
           </div>
           <div>
-            <p className="m40-hint" style={{ margin: "0 0 4px" }}>平台会话（{hasKey && !platformOffline && platformConvos ? platformConvos.length : "—"}）——平台 Memory 库</p>
+            <p className="m40-hint" style={{ margin: "0 0 4px" }}>平台会话（{hasKey && !platformDown && platformConvos ? platformConvos.length : "—"}）——平台 Memory 库</p>
             {!hasKey && <p className="m40-hint">（未配置设备 Key）</p>}
             {hasKey && platformOffline && <p className="m40-banner">平台离线——仅本机会话可用</p>}
-            {hasKey && !platformOffline && platformConvos === null && <p className="m40-hint">加载中…</p>}
-            {hasKey && !platformOffline && platformConvos !== null && platformConvos.length === 0 && <p className="m40-hint">（平台暂无会话）</p>}
-            {hasKey && !platformOffline && platformConvos !== null && platformConvos.map(platformRow)}
+            {hasKey && revoked && <p className="m40-banner">凭证失效——仅本机会话可用</p>}
+            {hasKey && !platformDown && platformConvos === null && <p className="m40-hint">加载中…</p>}
+            {hasKey && !platformDown && platformConvos !== null && platformConvos.length === 0 && <p className="m40-hint">（平台暂无会话）</p>}
+            {hasKey && !platformDown && platformConvos !== null && platformConvos.map(platformRow)}
           </div>
         </div>
       </fieldset>

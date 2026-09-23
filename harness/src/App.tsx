@@ -12,6 +12,10 @@ type Settings = {
   skillPubKey: string; // 平台技能签名公钥（hex，GET /api/v1/skills/public-key）
   pythonPath: string;  // 沙箱执行用 Python 解释器（默认 "python" 走 PATH）
   reportAudit: boolean; // M41-B 审计上报（企业可选，默认关闭；仅技能执行类）
+  localModelUrl: string;  // M43-B 离线降级：本地 OpenAI 兼容端点（Ollama 默认 http://localhost:11434/v1）
+  localModelName: string; // M43-B 离线降级：本地模型名（留空 = 不启用降级）
+  updateEndpoint: string; // M43-C 自动更新：更新源（目录 URL / 清单 URL / 模板，三态见 updater.rs 与 docs/21）
+  updatePubkey: string;   // M43-C 自动更新：minisign Ed25519 公钥（运行时注入覆盖 conf 占位）
 };
 type Domain = "filesystem" | "network" | "process" | "browser";
 type Grants = Record<Domain, boolean>;
@@ -72,6 +76,10 @@ function defaults(): Settings {
     skillPubKey: "",
     pythonPath: "",
     reportAudit: false,
+    localModelUrl: "http://localhost:11434/v1",
+    localModelName: "",
+    updateEndpoint: "",
+    updatePubkey: "",
   };
 }
 
@@ -85,6 +93,15 @@ export default function App() {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // M43-A 远程吊销生效传播："" 未探测 / ok 在线 / invalid 凭证失效（可能被远程吊销）
+  const [deviceStatus, setDeviceStatus] = useState<"" | "ok" | "invalid">("");
+  // M43-B 离线降级提示（非空 = 本次回答来自本地模型）
+  const [degraded, setDegraded] = useState("");
+  const [localModelProbe, setLocalModelProbe] = useState("");
+  // M43-C 自动更新：检查/安装状态（契约见 updater.rs check_update/install_update）
+  const [updateMsg, setUpdateMsg] = useState("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ currentVersion: string; available: boolean; version: string; notes: string; error: string } | null>(null);
   const [view, setView] = useState<"quick" | "skills" | "privacy" | "monitor">("quick");
   const [privacy, setPrivacy] = useState<{ sessions: number; memories: number } | null>(null);
 
@@ -109,6 +126,17 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }, [settings]);
 
+  // ---- M43-A 远程吊销生效传播 ----
+  // 平台侧吊销（DELETE /auth/devices/{name}）即刻生效——每次 401 都是吊销信号；
+  // 端内统一检测并置 invalid，本地数据不受影响，重新注册（同名可复用）后恢复。
+  function markRevoked() { setDeviceStatus("invalid"); }
+  function checkAuthStatus(r: Response) {
+    if (r.status === 401) markRevoked();
+  }
+  function httpError(r: Response): string {
+    return r.status === 401 ? "设备凭证已失效（可能被远程吊销）" : `HTTP ${r.status}`;
+  }
+
   // Agent 目录订阅（M37-3）：设备 Key → 目录 → 本地状态
   async function loadAgents() {
     setError("");
@@ -116,9 +144,11 @@ export default function App() {
       const r = await fetch(`${settings.baseUrl}/api/v1/agents`, {
         headers: { Authorization: `Bearer ${settings.deviceKey}` },
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      checkAuthStatus(r);
+      if (!r.ok) throw new Error(httpError(r));
       const list = (await r.json()) as Agent[];
       setAgents(list);
+      setDeviceStatus("ok");
       if (list.length && !active) setActive(list[0].name);
     } catch (e) {
       setError(`目录订阅失败：${(e as Error).message}`);
@@ -126,53 +156,121 @@ export default function App() {
   }
   useEffect(() => { if (settings.deviceKey) void loadAgents(); /* eslint-disable-line */ }, []);
 
-  // 快捷调用：agents invocations 流式（SSE）
+  // 吊销传播探针（M43-A）：有 Key 期间 60s 周期轻探测——管理员吊销后端内
+  // 无需用户操作即感知并提示；网络不可达不改状态（离线由 M43-B 降级逻辑承担）。
+  useEffect(() => {
+    if (!settings.deviceKey) return;
+    const probe = async () => {
+      try {
+        const r = await fetch(`${settings.baseUrl}/api/v1/agents`, {
+          headers: { Authorization: `Bearer ${settings.deviceKey}` },
+        });
+        if (r.status === 401) setDeviceStatus("invalid");
+        else if (r.ok) setDeviceStatus("ok"); // 其余状态码不改判定（避免 5xx 误判在线/离线语义）
+      } catch { /* 网络不可达：保持现状 */ }
+    };
+    const t = setInterval(() => void probe(), 60_000);
+    return () => clearInterval(t);
+  }, [settings.deviceKey, settings.baseUrl]);
+
+  // SSE 响应体统一消费：逐行提取 data: 载荷（M43-B 从快捷调用中拆出，平台与本地模型共用）
+  async function consumeSSE(r: Response, onData: (payload: string) => void) {
+    const reader = r.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      for (const line of buf.split("\n")) {
+        if (line.startsWith("data:")) onData(line.slice(5).trim());
+      }
+      buf = buf.slice(buf.lastIndexOf("\n") + 1);
+    }
+  }
+
+  // 平台流式调用（agents invocations，M37 协议不变）
+  async function streamPlatformCall(agentName: string, text: string, acc: { v: string }) {
+    const r = await fetch(`${settings.baseUrl}/api/v1/agents/${encodeURIComponent(agentName)}/invocations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
+      body: JSON.stringify({ input: text, stream: true }),
+    });
+    checkAuthStatus(r);
+    if (!r.ok || !r.body) throw new Error(httpError(r));
+    await consumeSSE(r, payload => {
+      try {
+        const ev = JSON.parse(payload);
+        if (ev.event === "token" && ev.data?.content) { acc.v += ev.data.content; setAnswer(a => a + ev.data.content); }
+        if (ev.event === "result" && ev.data?.content) { acc.v = ev.data.content; setAnswer(ev.data.content); }
+      } catch { /* 非 JSON 行跳过 */ }
+    });
+  }
+
+  // 本地小模型流式调用（M43-B 离线降级）：OpenAI 兼容 chat/completions（Ollama 等本地推理服务）
+  async function streamLocalCall(text: string, acc: { v: string }) {
+    const url = settings.localModelUrl.replace(/\/+$/, "");
+    const r = await fetch(`${url}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: settings.localModelName, messages: [{ role: "user", content: text }], stream: true }),
+    });
+    if (!r.ok || !r.body) throw new Error(`本地模型 HTTP ${r.status}`);
+    await consumeSSE(r, payload => {
+      if (!payload || payload === "[DONE]") return;
+      try {
+        const j = JSON.parse(payload);
+        const piece = j.choices?.[0]?.delta?.content;
+        if (piece) { acc.v += piece; setAnswer(a => a + piece); }
+      } catch { /* 非 JSON 行跳过 */ }
+    });
+  }
+
+  // 快捷调用：优先平台（云端 Agent 全量能力）；平台不可达且配置了本地模型时
+  // 降级到本地小模型（M43-B，能力受限如实提示）。401 = 凭证被吊销（治理动作），
+  // 明确失败不降级。本地留存（M38）两种通道都生效。
   async function quickCall() {
     if (!active || !input.trim()) return;
-    setBusy(true); setAnswer(""); setError("");
+    setBusy(true); setAnswer(""); setError(""); setDegraded("");
+    const acc = { v: "" }; // 流式答案累加器（闭包内 state 读旧值，存量写法记忆上行拿到空答案——此处一并修正）
+    let viaLocal = false;
     try {
-      const r = await fetch(`${settings.baseUrl}/api/v1/agents/${encodeURIComponent(active)}/invocations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
-        body: JSON.stringify({ input: input, stream: true }),
-      });
-      if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        for (const line of buf.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          try {
-            const ev = JSON.parse(line.slice(5).trim());
-            if (ev.event === "token" && ev.data?.content) setAnswer(a => a + ev.data.content);
-            if (ev.event === "result" && ev.data?.content && !answer) setAnswer(ev.data.content);
-          } catch { /* 非 JSON 行跳过 */ }
-        }
-        buf = buf.slice(buf.lastIndexOf("\n") + 1);
-      }
-      // 本地留存（M38）：会话写本地仓（不出端）
-      try {
-        await invoke("save_session", { id: `s-${Date.now()}`, agent: active, input, answer });
-      } catch { /* 本地留存失败不阻断 */ }
-      if (settings.dataMode !== "local" && input.trim()) {
-        try {  // 云端档：经验上行（cloud-personal=user / cloud-org=org 共享）
-          const scope = settings.dataMode === "cloud-org" ? "org" : "user";
-          await fetch(`${settings.baseUrl}/api/v1/memory`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
-            body: JSON.stringify({ scope, user_id: "harness", content: `Q: ${input}
-A: ${answer.slice(0, 500)}`, importance: 0.5 }),
-          });
-        } catch { /* 云端同步失败静默（本地已有副本） */ }
-      }
+      await streamPlatformCall(active, input, acc);
     } catch (e) {
-      setError(`调用失败：${(e as Error).message}`);
+      const msg = (e as Error).message;
+      // 401 判定：state（探针/前次检测）+ 本次错误文案（checkAuthStatus 异步置位，闭包内读不到）
+      if (deviceStatus === "invalid" || msg.includes("凭证已失效")) { setError(`调用失败：${msg}`); return; }
+      if (!settings.localModelUrl.trim() || !settings.localModelName.trim()) {
+        setError(`调用失败：${msg}（未配置本地模型，无法离线降级——见「连接设置」）`);
+        return;
+      }
+      try {
+        await streamLocalCall(input, acc);
+        viaLocal = true;
+        setDegraded(`平台不可达（${msg}），已由本地模型 ${settings.localModelName} 降级应答——能力受限，对话仅留存本机`);
+      } catch (e2) {
+        setError(`平台不可达（${msg}）；本地降级也失败：${(e2 as Error).message}`);
+        return;
+      }
     } finally {
       setBusy(false);
+    }
+    // 本地留存（M38）：会话写本地仓（不出端）——平台/降级通道一致
+    try {
+      await invoke("save_session", { id: `s-${Date.now()}`, agent: active, input, answer: acc.v });
+    } catch { /* 本地留存失败不阻断 */ }
+    // 云端档记忆上行：仅在平台成功应答时（降级时平台不可达，上行必然失败且不该发生）
+    if (!viaLocal && settings.dataMode !== "local" && acc.v.trim()) {
+      try {
+        const scope = settings.dataMode === "cloud-org" ? "org" : "user";
+        const r = await fetch(`${settings.baseUrl}/api/v1/memory`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
+          body: JSON.stringify({ scope, user_id: "harness", content: `Q: ${input}
+A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
+        });
+        checkAuthStatus(r);
+      } catch { /* 云端同步失败静默（本地已有副本） */ }
     }
   }
 
@@ -185,9 +283,11 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
         body: JSON.stringify({ name }),
       });
+      checkAuthStatus(r);
       const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      if (!r.ok) throw new Error(j.detail || httpError(r));
       setSettings(s => ({ ...s, deviceKey: j.api_key, deviceName: name }));
+      setDeviceStatus("ok");
       await loadAgents();
     } catch (e) {
       setError(`设备注册失败：${(e as Error).message}`);
@@ -210,6 +310,50 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
     await loadPrivacy();
   }
 
+  // 本地模型连通性探测（M43-B）：GET {localModelUrl}/models 列出可服务模型，配置参考
+  async function probeLocalModel() {
+    setLocalModelProbe("检测中…");
+    try {
+      const url = settings.localModelUrl.replace(/\/+$/, "");
+      const r = await fetch(`${url}/models`);
+      if (!r.ok) { setLocalModelProbe(`服务可达但 HTTP ${r.status}`); return; }
+      const j = await r.json();
+      const ids = ((j.data ?? []) as { id?: string }[]).map(m => m.id).filter(Boolean) as string[];
+      setLocalModelProbe(ids.length ? `可用模型：${ids.join("、")}` : "服务可达但未列出模型");
+    } catch (e) {
+      setLocalModelProbe(`不可达：${(e as Error).message}`);
+    }
+  }
+
+  // 检查更新（M43-C）：endpoint 三态识别/占位公钥覆盖/错误语义见 updater.rs 与 docs/21
+  async function checkUpdateNow() {
+    setUpdateBusy(true); setUpdateMsg(""); setUpdateInfo(null);
+    try {
+      const info = await invoke<{ currentVersion: string; available: boolean; version: string; notes: string; error: string }>(
+        "check_update", { endpoint: settings.updateEndpoint, pubkey: settings.updatePubkey });
+      setUpdateInfo(info);
+      if (info.error) setUpdateMsg(`检查失败：${info.error}`);
+      else if (info.available) setUpdateMsg(`发现新版本 v${info.version}（当前 v${info.currentVersion}）${info.notes ? ` · ${info.notes}` : ""}`);
+      else setUpdateMsg(`已是最新版本（v${info.currentVersion}）`);
+    } catch (e) {
+      setUpdateMsg((e as Error).message);
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  // 下载并安装（M43-C）：Windows 上 NSIS 静默安装后进程即退出重启，后续代码通常不执行
+  async function installUpdateNow() {
+    setUpdateBusy(true); setUpdateMsg("正在下载安装，完成后应用将自动重启…");
+    try {
+      await invoke("install_update", { endpoint: settings.updateEndpoint, pubkey: settings.updatePubkey });
+      setUpdateMsg("安装完成，应用即将重启…");
+    } catch (e) {
+      setUpdateMsg(`安装失败：${(e as Error).message}`);
+      setUpdateBusy(false);
+    }
+  }
+
   // 审计上报（M41-B，企业可选·显式开启）：本地读取未上报 → 前端 fetch 上报平台 → 标记已上报。
   // 仅上报技能执行类（action 以 skill 开头），不含会话/记忆/清除动作（更不含对话内容）。
   function reportableSkillEntries(entries: AuditEntry[]): AuditEntry[] {
@@ -228,8 +372,9 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
           entries: candidates.map(e => ({ action: e.action, detail: e.detail, created_at: e.created_at })),
         }),
       });
+      checkAuthStatus(r);
       const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      if (!r.ok) throw new Error(j.detail || httpError(r));
       const ids = candidates.map(e => e.id);
       const marked = await invoke<number>("harness_audit_mark_reported", { ids });
       setReportMsg(`已上报 ${j.accepted ?? ids.length} 条（本地标记 ${marked} 条）`);
@@ -261,8 +406,9 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
       const r = await fetch(`${settings.baseUrl}/api/v1/skills/${encodeURIComponent(pullName.trim())}/package`, {
         headers: { Authorization: `Bearer ${settings.deviceKey}` },
       });
+      checkAuthStatus(r);
       const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      if (!r.ok) throw new Error(j.detail || httpError(r));
       setBundleText(JSON.stringify(j, null, 2));
     } catch (e) {
       setError(`拉取技能包失败：${(e as Error).message}`);
@@ -276,8 +422,9 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
       const r = await fetch(`${settings.baseUrl}/api/v1/skills/public-key`, {
         headers: { Authorization: `Bearer ${settings.deviceKey}` },
       });
+      checkAuthStatus(r);
       const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      if (!r.ok) throw new Error(j.detail || httpError(r));
       setSettings(s => ({ ...s, skillPubKey: j.public_key }));
     } catch (e) {
       setError(`获取平台公钥失败：${(e as Error).message}`);
@@ -350,6 +497,19 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
     return <span key={d} style={{ color, marginRight: 8 }}>{DOMAIN_LABEL[d]}·{mark}</span>;
   }
 
+  // 全局状态横幅：吊销（M43-A，红色，四视图统一可见）与降级（M43-B，黄色，快捷调用）
+  const revokedBanner = deviceStatus === "invalid" ? (
+    <p style={{ color: "#fff", background: "#c0392b", padding: "8px 12px", borderRadius: 8, margin: 0 }}>
+      设备凭证已失效（可能被<strong>远程吊销</strong>）——本地数据不受影响。
+      请管理员确认后在「连接设置」重新注册设备凭证恢复平台功能。
+    </p>
+  ) : null;
+  const degradedBanner = degraded ? (
+    <p style={{ background: "#fff7e6", border: "1px solid #ffd666", color: "#ad6800", padding: "8px 12px", borderRadius: 8, margin: 0 }}>
+      ⚠ {degraded}
+    </p>
+  ) : null;
+
   const runEntry = skills.find(s => s.name === runName);
   const runScripts = runEntry ? runEntry.files.filter(f => f.path.startsWith("scripts/")).map(f => f.path) : [];
 
@@ -358,6 +518,8 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
       <MonitorView
         baseUrl={settings.baseUrl}
         deviceKey={settings.deviceKey}
+        revoked={deviceStatus === "invalid"}
+        onRevoked={markRevoked}
         onNavigate={v => setView(v)}
       />
     );
@@ -371,6 +533,7 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
           <button onClick={() => setView("privacy")}>隐私清单 →</button>
         </h2>
 
+        {revokedBanner}
         {error && <p style={{ color: "#c0392b", margin: 0 }}>{error}</p>}
 
         <fieldset>
@@ -499,6 +662,7 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
     return (
       <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         <h2 style={{ margin: 0 }}>隐私清单 <small style={{ color: "#888" }}>数据存哪、一键清除</small></h2>
+        {revokedBanner}
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead><tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
             <th style={{ padding: 6 }}>数据类别</th><th>存哪</th><th>谁能看</th><th>条数</th><th>操作</th>
@@ -557,6 +721,9 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
         <button onClick={() => setView("monitor")}>监控 →</button>
       </h2>
 
+      {revokedBanner}
+      {degradedBanner}
+
       <details>
         <summary>连接设置</summary>
         <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginTop: 8 }}>
@@ -572,9 +739,40 @@ A: ${answer.slice(0, 500)}`, importance: 0.5 }),
             <option value="cloud-personal">云端·个人（记忆上行 scope=user）</option>
             <option value="cloud-org">云端·共享（记忆上行 scope=org，团队可见）</option>
           </select>
+          {/* M43-B 离线降级：本地小模型（OpenAI 兼容，如 Ollama）——平台不可达时快捷调用降级应答 */}
+          <label>本地模型地址</label>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input style={{ flex: 1 }} value={settings.localModelUrl}
+              onChange={e => setSettings(s => ({ ...s, localModelUrl: e.target.value }))}
+              placeholder="http://localhost:11434/v1（Ollama 默认）" />
+            <button onClick={probeLocalModel}>检测</button>
+          </div>
+          <label>本地模型名</label>
+          <input value={settings.localModelName}
+            onChange={e => setSettings(s => ({ ...s, localModelName: e.target.value }))}
+            placeholder="留空 = 不启用离线降级；如 qwen3:4b" />
+          {/* M43-C 自动更新（工程接入）：更新源与公钥由部署侧提供（docs/21） */}
+          <label>更新源地址</label>
+          <input value={settings.updateEndpoint}
+            onChange={e => setSettings(s => ({ ...s, updateEndpoint: e.target.value }))}
+            placeholder="目录 URL / 清单 URL / 模板（三态，见 docs/21）；留空 = 不检查更新" />
+          <label>更新签名公钥</label>
+          <input value={settings.updatePubkey}
+            onChange={e => setSettings(s => ({ ...s, updatePubkey: e.target.value }))}
+            placeholder="minisign Ed25519 公钥（部署侧 pnpm tauri signer generate 生成，docs/21）" />
         </div>
+        {localModelProbe && <p style={{ margin: "6px 0 0", color: localModelProbe.startsWith("可用") ? "#1e7e34" : "#888" }}>{localModelProbe}</p>}
         <button onClick={registerDevice}>注册/重置设备凭证</button>{" "}
-        <button onClick={loadAgents}>刷新 Agent 目录</button>
+        <button onClick={loadAgents}>刷新 Agent 目录</button>{" "}
+        <button onClick={checkUpdateNow} disabled={updateBusy || !settings.updateEndpoint.trim() || !settings.updatePubkey.trim()}>
+          {updateBusy ? "处理中…" : "检查更新"}
+        </button>
+        {updateInfo?.available && (
+          <button onClick={installUpdateNow} disabled={updateBusy} style={{ color: "#1e7e34" }}>
+            下载并安装 v{updateInfo.version}
+          </button>
+        )}
+        {updateMsg && <p style={{ margin: "6px 0 0", color: updateMsg.startsWith("检查失败") || updateMsg.startsWith("安装失败") ? "#c0392b" : "#555" }}>{updateMsg}</p>}
       </details>
 
       <label>Agent</label>
