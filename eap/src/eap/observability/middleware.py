@@ -60,8 +60,8 @@ class TraceMiddleware(BaseHTTPMiddleware):
             path_tpl = getattr(route, "path", request.url.path)
             incr("eap_requests_total", {"method": request.method, "path": path_tpl,
                                         "status": str(response.status_code)})
-            incr("eap_request_latency_seconds_sum",
-                 {"path": path_tpl}, time.monotonic() - request.state.t0)
+            # 延迟打点已迁至 RequestLatencyMiddleware（M44-C histogram，observability/latency.py）：
+            # legacy eap_request_latency_seconds_sum 计数器并入 histogram 的 _sum，不再在此累计
             logger.info("%s %s -> %s [%s]", request.method, path_tpl,
                         response.status_code, trace_id[:8])
         except Exception:

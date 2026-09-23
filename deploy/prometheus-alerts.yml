@@ -1,21 +1,25 @@
-# EAP HA 告警规则样例（M33 · 任务组 P4 `prod-ha-`，v0.9 生产化）
+# EAP HA 告警规则样例（M33 · 任务组 P4 `prod-ha-`，v0.9 生产化；M44-C 补全 p95/积压两条）
 #
 # 指标名均来自 eap/src/eap/observability/metrics.py 实际导出（GET /metrics，Prometheus 文本格式）：
-#   eap_requests_total{method,path,status}     请求计数（status 为字符串状态码）
-#   eap_request_latency_seconds_sum{path}      请求延迟累计（仅 _sum，无 histogram 桶）
+#   eap_requests_total{method,path,status}            请求计数（status 为字符串状态码）
+#   eap_request_latency_seconds_{bucket,sum,count}{method,route}  请求延迟 histogram
+#                                                     （M44-C：route 为路由模板，unmatched=网关拒绝/未命中路由）
 #   eap_agent_invocations_total{agent,status}  Agent 调用计数（status=ok|error）
 #   eap_tasks_total{type,state}                任务状态迁移计数（RUNNING/COMPLETED/FAILED/WAITING_*）
+#   eap_task_queue_depth{state}                任务队列深度 gauge（M44-C：/metrics 抓取时按 TaskRecord.state 计数，
+#                                              已知 state 显式补零；多实例共享同一 DB，勿 sum——见积压规则）
 #   eap_circuit_state{model}                   熔断器状态 gauge（0 closed / 1 open / 2 half-open）
 #   eap_gateway_inflight                       网关在途请求 gauge（网关中间件启用时有意义）
 # 接入：Prometheus scrape 两个 API 实例（job 名下例用 eap，k8s 用 ServiceMonitor 对齐即可），
 #       将本文件放入 rule_files 目录（或 ConfigMap 挂载 prometheus）：
 #       rule_files: ["/etc/prometheus/rules/*.yml"]
 #
-# 诚实说明（样例限制）：
-#   - p95 延迟不可直接计算 —— 当前仅导出延迟 _sum 计数器、无 histogram 桶，下面用均值作代理，
-#     真分位数需 eap/observability/metrics.py 增加 bucket 导出（记入剩余工作）；
-#   - 任务队列积压（PENDING 深度）无对应 gauge 导出 —— eap_tasks_total 是状态迁移计数，
-#     无法表达「当前堆积多少」，暂以失败增速 + worker 存活规则兜底（记入剩余工作）。
+# 诚实说明（M44-C 更新）：
+#   - p95 延迟已可计算——M44-C 后 eap_request_latency_seconds 以 histogram 分桶导出
+#     （histogram_quantile 内插精度受桶边界限制，边界见 metrics.py HISTOGRAMS）；
+#   - 原「均值代理」规则保留（口径不同：均值漂移 vs 尾部恶化，互补；_sum/_count
+#     均改自 histogram 自带序列，与旧 {path} 计数器口径一致但 labels 变化）；
+#   - 队列深度为共享 DB 真值，多副本各实例导出同一数值，聚合必须用 max（sum 会按副本数翻倍）。
 
 groups:
   - name: eap-availability
@@ -53,17 +57,30 @@ groups:
           summary: "EAP 5xx 占比超过 5%（5 分钟窗口）"
           description: "按 path/status 维度下钻 eap_requests_total 定位故障端点。"
 
-      # 延迟代理：无 histogram 桶，用 累计延迟增速/请求增速 = 平均延迟（秒）
+      # 均值口径（保留，M44-C 改 histogram 自带 _sum/_count 序列）：均值漂移感知，
+      # 与下方 p95 尾部口径互补（均值劣化可见慢请求占比，p95 见尾部恶化）
       - alert: EapLatencyHigh
         expr: |
           sum(rate(eap_request_latency_seconds_sum[5m]))
-            / clamp_min(sum(rate(eap_requests_total[5m])), 0.001) > 2
+            / clamp_min(sum(rate(eap_request_latency_seconds_count[5m])), 0.001) > 2
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "EAP 平均请求延迟超过 2s（p95 需 histogram 桶后补充）"
+          summary: "EAP 平均请求延迟超过 2s（均值口径，p95 见 EapLatencyP95High）"
           description: "排查模型供应商延迟与熔断状态；持续偏高考虑扩 worker/API 副本。"
+
+      # p95 尾部延迟（M44-C 新增，P4 剩余工作）：histogram_quantile 对 5m 窗口速率做分位数内插；
+      # 桶边界 0.01~60s（metrics.py HISTOGRAMS），2~5s 区间插值精度 ±1.25s
+      - alert: EapLatencyP95High
+        expr: |
+          histogram_quantile(0.95, sum(rate(eap_request_latency_seconds_bucket[5m])) by (le)) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EAP p95 请求延迟超过 5s（10 分钟持续）"
+          description: "尾部恶化：按 route 维度下钻 eap_request_latency_seconds_bucket 定位慢端点；均值同时偏高说明普遍变慢，仅 p95 偏高多为长尾端点/供应商抖动。"
 
   - name: eap-tasks
     rules:
@@ -75,6 +92,17 @@ groups:
         annotations:
           summary: "15 分钟内出现失败任务（{{ $value }} 个）"
           description: "结合审计与任务结果排查；持续失败检查 worker 存活与模型/连接器可用性。"
+
+      # 任务积压深度（M44-C 新增，P4 剩余工作）：PENDING 持续超阈值=消费能力不足或任务卡死。
+      # max 而非 sum：队列深度是共享 DB 真值，双副本各导出同一数值，sum 会按副本数翻倍
+      - alert: EapTaskQueueBacklog
+        expr: max(eap_task_queue_depth{state="PENDING"}) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PENDING 任务积压超过 100 持续 10 分钟"
+          description: "检查 worker 存活（EapInstanceDown）与 EAP_WORKER_COUNT；多副本共享库，确认无消费停滞后可扩 worker/副本。"
 
       # 熔断跳闸：任一模型处于 open（eap_circuit_state 为实际导出的 gauge，语义 0/1/2）
       - alert: EapCircuitOpen

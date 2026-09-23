@@ -109,6 +109,11 @@ def create_app() -> FastAPI:
     app.add_middleware(IdempotencyMiddleware)
     app.add_middleware(ConcurrencyLimitMiddleware)
     app.add_middleware(RequestSizeLimitMiddleware)
+    # M44-C（P4 剩余工作）：延迟 histogram 中间件——最后注册（LIFO 最外层），
+    # 计时覆盖含网关 413/429 拒绝在内的用户可感知全链路延迟；不改变上列既有中间件相对顺序
+    from .observability.latency import RequestLatencyMiddleware
+
+    app.add_middleware(RequestLatencyMiddleware)
     app.include_router(api_chat.router)
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)
@@ -171,11 +176,14 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics")
     def metrics():
-        """Prometheus text exposition（进程内计数器，M7）。"""
+        """Prometheus text exposition（进程内计数器/gauge/histogram，M7 + M44-C）。"""
         from fastapi.responses import PlainTextResponse
 
-        from .observability.metrics import render
+        from .observability.metrics import refresh_task_queue_depth, render
 
+        # M44-C：队列深度 gauge 为抓取时惰性查询（TaskRecord 按 state 计数），
+        # 失败静默保留上次值（见 refresh_task_queue_depth docstring 的取舍说明）
+        refresh_task_queue_depth()
         return PlainTextResponse(render(), media_type="text/plain; version=0.0.4")
 
     return app
