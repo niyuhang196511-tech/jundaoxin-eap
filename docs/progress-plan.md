@@ -21,7 +21,7 @@
 | 最新里程碑 | M46（console-M46A 评测中心三页签/影子流量/人工抽检界面 / harness-M46B 更新下载进度条 / console-M46C 政策模板补齐九 kinds）——M44 两域从仅 API 补成可操作 |
 | 代码 commit | 171796a |
 | 快照日期 | 2026-09-23 |
-| 测试基线 | **414 passed, 8 skipped**（114s）——较 M45 基线 413 增 1（M46-C a2a-delegate kind 可创建回归）；Harness cargo test 23 + tauri build NSIS 绿；控制台 typecheck/build 绿 |
+| 测试基线 | **414 passed, 8 skipped**（114s）+ 控制台 typecheck/build + Harness cargo 23/tauri build NSIS 绿；**E2E（Playwright）12 条全绿**（存量冒烟 3 + M46 评测中心 7 + 治理 2，浏览器真实链路） |
 | 下一主线 | L 组全部为外部条件项（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策）——工程侧无立即可开工的账本内任务，新需求照单追加 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
@@ -249,5 +249,6 @@
 | **M46-A ✅** | **评测中心三页签**（M44-A 影子流量 / M44-B 人工抽检从仅 API 补成控制台可操作，821b6ae） | Evals 页改 TabBar（Integrations 同款模式）：运行评测（原有能力整体抽为页签）/影子流量/人工抽检。影子流量页签：配置表（生产→影子对/抽样率/裁判标记/启停/删除）+ 创建对话框（含选填评分标准）+ 配对运行表（点行详情：输入/主影输出与错误分栏）+ 对比报表（运行量/失败率/主影延迟均值与 p50/输出一致率；LLM 裁判对比按钮按配置 judge 标记禁用并带对数上限）。人工抽检页签：报表摘要条（总量/已评/待评/三维均值/好评率，agent 过滤联动）+ task_id 抽样入口 + 队列表 + 评审对话框（待评三维 1-5 可部分填写；已评只读回显）。顺带修复 run() 成功 toast 读旧 state 致通过率恒 0% 的存量小缺陷；lib/api.ts 增 shadowApi/reviewApi。零后端改动 |
 | **M46-B ✅** | **Harness 更新下载进度条**（M43-C 留待增强收官，171796a） | install_update 的 download_and_install 进度回调落地：on_chunk 累计 downloaded 后 emit `update://progress {downloaded, total|null}`（total=Content-Length，分块传输缺失为 null），下载完成发 `update://installing`；emit 失败静默不影响安装闭环。前端 installUpdateNow 先挂 listen 再 invoke（防小包漏事件）：total 已知渲染百分比进度条，未知诚实降级为已下载 MB 计数不假装百分比；unlisten 双保险。事件名/回调签名对照 tauri-plugin-updater 2.12.0 与 tauri 2.11.6 源码核实。**诚实边界**：进度只覆盖下载阶段，验签/NSIS 安装无回调仅显示文案直至进程重启。新增 payload 形状单测，cargo test 23 绿 |
 | **M46-C ✅** | **政策配置模板补齐九 kinds + 后端登记缺口修复**（4b67264） | Governance 政策表单 kind 模板/下拉从 v0.6 三种补齐到九种：+tool-sandbox（M33）/a2a-delegate-allowlist（M30，endpoints/agents 双键——按运行时 check_a2a_delegate 语义预填）/eval-gate（M42-B）；空态文案同步。**连带修复 agent 发现的后端缺口**：a2a-delegate-allowlist 运行时真实生效但 PolicyCreate.kind 正则与 _KINDS 漏登记——控制台创建被 422 拒绝（存量测试绕过 API 直插库未暴露）；补登记 + config 校验（endpoints/agents 至少一项列表）+ API 可创建回归用例（test_a2a_push 8 用例） |
+| **批次 12 ✅（E2E）** | **端到端测试 + 浏览器可视化走查**：Playwright 用例 9 条新增（评测中心三页签全链路 / 治理政策九 kinds）+ 浏览器走查 T1~T6（214ecd4） | 走查发现并当场修复：侧栏版本标签 v0.4.0 过期（→v1.0.0）、评审备注缺 placeholder、政策对话框初始 config 空致直接创建 400（改为按 kind 预填）；另确认 eval-gate 策略按设计拦死未过评测模型（测试隔离纪律：用例内必清理）。走查截图留档 eap/frontend/gui-test-screenshots/；E2E 跑法：后端 `uv run python -m eap` + `cd eap/frontend && pnpm exec playwright test` |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
