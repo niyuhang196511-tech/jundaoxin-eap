@@ -239,3 +239,49 @@ def test_eval_gate_policy_validation(client: TestClient):
         "config": {"models": ["x"], "min_pass_rate": 1.5}})
     assert r.status_code == 400 and "min_pass_rate" in r.json()["detail"]
     client.post("/api/v1/policies/m42b-gate-valid/enabled?enabled=false", headers=HEADERS)
+
+
+def test_model_direct_eval_no_fallback(client: TestClient):
+    """M45-B 直评直连（only_prefer）：目标模型供应商失败 → 逐用例落 error 判 FAIL，
+    绝不落到链上其他模型应答（对照：普通调用同场景会降级到 mock-llm）。"""
+    # 注册必然失败的高优先级 openai_compat 模型（不可路由地址，test_hub 同款手法）
+    resp = client.post("/api/v1/models", headers=HEADERS, json={
+        "name": "eval-dead-model", "capabilities": ["chat"],
+        "provider": "openai_compat", "base_url": "http://127.0.0.1:9",
+        "api_key": "x", "remote_model": "x", "priority": 1})
+    assert resp.status_code == 200, resp.text
+
+    try:
+        # 对照组（钉死参数之前的行为基准）：普通 chat 调用沿链降级到 mock-llm
+        chat = client.post(CHAT, headers=HEADERS,
+                           json={"messages": [{"role": "user", "content": "直连对照"}]})
+        assert chat.status_code == 200
+        assert chat.json()["model"] == "mock-llm"
+
+        # 直评 dead-model：only_prefer 钉死 → 每个用例 ProviderError 落 error → FAIL
+        resp = client.post("/api/v1/evals/runs", headers=HEADERS, json={
+            "model": "eval-dead-model", "dataset": "faq-smoke", "min_pass_rate": 0.8})
+        assert resp.status_code == 200, resp.text
+        run = _wait_run(client, resp.json()["run_id"])
+        assert run["verdict"] == "FAIL", run.get("scores")
+        assert run["model"] == "eval-dead-model"
+        assert run["pass_rate"] == 0.0
+        assert run["scores"], "应有逐用例记录"
+        for case in run["scores"]:
+            assert "error" in case, f"用例应带 error 而非降级应答：{case}"
+            assert "output_snippet" not in case, "不应出现其他模型（mock-llm）的应答"
+    finally:
+        # 隔离纪律：用后停用，防污染 session 级共享测试库的路由链
+        client.post("/api/v1/models/eval-dead-model/enabled?enabled=false", headers=HEADERS)
+
+
+def test_model_direct_eval_pinned_missing_model(client: TestClient):
+    """only_prefer 直连不存在的模型 → 评测任务失败（ProviderError 语义），不静默换模型。"""
+    resp = client.post("/api/v1/evals/runs", headers=HEADERS, json={
+        "model": "no-such-model-x", "dataset": "faq-smoke"})
+    assert resp.status_code == 200
+    run = _wait_run(client, resp.json()["run_id"])
+    assert run["verdict"] == "FAIL"
+    for case in run["scores"]:
+        assert "error" in case
+        assert "no-such-model-x" in case["error"]

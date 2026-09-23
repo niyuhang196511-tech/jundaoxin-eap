@@ -165,11 +165,14 @@ async def execute_evaluation(db: Session, agent: str, dataset_name: str,
 
 async def execute_model_evaluation(db: Session, model: str, dataset_name: str,
                                    min_pass_rate: float = 0.8, judge: str = "rule") -> dict:
-    """模型直评（M42-B）：不经过 agent，用例逐条经 hub（prefer=model）调用后按 judge 评分。
+    """模型直评（M42-B，M45-B 修正直连）：不经过 agent，用例逐条经 hub 直连目标模型调用。
 
-    评分/判定/落库复用 agent 评测的同一流程（_finish_evaluation），结果落 model 列，
-    作为 eval-gate 路由门禁的判定输入。eval.run 在任务引擎内执行（平台内部模式，
-    无租户上下文），路由链不受 eval-gate 策略自我拦截。
+    only_prefer=True 钉死链为目标模型一个元素——首选模型供应商失败时直抛错误
+    （逐用例落 error 判失败），绝不落到链上其他模型应答（否则直评测到的不是
+    目标模型本身，门禁输入失真）。评分/判定/落库复用 agent 评测的同一流程
+    （_finish_evaluation），结果落 model 列，作为 eval-gate 路由门禁的判定输入。
+    eval.run 在任务引擎内执行（平台内部模式，无租户上下文），路由链不受
+    eval-gate 策略自我拦截。
     """
     from ...modelhub.router import hub
 
@@ -179,7 +182,7 @@ async def execute_model_evaluation(db: Session, model: str, dataset_name: str,
 
     async def produce_output(case: dict) -> str:
         completion = await hub.complete(db, [{"role": "user", "content": case["input"]}],
-                                        capability="chat", prefer=model)
+                                        capability="chat", prefer=model, only_prefer=True)
         return completion.result.content or ""
 
     return await _finish_evaluation(db, dataset, produce_output, min_pass_rate, judge, model=model)

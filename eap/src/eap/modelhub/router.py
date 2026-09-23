@@ -48,17 +48,22 @@ class ModelHub:
         prefer: str | None = None,
         temperature: float = 0.7,
         response_schema: dict | None = None,
+        only_prefer: bool = False,
     ) -> Completion:
         """遍历降级链：供应商失败自动切换下一个（docs/02 §5 ①）。每次尝试一个 LLM span。
 
         response_schema（v0.5 结构化输出）：注入格式指令 → 解析 + jsonschema 校验 →
         失败带错误反馈重试一次 → 仍失败回退纯文本（result.data=None）。
+
+        only_prefer（M45-B）：钉死 prefer 指定模型直连，链上其余模型全部剔除、失败
+        不降级（直抛 ProviderError）——模型直评等「必须测到目标模型本身」的场景用；
+        prefer 缺省/auto 时该参数无效果。
         """
         if response_schema is not None:
             messages = _with_schema_instruction(messages, response_schema)
         completion = await self._complete_chain(
             db, messages, capability=capability, tools=tools, prefer=prefer,
-            temperature=temperature, response_schema=response_schema,
+            temperature=temperature, response_schema=response_schema, only_prefer=only_prefer,
         )
         if response_schema is None or completion.result.tool_calls:
             return completion
@@ -73,7 +78,7 @@ class ModelHub:
                                                       "请只输出符合 schema 的 JSON 对象，不要包含其他文字。"}]
         retry = await self._complete_chain(
             db, retry_messages, capability=capability, tools=None, prefer=prefer,
-            temperature=temperature, response_schema=response_schema,
+            temperature=temperature, response_schema=response_schema, only_prefer=only_prefer,
         )
         data, _err = parse_structured(retry.result.content, response_schema)
         if data is not None:
@@ -93,8 +98,13 @@ class ModelHub:
         prefer: str | None = None,
         temperature: float = 0.7,
         response_schema: dict | None = None,
+        only_prefer: bool = False,
     ) -> Completion:
-        """沿降级链执行一次补全（供应商失败自动切换下一个）。"""
+        """沿降级链执行一次补全（供应商失败自动切换下一个）。
+
+        only_prefer（M45-B）：prefer 显式指定时把链钉死为该模型一个元素——直评等
+        场景「必须测到目标模型本身」，供应商失败也不允许落到链上其他模型。
+        """
         if prefer is None:
             from ..runtime.canary import current_model_override
 
@@ -104,6 +114,11 @@ class ModelHub:
 
         check_prompt(db, messages)  # Policy Engine：单次调用 prompt 上限
         chain = enforce_chain(db, self.chain_for(db, capability=capability, prefer=prefer))
+        if only_prefer and prefer and prefer != "auto":
+            chain = [r for r in chain if r.name == prefer]
+            if not chain:
+                raise ProviderError(
+                    f"指定模型 {prefer} 不存在、未启用或不具备 [{capability}] 能力（直连模式不降级）")
         if not chain:
             raise ProviderError(f"没有启用 [{capability}] 能力的模型，请先在模型中心注册")
         # 熔断过滤（M31 任务组 F）：open 的模型从候选链剔除，自然落到降级链下一个
