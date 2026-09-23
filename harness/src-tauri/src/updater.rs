@@ -30,6 +30,11 @@
 //! command 对前端 invoke 完全等价——同名/同参/同返回 JSON、均为 Promise），
 //! 避免网络检查阻塞主线程（sync command 在主线程执行，不可达源会冻结 UI）。
 //!
+//! 版本更新推送（M43-D）：`notify_update` 经 tauri-plugin-notification 直发系统
+//! 通知（Rust 侧调用不走 JS capability，capabilities 未加 notification 权限）；
+//! 周期检查/节流/横幅在前端（App.tsx），系统通知失败如实返回 Err——前端以
+//! 应用内横幅兜底（开发态/未按 NSIS 安装时 Windows toast 常因 AUMID 缺失失败）。
+//!
 //! 测试：参数校验/endpoint 形态解析/错误文案/UpdateInfo serde shape 为纯函数
 //! 单测；「不可达 endpoint 返回 error 而非 panic」用 generate_context!（真实
 //! conf，含占位 pubkey）+ updater 插件构建真实 App 驱动——`build()` 不进事件
@@ -38,6 +43,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
 /// 检查阶段网络超时（不可达更新源最多挂 30s）；下载安装阶段不设超时（大安装包慢速链路）
@@ -226,6 +232,19 @@ fn describe_check_error(e: &tauri_plugin_updater::Error) -> String {
         }
         other => format!("检查更新失败：{other}"),
     }
+}
+
+/// 系统通知（M43-D 版本更新推送的落地通道）：前端周期检查发现新版本后调用，
+/// 弹系统 toast（Windows 通知中心）。失败返回 Err（开发态/便携运行时 Windows
+/// toast 常因 AUMID 缺失失败）——前端以应用内横幅兜底，不因通知失败丢提醒。
+#[tauri::command]
+pub fn notify_update(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| format!("系统通知发送失败：{e}"))
 }
 
 #[cfg(test)]

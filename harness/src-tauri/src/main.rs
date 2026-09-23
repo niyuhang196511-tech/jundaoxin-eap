@@ -4,6 +4,7 @@
 //! - 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端（local_db.rs）
 //! - 本地技能运行时（M39-A）：签名技能包安装/四域授权/沙箱执行（skills.rs）
 //! - 自动更新（M43-C）：tauri-plugin-updater 接线，端内检查/下载安装/重启（updater.rs）
+//! - 版本更新推送（M43-D）：发现新版本 → 系统通知（tauri-plugin-notification，Rust 侧直发）
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -37,6 +38,8 @@ fn main() {
             .build())
         // M43-C 自动更新：updater 插件（endpoint/pubkey 运行时注入见 updater.rs）
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // M43-D 版本更新推送：系统通知插件（notify_update command 直发，Rust 侧无需 capability）
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端
             local_db::init(app)?;
@@ -77,6 +80,7 @@ fn main() {
             skills::skill_run,
             updater::check_update,
             updater::install_update,
+            updater::notify_update,
         ])
         .on_window_event(|window, event| {
             // 关闭按钮 → 隐藏到托盘（常驻）

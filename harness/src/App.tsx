@@ -173,6 +173,40 @@ export default function App() {
     return () => clearInterval(t);
   }, [settings.deviceKey, settings.baseUrl]);
 
+  // ---- M43-D 版本更新推送：周期自动检查（配置了更新源才启用）----
+  // 首查延迟 2 分钟（不拖慢启动），此后每 4 小时；发现新版本 → 应用内横幅 +
+  // 系统通知（同版本只通知一次，节流存 localStorage）；检查静默失败不打扰。
+  // 如实说明：窗口隐藏到托盘时 WebView 定时器可能被节流，检查顺延执行、语义不变；
+  // 安装始终需用户确认（横幅/设置页按钮），不做静默自动安装。
+  const UPDATE_FIRST_CHECK_MS = 2 * 60 * 1000;
+  const UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  const LAST_NOTIFIED_KEY = "harness.lastNotifiedVersion";
+  useEffect(() => {
+    if (!settings.updateEndpoint.trim() || !settings.updatePubkey.trim()) return;
+    let alive = true;
+    async function autoCheck() {
+      try {
+        const info = await invoke<{ currentVersion: string; available: boolean; version: string; notes: string; error: string }>(
+          "check_update", { endpoint: settings.updateEndpoint, pubkey: settings.updatePubkey });
+        if (!alive || !info.available) return;
+        setUpdateInfo(info);
+        if (info.version && localStorage.getItem(LAST_NOTIFIED_KEY) !== info.version) {
+          localStorage.setItem(LAST_NOTIFIED_KEY, info.version);
+          setUpdateMsg(`发现新版本 v${info.version}（当前 v${info.currentVersion}）`);
+          try {
+            await invoke("notify_update", {
+              title: "EAP Harness 有新版本",
+              body: `v${info.version} 可安装${info.notes ? `：${info.notes}` : ""}。打开 Harness 即可一键安装。`,
+            });
+          } catch { /* 系统通知不可用（开发态 AUMID 缺失等）——应用内横幅兜底 */ }
+        }
+      } catch { /* 静默：推送检查失败不打扰（网络离线由 M43-B 降级逻辑承担） */ }
+    }
+    const first = setTimeout(() => void autoCheck(), UPDATE_FIRST_CHECK_MS);
+    const t = setInterval(() => void autoCheck(), UPDATE_INTERVAL_MS);
+    return () => { alive = false; clearTimeout(first); clearInterval(t); };
+  }, [settings.updateEndpoint, settings.updatePubkey]);
+
   // SSE 响应体统一消费：逐行提取 data: 载荷（M43-B 从快捷调用中拆出，平台与本地模型共用）
   async function consumeSSE(r: Response, onData: (payload: string) => void) {
     const reader = r.body!.getReader();
@@ -509,6 +543,14 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
       ⚠ {degraded}
     </p>
   ) : null;
+  // M43-D 版本更新推送：发现新版本的常驻横幅（自动检查/手动检查共用）+ 一键安装
+  const updateBanner = updateInfo?.available ? (
+    <p style={{ color: "#1e7e34", background: "#e8f5e9", border: "1px solid #a5d6a7", padding: "8px 12px", borderRadius: 8, margin: 0 }}>
+      🔔 发现新版本 <strong>v{updateInfo.version}</strong>（当前 v{updateInfo.currentVersion}）
+      {updateInfo.notes ? ` · ${updateInfo.notes}` : ""}
+      <button style={{ marginLeft: 10 }} disabled={updateBusy} onClick={installUpdateNow}>立即安装</button>
+    </p>
+  ) : null;
 
   const runEntry = skills.find(s => s.name === runName);
   const runScripts = runEntry ? runEntry.files.filter(f => f.path.startsWith("scripts/")).map(f => f.path) : [];
@@ -723,6 +765,7 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
 
       {revokedBanner}
       {degradedBanner}
+      {updateBanner}
 
       <details>
         <summary>连接设置</summary>

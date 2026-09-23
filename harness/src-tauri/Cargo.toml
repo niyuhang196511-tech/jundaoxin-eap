@@ -18,3 +18,5 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 # M43-C 自动更新（docs/18 §M40 后置项 / GA）：Tauri updater 插件（Rust 侧运行时注入 endpoint/pubkey）
 tauri-plugin-updater = "2"
+# M43-D 版本更新推送：系统通知（Windows toast；Rust 侧直发，不走 JS capability）
+tauri-plugin-notification = "2"
