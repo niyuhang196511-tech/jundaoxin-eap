@@ -9,10 +9,22 @@
 status-update / artifact-update 帧（A2A 1.0 子集），终止帧附完整 Task 快照并入库
 tasks/get 可查。
 
-推送通知（M30）：tasks/pushNotificationConfig 接受并保存配置（进程内 dict，租户隔离）；
-平台任务在 RPC 内同步完成，回执于任务完成后同步投递（HMAC-SHA256 签名，X-EAP-Signature）。
-限制：异步任务引擎（runtime/tasks.py）的完成点未挂钩——任务引擎归独立任务组演进，
-跨进程异步回执待其暴露干净挂点后接入；当前覆盖 RPC 内同步完成的回执。
+推送通知（M30 + M45-A）：tasks/pushNotificationConfig 接受并保存配置（进程内 dict
+_A2A_PUSH，key=f"{tenant_id}:{task_id}"）。同步路径任务在 RPC 内完成，回执于任务完成
+后同步投递（HMAC-SHA256 签名，X-EAP-Signature，deliver_push）。异步路径（M45-A）：
+message/send 携带 params.metadata.async_task=true（平台扩展，A2A 1.0 不冲突）时不再
+同步 invoke——提交任务引擎（agent.invoke，payload._tenant_id 透传租户上下文）并立即
+返回 working 态 Task（taskId=引擎 task_id，metadata 带 agent/submitted）；引擎终态
+挂点（runtime/tasks.py _notify_a2a，懒 import 非阻断）查 _A2A_PUSH 命中即投递
+completed/failed 回执。tasks/get 内存 miss 时映射任务引擎 TaskRecord（按
+payload._tenant_id 比对凭证租户，引擎态 → A2A 态：PENDING/RUNNING/WAITING_HUMAN/
+WAITING_INPUT→working、COMPLETED→completed（artifacts 从 result.output 构造）、
+FAILED→failed（status.message 携带 error）、CANCELLED→canceled）。
+
+诚实边界：_A2A_PUSH/_A2A_TASKS 为进程内内存态——多副本部署下「提交副本」与「执行
+副本」不是同一进程，执行副本查不到推送配置、回执不投递（与既有「多副本下 oauth
+state 为进程内语义」同性质），不做跨副本广播；异步回执失败仅告警不重试（引擎侧
+无重试队列，后续可挂 IM 重试队列同款机制）。
 
 跨租户边界：入口按 resolve_tenant 凭证租户校验（任务/推送配置按租户隔离）；
 出站委派见 runtime/a2a_client.py（a2a.delegate 工具，fail-closed 策略边界）。
@@ -153,6 +165,67 @@ def _push_cfg_from_params(params: dict) -> dict | None:
     return None
 
 
+# 任务引擎态 → A2A 态（M45-A）：等待类一律 working，终态一一对应
+_ENGINE_STATE_TO_A2A = {
+    "PENDING": "working", "RUNNING": "working",
+    "WAITING_HUMAN": "working", "WAITING_INPUT": "working",
+    "COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "canceled",
+}
+
+
+def engine_task_snapshot(task_id: str, engine_state: str, result: dict | None = None,
+                         agent: str = "") -> dict:
+    """任务引擎 TaskRecord → A2A Task 快照（M45-A）：tasks/get 引擎映射与异步推送
+    回执（runtime/tasks.py _notify_a2a）共用，保证两处 Task 形态一致。
+
+    COMPLETED → completed（artifacts 从 result.output 构造，citations 进 metadata）；
+    FAILED → failed（status.state="failed" + status.message 携带 error 信息，tasks/get
+    兼容）；其余引擎态按 _ENGINE_STATE_TO_A2A 映射（未知态回退 working）。
+    """
+    result = result or {}
+    state = _ENGINE_STATE_TO_A2A.get(engine_state, "working")
+    task: dict = {"id": task_id, "contextId": task_id, "status": {"state": state},
+                  "metadata": {"agent": agent}}
+    if state == "completed":
+        task["artifacts"] = [{"name": "response",
+                              "parts": [{"kind": "text",
+                                         "text": str(result.get("output") or "")}]}]
+        task["metadata"]["citations"] = result.get("citations") or []
+    elif state == "failed":
+        task["status"]["message"] = {"role": "agent",
+                                     "parts": [{"kind": "text",
+                                                "text": str(result.get("error") or "任务执行失败")}]}
+    return task
+
+
+def _engine_task_for(tenant_id: int, task_id) -> dict | None:
+    """tasks/get 内存 miss → 任务引擎 TaskRecord 映射（M45-A）。
+
+    引擎任务无租户列：按 payload._tenant_id 比对凭证租户（A2A 异步提交 / 触发器
+    提交时写入；/api/v1/tasks 直提任务无此字段）——不匹配一律视为不存在（不泄漏
+    存在性）。每次现查现映射、不回写内存缓存（避免冻结过态快照）。
+    """
+    from ...db import SessionLocal
+    from ...models import TaskRecord
+
+    tid = str(task_id or "")
+    if not tid:
+        return None
+    try:
+        with SessionLocal() as edb:
+            rec = edb.get(TaskRecord, tid)
+            if rec is None:
+                return None
+            payload = dict(rec.payload or {})
+            if str(payload.get("_tenant_id")) != str(tenant_id):
+                return None
+            return engine_task_snapshot(tid, rec.state, rec.result,
+                                        str(payload.get("agent") or ""))
+    except Exception as e:
+        logger.warning("A2A tasks/get 引擎任务映射失败 %s: %s", tid, e)
+        return None
+
+
 async def _push_post(url: str, content: bytes, headers: dict) -> int:
     """推送回执出站 POST（独立函数便于测试注入 fake，返回 HTTP 状态码）。"""
     import httpx
@@ -211,6 +284,26 @@ async def a2a_rpc(
         msg = A2AMessage(**body.params.get("message", {}))
         if not msg.text().strip():
             return _rpc_error(body.id, -32602, "message 缺少 text part")
+        # M45-A：异步执行路径——params.metadata.async_task=true（平台扩展）时不再同步
+        # invoke：提交任务引擎（agent.invoke，payload._tenant_id 透传租户上下文，见
+        # runtime/tasks.py _h_agent_invoke），立即返回 working 态 Task（taskId=引擎
+        # task_id）。完成回执由引擎终态挂点（_notify_a2a）投递，状态经 tasks/get 回查
+        # （引擎任务映射）。推送配置按引擎 task_id 预登记，终态命中即投。
+        if (body.params.get("metadata") or {}).get("async_task") is True:
+            try:
+                registry.get(target)
+            except KeyError as e:
+                return _rpc_error(body.id, -32001, f"智能体不存在: {e}")
+            submitted = await request.app.state.task_engine.submit(
+                db, "agent.invoke",
+                {"agent": target, "input": msg.text(), "_tenant_id": tenant_id})
+            task_id = str(submitted)
+            task = engine_task_snapshot(task_id, "PENDING", None, target)
+            task["metadata"]["submitted"] = True
+            cfg = _push_cfg_from_params(body.params)
+            if cfg is not None:
+                _A2A_PUSH[_push_key(tenant_id, task_id)] = cfg
+            return {"jsonrpc": "2.0", "id": body.id, "result": task}
         token = policy.set_tenant(tenant_id)
         try:
             resp = await registry.invoke(db, target, InvokeRequest(input=msg.text()))
@@ -226,7 +319,7 @@ async def a2a_rpc(
         cfg = _push_cfg_from_params(body.params)
         if cfg is not None:
             _A2A_PUSH[_push_key(tenant_id, task["id"])] = cfg
-            # 同步场景回执：任务在 RPC 内完成，响应前投递（异步任务引擎完成点未挂钩，见模块 docstring）
+            # 同步场景回执：任务在 RPC 内完成，响应前投递（异步路径由引擎终态挂点投递）
             await deliver_push(tenant_id, task["id"], cfg, task)
         return {"jsonrpc": "2.0", "id": body.id, "result": task}
 
@@ -269,6 +362,9 @@ async def a2a_rpc(
     if body.method == "tasks/get":
         task_id = body.params.get("id")
         task = _task_for(tenant_id, task_id)
+        if task is None:
+            # M45-A：内存 miss → 任务引擎 TaskRecord 映射（A2A 异步提交的任务）
+            task = _engine_task_for(tenant_id, task_id)
         if task is None:
             return _rpc_error(body.id, -32001, f"任务 {task_id} 不存在")
         return {"jsonrpc": "2.0", "id": body.id, "result": task}

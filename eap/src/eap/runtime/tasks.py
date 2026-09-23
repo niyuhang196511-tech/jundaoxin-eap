@@ -662,6 +662,7 @@ class TaskEngine:
         except Exception as e:
             self._mark(task_id, "FAILED", {"error": str(e)})
             await self._notify_done(task_id, task_type, "FAILED", {"error": str(e)})
+            await self._notify_a2a(task_id, "FAILED", {"error": str(e)}, payload)
             return
         finally:
             self._running.pop(task_id, None)
@@ -669,6 +670,7 @@ class TaskEngine:
 
         self._mark(task_id, "COMPLETED", result)
         await self._notify_done(task_id, task_type, "COMPLETED", result)
+        await self._notify_a2a(task_id, "COMPLETED", result, payload)
 
     async def _notify_done(self, task_id: str, task_type: str, state: str,
                            result: dict) -> None:
@@ -691,6 +693,34 @@ class TaskEngine:
         except Exception as e:
             logging.getLogger("eap.tasks").warning(
                 "任务完成回执推送失败 task=%s: %s", task_id, e)
+
+    async def _notify_a2a(self, task_id: str, state: str, result: dict, payload: dict) -> None:
+        """M45-A（A2A 异步任务推送挂钩）：任务终态 → A2A 推送回执（若登记了推送配置）。
+
+        A2A message/send（params.metadata.async_task=true）提交 agent.invoke 任务时把
+        推送配置预登记在 api.v1.a2a._A2A_PUSH（key=f"{tenant_id}:{task_id}"，task_id=
+        引擎任务 id）；本钩子在终态查表命中即投递 HMAC 签名回执（completed/failed
+        Task 快照，engine_task_snapshot 构造，与 tasks/get 引擎映射同形态）。租户取
+        payload._tenant_id（缺失即未登记，静默返回）；跨模块懒 import 防循环依赖
+        （模式同 _notify_done 的 notify_task_done 钩子）；回执失败仅告警不重试，
+        不影响任务终态落库（非阻断）。诚实边界见 api/v1/a2a.py 模块 docstring：
+        _A2A_PUSH 进程内内存态，多副本下「提交副本」与「执行副本」不同进程时不投递。
+        """
+        tenant = (payload or {}).get("_tenant_id")
+        if tenant in (None, ""):
+            return
+        try:
+            from ..api.v1 import a2a as a2a_mod
+
+            cfg = a2a_mod._A2A_PUSH.get(a2a_mod._push_key(int(tenant), task_id))
+            if cfg is None:
+                return
+            snapshot = a2a_mod.engine_task_snapshot(
+                task_id, state, result, str((payload or {}).get("agent") or ""))
+            await a2a_mod.deliver_push(int(tenant), task_id, cfg, snapshot)
+        except Exception as e:
+            logging.getLogger("eap.tasks").warning(
+                "A2A 推送回执失败 task=%s: %s", task_id, e)
 
     def _mark(self, task_id: str, state: str, result: dict) -> None:
         from ..observability.metrics import incr
