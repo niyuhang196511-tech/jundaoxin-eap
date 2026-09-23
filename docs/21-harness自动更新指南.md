@@ -89,5 +89,12 @@ if (info.available) await invoke('install_update', { endpoint, pubkey }); // 成
 
 > 诚实说明：本批为工程接入，真实密钥与更新源未部署（外部条件）；updater API 形态
 > 均对照 tauri-plugin-updater 2.12 源码核实（含 conf 占位 pubkey 的存在性要求、
-> Windows 安装自退进程语义），cargo check 0 错误、cargo test 22 用例全绿
-> （存量 17 + 新增 5，含对不可达 endpoint 的异步检查不 panic 用例）。
+> Windows 安装自退进程语义），cargo check 0 错误、cargo test 23 用例全绿
+> （M43-C 存量 22 + M46-B 新增 1，含对不可达 endpoint 的异步检查不 panic 用例与
+> 进度 payload shape 容错用例）。
+> 下载进度条（M46-B）：install 下载期间 Rust 经事件 `update://progress` 发
+> `{downloaded: u64, total: u64 | null}`（字节，total 取自下载响应 Content-Length），
+> 下载完成/开始安装发 `update://installing`；前端在安装按钮下方渲染进度条
+> （App.tsx）。**total 未知容错**：分块传输/服务端未回 Content-Length 时 total 为
+> null——前端按不确定进度只显示已下载 MB 数、不渲染百分比条（无法计算比例，
+> 不假装进度）。

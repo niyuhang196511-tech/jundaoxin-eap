@@ -35,14 +35,19 @@
 //! 周期检查/节流/横幅在前端（App.tsx），系统通知失败如实返回 Err——前端以
 //! 应用内横幅兜底（开发态/未按 NSIS 安装时 Windows toast 常因 AUMID 缺失失败）。
 //!
-//! 测试：参数校验/endpoint 形态解析/错误文案/UpdateInfo serde shape 为纯函数
-//! 单测；「不可达 endpoint 返回 error 而非 panic」用 generate_context!（真实
+//! 下载进度上报（M46-B）：install_update 下载期间经事件 `update://progress` 向
+//! 前端发进度（payload 见 UpdateProgress），下载完成/开始安装时发
+//! `update://installing`；前端监听与进度条见 App.tsx，文档 docs/21 §5。
+//!
+//! 测试：参数校验/endpoint 形态解析/错误文案/UpdateInfo 与 UpdateProgress serde
+//! shape 为纯函数单测；「不可达 endpoint 返回 error 而非 panic」用 generate_context!（真实
 //! conf，含占位 pubkey）+ updater 插件构建真实 App 驱动——`build()` 不进事件
 //! 循环、不创建窗口（配置窗口在 RuntimeRunEvent::Ready 才创建，见 tauri app.rs
 //! setup()），可安全在测试中运行。
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tauri::Emitter;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -58,6 +63,12 @@ pub const PLACEHOLDER_PUBKEY: &str = "d95f4gvLbHQxVTrWvL9wxbGdREukFUlbBcXvo+olWd
 
 /// 契约规定的空参数错误文案
 const ERR_EMPTY_ARGS: &str = "未配置更新源或签名公钥";
+
+/// 下载进度事件名（M46-B，前端 listen 见 App.tsx）。Tauri 事件名仅允许字母数字
+/// 与 - / : _，本常量为字面量、合法性已对照 tauri 2 event_name.rs 确认。
+const EVENT_UPDATE_PROGRESS: &str = "update://progress";
+/// 下载完成/开始安装事件名（M46-B）
+const EVENT_UPDATE_INSTALLING: &str = "update://installing";
 
 /// 检查更新结果（serde camelCase，前端 TS 对齐）：
 /// current_version=当前应用版本；available=是否有更新；version/notes=新版本号/说明；
@@ -84,6 +95,16 @@ impl UpdateInfo {
     }
 }
 
+/// 下载进度事件 payload（M46-B，serde 序列化后经 EVENT_UPDATE_PROGRESS 发前端）：
+/// downloaded=累计已下载字节；total=安装包总大小（取自下载响应 Content-Length，
+/// 分块传输/服务端未回该头时为 null——前端须容错，按不确定进度只显示已下载
+/// MB 数，不得假设必有 total）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct UpdateProgress {
+    pub downloaded: u64,
+    pub total: Option<u64>,
+}
+
 /// 检查更新：endpoint 为更新源 URL（目录/完整模板/固定 .json 清单三态，
 /// 见 resolve_endpoint），pubkey 为 minisign Ed25519 公钥。
 /// 空参数 → Err("未配置更新源或签名公钥")；其余失败 → Ok + error 字段。
@@ -98,6 +119,10 @@ pub async fn check_update(
 
 /// 下载并安装更新：成功后自动重启（Windows 由 NSIS 安装器拉起，进程在插件内
 /// 退出、本 command 的 Promise 不 resolve；其余平台 AppHandle::restart）。
+/// 下载期间经事件 `update://progress` 上报进度，payload
+/// `{downloaded: u64, total: u64 | null}`（字节；total=Content-Length，服务端未回
+/// 该头时为 null——前端按不确定进度只显示已下载 MB 数，不得假设必有 total）；
+/// 下载完成/开始安装时发 `update://installing`（payload null）。
 /// 失败返回 Err(中文可读错误)。
 #[tauri::command]
 pub async fn install_update(
@@ -175,9 +200,22 @@ async fn install_update_impl<R: tauri::Runtime>(
         .map_err(|e| describe_check_error(&e))?
         .ok_or_else(|| "服务器报告已是最新版本，无需更新".to_string())?;
 
-    // 进度回调留空：进度条上报属前端后续增强，本批只保证下载安装闭环
+    // 进度上报（M46-B）：插件 on_chunk 回调 (chunk_length, total)——chunk_length
+    // 为本次分片字节数，total 为总大小（Content-Length，可能 None，每个分片重复
+    // 携带同一值），本地累计得 downloaded 后发事件；emit 失败（如窗口不存在）
+    // 不影响下载安装闭环，静默忽略。回调在 await 期间被插件反复调用，闭包仅
+    // 可变借用 downloaded、共享借用 app，无跨 await 持锁问题。
+    let mut downloaded: u64 = 0;
     update
-        .download_and_install(|_, _| {}, || {})
+        .download_and_install(
+            |chunk, total| {
+                downloaded = downloaded.saturating_add(chunk as u64);
+                let _ = app.emit(EVENT_UPDATE_PROGRESS, UpdateProgress { downloaded, total });
+            },
+            || {
+                let _ = app.emit(EVENT_UPDATE_INSTALLING, ());
+            },
+        )
         .await
         .map_err(|e| format!("下载或安装更新失败：{e}"))?;
 
@@ -320,6 +358,23 @@ mod tests {
             describe_check_error(&Error::TargetsNotFound(vec!["windows-x86_64".into()]));
         assert!(missing.contains("windows-x86_64") && missing.contains("平台"));
         assert!(describe_check_error(&Error::EmptyEndpoints).contains("endpoints"));
+    }
+
+    #[test]
+    fn update_progress_payload_shape_tolerates_missing_total() {
+        // M46-B：进度事件 payload shape——total 已知为数值；未知（服务端无
+        // Content-Length）序列化为 null，前端按不确定进度容错显示
+        let known = serde_json::to_value(UpdateProgress { downloaded: 1024, total: Some(2048) })
+            .expect("序列化失败");
+        assert_eq!(known.get("downloaded").and_then(|x| x.as_u64()), Some(1024));
+        assert_eq!(known.get("total").and_then(|x| x.as_u64()), Some(2048));
+        let unknown = serde_json::to_value(UpdateProgress { downloaded: 1, total: None })
+            .expect("序列化失败");
+        assert_eq!(unknown.get("downloaded").and_then(|x| x.as_u64()), Some(1));
+        assert!(
+            unknown.get("total").map(serde_json::Value::is_null).unwrap_or(false),
+            "total 缺失应序列化为 null 而非缺字段/0"
+        );
     }
 
     #[test]

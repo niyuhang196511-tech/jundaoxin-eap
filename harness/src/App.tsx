@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import MonitorView from "./MonitorView";
 
 type Agent = { name: string; description?: string; status?: string };
@@ -85,6 +86,11 @@ function defaults(): Settings {
 
 const NO_GRANTS: Grants = { filesystem: false, network: false, process: false, browser: false };
 
+// M46-B 下载进度展示格式化：字节 → 一位小数 MB
+function fmtMB(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -102,6 +108,10 @@ export default function App() {
   const [updateMsg, setUpdateMsg] = useState("");
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ currentVersion: string; available: boolean; version: string; notes: string; error: string } | null>(null);
+  // M46-B 下载进度条：update://progress payload（downloaded=已下载字节，total=总
+  // 大小，服务端无 Content-Length 时为 null）+ 安装阶段（update://installing 置位）
+  const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total: number | null } | null>(null);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
   const [view, setView] = useState<"quick" | "skills" | "privacy" | "monitor">("quick");
   const [privacy, setPrivacy] = useState<{ sessions: number; memories: number } | null>(null);
 
@@ -123,6 +133,15 @@ export default function App() {
   const [reportMsg, setReportMsg] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [unreported, setUnreported] = useState<AuditEntry[]>([]);
+
+  // M46-B 安装进度事件监听的卸载清理兜底：正常由 installUpdateNow 的 finally
+  // unlisten；极端情况下（安装中组件卸载——本组件为根组件正常不卸载，防御性
+  // 兜底）也不泄漏监听。
+  const updateUnlistenRef = useRef<(() => void)[]>([]);
+  useEffect(() => () => {
+    updateUnlistenRef.current.forEach(fn => fn());
+    updateUnlistenRef.current = [];
+  }, []);
 
   useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }, [settings]);
 
@@ -376,15 +395,39 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
     }
   }
 
-  // 下载并安装（M43-C）：Windows 上 NSIS 静默安装后进程即退出重启，后续代码通常不执行
+  // 下载并安装（M43-C + M46-B 进度条）：下载期间监听 Rust 侧事件刷新进度——
+  // update://progress（payload {downloaded, total}，total 未知时按不确定进度显示
+  // 已下载 MB 数）、update://installing（切「下载完成，正在安装…」），语义与
+  // payload 见 updater.rs。Windows 上 NSIS 静默安装后进程即退出重启，成功路径的
+  // 后续代码（含 finally）通常不执行；失败路径在 finally 里 unlisten 并复位进度。
   async function installUpdateNow() {
-    setUpdateBusy(true); setUpdateMsg("正在下载安装，完成后应用将自动重启…");
+    setUpdateBusy(true); setUpdateProgress(null); setUpdateInstalling(false);
+    setUpdateMsg("正在下载安装，完成后应用将自动重启…");
+    // listen 是异步的：必须在 invoke 前挂好监听，否则极小安装包可能瞬间下载完，
+    // 漏掉全部进度事件
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenInstalling: (() => void) | null = null;
     try {
+      unlistenProgress = await listen<{ downloaded: number; total: number | null }>(
+        "update://progress",
+        e => setUpdateProgress(e.payload),
+      );
+      unlistenInstalling = await listen("update://installing", () => {
+        setUpdateInstalling(true);
+        setUpdateMsg("下载完成，正在安装…");
+      });
+      updateUnlistenRef.current = [unlistenProgress, unlistenInstalling];
       await invoke("install_update", { endpoint: settings.updateEndpoint, pubkey: settings.updatePubkey });
-      setUpdateMsg("安装完成，应用即将重启…");
+      setUpdateMsg("安装完成，应用即将重启…"); // Windows 实际到不了这里（进程已退出）
     } catch (e) {
       setUpdateMsg(`安装失败：${(e as Error).message}`);
+      setUpdateProgress(null); setUpdateInstalling(false);
       setUpdateBusy(false);
+    } finally {
+      // 局部句柄 unlisten 与 ref 兜底双保险（重复调用 unlisten 无副作用）
+      unlistenProgress?.();
+      unlistenInstalling?.();
+      updateUnlistenRef.current = [];
     }
   }
 
@@ -551,6 +594,21 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
       <button style={{ marginLeft: 10 }} disabled={updateBusy} onClick={installUpdateNow}>立即安装</button>
     </p>
   ) : null;
+
+  // M46-B 下载进度展示值：total 已知 → 百分比进度条 + 「已下载 X / Y MB」；
+  // total 未知（服务端无 Content-Length）→ 不确定进度，只显示已下载 MB 数，
+  // 不假装百分比（诚实说明：此时无法计算比例）
+  let updateProgressPct: number | null = null;
+  let updateProgressText = "";
+  if (updateProgress) {
+    const { downloaded, total } = updateProgress;
+    if (total) {
+      updateProgressPct = Math.min(100, Math.floor((downloaded / total) * 100));
+      updateProgressText = `已下载 ${fmtMB(downloaded)} / ${fmtMB(total)} MB（${updateProgressPct}%）`;
+    } else {
+      updateProgressText = `已下载 ${fmtMB(downloaded)} MB（总大小未知，无法显示百分比）`;
+    }
+  }
 
   const runEntry = skills.find(s => s.name === runName);
   const runScripts = runEntry ? runEntry.files.filter(f => f.path.startsWith("scripts/")).map(f => f.path) : [];
@@ -814,6 +872,17 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
           <button onClick={installUpdateNow} disabled={updateBusy} style={{ color: "#1e7e34" }}>
             下载并安装 v{updateInfo.version}
           </button>
+        )}
+        {/* M46-B 下载进度条：total 已知渲染百分比填充条，未知只显示已下载 MB 文案 */}
+        {updateBusy && updateProgress && (
+          <div style={{ margin: "6px 0 0" }}>
+            {updateProgressPct !== null && (
+              <div style={{ background: "#e0e0e0", borderRadius: 4, height: 10, width: "100%", maxWidth: 480, overflow: "hidden" }}>
+                <div style={{ background: "#1e7e34", height: "100%", width: `${updateProgressPct}%`, transition: "width 0.2s" }} />
+              </div>
+            )}
+            <small style={{ color: "#555" }}>{updateProgressText}</small>
+          </div>
         )}
         {updateMsg && <p style={{ margin: "6px 0 0", color: updateMsg.startsWith("检查失败") || updateMsg.startsWith("安装失败") ? "#c0392b" : "#555" }}>{updateMsg}</p>}
       </details>
