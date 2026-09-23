@@ -25,7 +25,7 @@ router = fastapi.APIRouter(prefix="/api/v1/policies",
 
 _KINDS = ("model-allowlist", "provider-allowlist", "max-prompt-tokens",
           "tool-allowlist", "tool-risk-approval", "agent-allowlist", "tool-sandbox",
-          "eval-gate")
+          "eval-gate", "a2a-delegate-allowlist")
 
 
 class PolicyCreate(BaseModel):
@@ -33,7 +33,7 @@ class PolicyCreate(BaseModel):
     tenant_id: int = Field(default=0, ge=0, description="0 = 平台默认策略")
     kind: str = Field(pattern=r"^(model-allowlist|provider-allowlist|max-prompt-tokens|"
                               r"tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox|"
-                              r"eval-gate)$")
+                              r"eval-gate|a2a-delegate-allowlist)$")
     config: dict = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
     notes: str = Field(default="", max_length=256)
@@ -85,6 +85,12 @@ def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fa
         min_rate = cfg.get("min_pass_rate")
         if min_rate is not None and (not isinstance(min_rate, (int, float)) or not 0 <= float(min_rate) <= 1):
             raise fastapi.HTTPException(status_code=400, detail="EAP-7102 eval-gate 的 min_pass_rate 须为 0~1 数值")
+    if body.kind == "a2a-delegate-allowlist":
+        # M30 任务组 E（M46-C 补 API 缺口）：{"endpoints": [...], "agents": [...]}
+        # 至少一项列表（endpoint 或 agent 命中即放行，"*" 通配，见 check_a2a_delegate）
+        if not isinstance(cfg.get("endpoints"), list) and not isinstance(cfg.get("agents"), list):
+            raise fastapi.HTTPException(
+                status_code=400, detail="EAP-7102 a2a-delegate-allowlist 需要 config.endpoints 或 config.agents 列表")
     if body.kind not in _KINDS:
         raise fastapi.HTTPException(status_code=400, detail=f"EAP-7102 未知策略类型 {body.kind}")
     record = PolicyRecord(name=body.name, tenant_id=body.tenant_id, kind=body.kind,

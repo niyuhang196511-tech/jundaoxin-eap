@@ -209,6 +209,12 @@ const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
   'tool-allowlist': { tools: ['erp.inventory.query'] },
   'tool-risk-approval': { threshold: 'high' },
   'agent-allowlist': { agents: ['faq-agent'] },
+  // M33：清单内脚本工具必须走沙箱执行；mode=enforce 时进程内工具命中即拒绝，audit 仅记录
+  'tool-sandbox': { mode: 'enforce', tools: ['erp.inventory.export'] },
+  // M30：跨租户 A2A 外部委派白名单（fail-closed），endpoint 或 agent 任一命中即放行，"*" 通配
+  'a2a-delegate-allowlist': { endpoints: ['https://a2a.partner.example.com'], agents: ['ext-agent'] },
+  // M42-B：清单内模型上线/续用须过评测门禁（无评测记录或 PASS 率低于阈值则路由剔除）
+  'eval-gate': { models: ['mock-llm'], require_eval: true, min_pass_rate: 0.8 },
 }
 
 function PoliciesTab() {
@@ -271,7 +277,7 @@ function PoliciesTab() {
               <Button size="xs" variant="secondary" onClick={() => toggle(p)}>{p.enabled ? '停用' : '启用'}</Button>
             ) },
           ]}
-          empty="策略类型：模型白名单 / 供应商白名单 / prompt token 上限（违规 403 EAP-7101）"
+          empty="策略类型：模型 / 供应商 / 工具 / 智能体白名单 / 风险审批阈值 / prompt token 上限 / 工具沙箱 / A2A 委派白名单 / 评测门禁（违规 403 EAP-7101）"
         />
       </div>
       <DialogContent open={open} onOpenChange={setOpen} title="创建策略"
@@ -298,6 +304,9 @@ function PoliciesTab() {
                 <option value="tool-allowlist">tool-allowlist（工具白名单）</option>
                 <option value="tool-risk-approval">tool-risk-approval（风险审批阈值）</option>
                 <option value="agent-allowlist">agent-allowlist（可委派智能体）</option>
+                <option value="tool-sandbox">tool-sandbox（脚本工具沙箱）</option>
+                <option value="a2a-delegate-allowlist">a2a-delegate-allowlist（A2A 外部委派白名单）</option>
+                <option value="eval-gate">eval-gate（评测门禁）</option>
               </Select>
             </div>
             <div>

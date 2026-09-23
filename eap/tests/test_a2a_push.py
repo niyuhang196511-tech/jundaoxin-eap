@@ -309,3 +309,23 @@ def test_async_message_send_without_push_config_delivers_nothing(
     _poll_a2a_state(client, task["id"], {"completed"})
     time.sleep(0.3)  # 推送窗口：无配置不应有任何 A2A 出站
     assert push_capture == []
+
+
+def test_a2a_delegate_allowlist_kind_creatable_via_api(client: TestClient):
+    """M46-C 缺口回归：a2a-delegate-allowlist 须经 policies API 可创建（此前 kind
+    正则/_KINDS 漏登记致 422，存量测试绕过 API 直插库未暴露）；config 校验同步生效。"""
+    from .conftest import AUTH
+
+    r = client.post("/api/v1/policies", headers=AUTH, json={
+        "name": "m46-a2a-gate", "kind": "a2a-delegate-allowlist",
+        "config": {"endpoints": ["https://a2a.partner.example.com"], "agents": ["ext-agent"]}})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "a2a-delegate-allowlist"
+
+    # config 校验：endpoints 与 agents 均缺失 → 400
+    r = client.post("/api/v1/policies", headers=AUTH, json={
+        "name": "m46-a2a-gate-bad", "kind": "a2a-delegate-allowlist", "config": {}})
+    assert r.status_code == 400 and "endpoints" in r.json()["detail"]
+
+    # 清理：停用防污染共享测试库（fail-closed 运行时语义不变）
+    client.post("/api/v1/policies/m46-a2a-gate/enabled?enabled=false", headers=AUTH)
