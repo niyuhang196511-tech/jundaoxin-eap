@@ -904,3 +904,76 @@ class LoraAdapter(Base):
     note: Mapped[str] = mapped_column(String(512), default="")  # 失败原因 / 运维备注
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ShadowConfigRecord(Base):
+    """在线影子流量配置（M44-A，L10 评测深化「在线影子流量」）。
+
+    - source_agent：生产 agent（调用完成点触发影子分流）；shadow_agent：候选 agent
+      （接收同输入的全量执行，输出不返回给用户，仅落 shadow_runs 供对比报表）
+    - sample_rate：抽样率 0~1（每请求独立判定）
+    - judge_criteria：报表期 LLM 裁判的评分标准（空 = 报表不提供 judge 对比）
+    """
+
+    __tablename__ = "shadow_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source_agent: Mapped[str] = mapped_column(String(64), index=True)
+    shadow_agent: Mapped[str] = mapped_column(String(64), index=True)
+    sample_rate: Mapped[float] = mapped_column(Float, default=1.0)
+    judge_criteria: Mapped[str] = mapped_column(Text, default="")  # 影子对比裁判标准
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ShadowRunRecord(Base):
+    """影子配对运行记录（M44-A）：一次主调用的影子副本执行结果。
+
+    trace_id = 主调用的 trace_id（关联 usage_records 的影子调用 trace 为
+    f"{trace_id}-shadow"，成本不与主调用混计）。影子失败不抛错，只落 shadow_error。
+    """
+
+    __tablename__ = "shadow_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    config_id: Mapped[int] = mapped_column(Integer, index=True)
+    config_name: Mapped[str] = mapped_column(String(64), index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)  # 主调用 trace
+    source_agent: Mapped[str] = mapped_column(String(64), default="")
+    shadow_agent: Mapped[str] = mapped_column(String(64), default="")
+    input_text: Mapped[str] = mapped_column(Text, default="")
+    primary_output: Mapped[str] = mapped_column(Text, default="")
+    primary_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    shadow_output: Mapped[str] = mapped_column(Text, default="")
+    shadow_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    shadow_error: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReviewSampleRecord(Base):
+    """人工抽检样本（M44-B，L10 评测深化「人工抽检」）。
+
+    - 抽样：从 agent.invoke/agent.hitl 任务快照（input/output 冗余落库，任务
+      后续清理不影响抽检记录）；同源 (source, source_id) 唯一防重复入选
+    - 评审：管理员人工多维评分（correctness/relevance/format 各 1-5，可只评
+      部分维度）+ 备注；status pending → reviewed
+    """
+
+    __tablename__ = "review_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(16), default="task")  # task | conversation
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+    input_text: Mapped[str] = mapped_column(Text, default="")
+    output_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending | reviewed
+    scores: Mapped[dict] = mapped_column(JSON, default=dict)  # {"correctness": 1-5, ...}
+    note: Mapped[str] = mapped_column(Text, default="")
+    sampled_by: Mapped[str] = mapped_column(String(128), default="")
+    reviewed_by: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...observability import audit
-from ...models import EvalDatasetRecord, EvalRunRecord
+from ...models import (AgentRecord, EvalDatasetRecord, EvalRunRecord, ReviewSampleRecord,
+                       ShadowConfigRecord, ShadowRunRecord, TaskRecord)
 from ...schemas import InvokeRequest
 from ..deps import require_admin, require_api_key, resolve_tenant
 
@@ -287,3 +288,328 @@ async def _invoke(db: Session, agent: str, text: str) -> dict:
 
     resp = await registry.invoke(db, agent, InvokeRequest(input=text))
     return {"output": resp.output}
+
+
+
+
+# ---------- 在线影子流量（M44-A，L10 评测深化）：影子配置 + 配对运行 + 对比报表 ----------
+
+class ShadowConfigCreate(BaseModel):
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,40}$")
+    source_agent: str = Field(min_length=1, description="生产 agent（调用完成点触发分流）")
+    shadow_agent: str = Field(min_length=1, description="影子 agent（候选版本，输出不返回用户）")
+    sample_rate: float = Field(default=1.0, ge=0.0, le=1.0, description="抽样率（每请求独立判定）")
+    judge_criteria: str = Field(default="", max_length=2000,
+                                description="报表期 LLM 裁判评分标准（空 = 报表无 judge 对比）")
+    note: str = Field(default="", max_length=512)
+
+
+class ShadowConfigPatch(BaseModel):
+    shadow_agent: str | None = None
+    sample_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    judge_criteria: str | None = Field(default=None, max_length=2000)
+    enabled: bool | None = None
+    note: str | None = Field(default=None, max_length=512)
+
+
+def _shadow_config_or_404(db: Session, name: str) -> ShadowConfigRecord:
+    row = db.scalar(select(ShadowConfigRecord).where(ShadowConfigRecord.name == name))
+    if row is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 影子配置 {name} 不存在")
+    return row
+
+
+def _agent_exists(db: Session, name: str, role: str) -> None:
+    if db.scalar(select(AgentRecord).where(AgentRecord.name == name)) is None:
+        raise fastapi.HTTPException(status_code=400,
+                                    detail=f"EAP-4000 {role} agent {name} 不存在（先创建/注册）")
+
+
+@router.post("/shadow-configs", dependencies=[fastapi.Depends(require_admin)])
+def create_shadow_config(body: ShadowConfigCreate, request: fastapi.Request,
+                         db: Session = fastapi.Depends(get_db)):
+    """创建影子流量配置（admin+审计 shadow.create）：source/shadow agent 须已存在。"""
+    _agent_exists(db, body.source_agent, "生产")
+    _agent_exists(db, body.shadow_agent, "影子")
+    if db.scalar(select(ShadowConfigRecord).where(ShadowConfigRecord.name == body.name)) is not None:
+        raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 影子配置 {body.name} 已存在")
+    row = ShadowConfigRecord(name=body.name, source_agent=body.source_agent,
+                             shadow_agent=body.shadow_agent, sample_rate=body.sample_rate,
+                             judge_criteria=body.judge_criteria, note=body.note)
+    db.add(row)
+    db.commit()
+    audit.record("shadow.create", actor=audit.actor_of(request), target=body.name,
+                 detail={"source": body.source_agent, "shadow": body.shadow_agent,
+                         "sample_rate": body.sample_rate},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": row.name, "source_agent": row.source_agent,
+            "shadow_agent": row.shadow_agent, "sample_rate": row.sample_rate,
+            "enabled": row.enabled}
+
+
+@router.get("/shadow-configs")
+def list_shadow_configs(db: Session = fastapi.Depends(get_db)):
+    rows = db.scalars(select(ShadowConfigRecord).order_by(ShadowConfigRecord.id.desc())).all()
+    return [{"name": r.name, "source_agent": r.source_agent, "shadow_agent": r.shadow_agent,
+             "sample_rate": r.sample_rate, "enabled": r.enabled, "note": r.note,
+             "judge": bool(r.judge_criteria), "created_at": str(r.created_at)} for r in rows]
+
+
+@router.patch("/shadow-configs/{name}", dependencies=[fastapi.Depends(require_admin)])
+def patch_shadow_config(name: str, body: ShadowConfigPatch, request: fastapi.Request,
+                        db: Session = fastapi.Depends(get_db)):
+    row = _shadow_config_or_404(db, name)
+    if body.shadow_agent is not None:
+        _agent_exists(db, body.shadow_agent, "影子")
+        row.shadow_agent = body.shadow_agent
+    if body.sample_rate is not None:
+        row.sample_rate = body.sample_rate
+    if body.judge_criteria is not None:
+        row.judge_criteria = body.judge_criteria
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    if body.note is not None:
+        row.note = body.note
+    db.commit()
+    audit.record("shadow.update", actor=audit.actor_of(request), target=name,
+                 detail={"enabled": row.enabled, "sample_rate": row.sample_rate},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": row.name, "enabled": row.enabled, "sample_rate": row.sample_rate}
+
+
+@router.delete("/shadow-configs/{name}", dependencies=[fastapi.Depends(require_admin)])
+def delete_shadow_config(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    row = _shadow_config_or_404(db, name)
+    db.delete(row)  # shadow_runs 保留（历史对比数据不随配置删除）
+    db.commit()
+    audit.record("shadow.delete", actor=audit.actor_of(request), target=name,
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": name, "status": "deleted"}
+
+
+@router.get("/shadow-runs")
+def list_shadow_runs(config: str | None = None, limit: int = 50,
+                     db: Session = fastapi.Depends(get_db)):
+    q = select(ShadowRunRecord).order_by(ShadowRunRecord.id.desc()).limit(min(limit, 200))
+    if config:
+        q = q.where(ShadowRunRecord.config_name == config)
+    rows = db.scalars(q).all()
+    return [{"id": r.id, "config": r.config_name, "trace_id": r.trace_id,
+             "source_agent": r.source_agent, "shadow_agent": r.shadow_agent,
+             "input": r.input_text[:200], "primary_latency_ms": r.primary_latency_ms,
+             "shadow_latency_ms": r.shadow_latency_ms,
+             "shadow_ok": not r.shadow_error, "shadow_error": r.shadow_error,
+             "created_at": str(r.created_at)} for r in rows]
+
+
+@router.get("/shadow-runs/{run_id}")
+def get_shadow_run(run_id: int, db: Session = fastapi.Depends(get_db)):
+    r = db.get(ShadowRunRecord, run_id)
+    if r is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 影子运行 {run_id} 不存在")
+    return {"id": r.id, "config": r.config_name, "trace_id": r.trace_id,
+            "source_agent": r.source_agent, "shadow_agent": r.shadow_agent,
+            "input": r.input_text, "primary_output": r.primary_output,
+            "primary_latency_ms": r.primary_latency_ms, "shadow_output": r.shadow_output,
+            "shadow_latency_ms": r.shadow_latency_ms,
+            "shadow_ok": not r.shadow_error, "shadow_error": r.shadow_error,
+            "created_at": str(r.created_at)}
+
+
+@router.get("/shadow-configs/{name}/report")
+async def shadow_report(name: str, request: fastapi.Request, judge: bool = False,
+                        limit: int = 20, db: Session = fastapi.Depends(get_db)):
+    """影子对比报表（M44-A）：总量/影子成功率/延迟均值与中位数/输出一致率；
+    judge=true 时对最近 N 对成功影子运行做 LLM 裁判评分（两侧分别评，对比通过率）。"""
+    cfg = _shadow_config_or_404(db, name)
+    if judge and not cfg.judge_criteria:
+        raise fastapi.HTTPException(
+            status_code=400, detail="EAP-4000 该配置未设置 judge_criteria（评分标准），无法做裁判对比")
+    rows = db.scalars(select(ShadowRunRecord).where(ShadowRunRecord.config_name == name)
+                      .order_by(ShadowRunRecord.id.desc()).limit(1000)).all()
+    total = len(rows)
+    ok_rows = [r for r in rows if not r.shadow_error]
+    if total == 0:
+        return {"config": name, "source_agent": cfg.source_agent,
+                "shadow_agent": cfg.shadow_agent, "sample_rate": cfg.sample_rate,
+                "report": {"total": 0, "note": "暂无影子运行"}}
+
+    def _avg(vals: list[int]) -> float:
+        return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+    def _p50(vals: list[int]) -> int:
+        return sorted(vals)[len(vals) // 2] if vals else 0
+
+    same = sum(1 for r in ok_rows
+               if (r.shadow_output or "").strip() == (r.primary_output or "").strip())
+    report = {
+        "total": total,
+        "shadow_ok": len(ok_rows),
+        "shadow_fail": total - len(ok_rows),
+        "shadow_fail_rate": round((total - len(ok_rows)) / total, 4) if total else 0.0,
+        "primary_latency_avg_ms": _avg([r.primary_latency_ms for r in ok_rows]),
+        "shadow_latency_avg_ms": _avg([r.shadow_latency_ms for r in ok_rows]),
+        "primary_latency_p50_ms": _p50([r.primary_latency_ms for r in ok_rows]),
+        "shadow_latency_p50_ms": _p50([r.shadow_latency_ms for r in ok_rows]),
+        "exact_match_rate": round(same / len(ok_rows), 4) if ok_rows else 0.0,
+        "exact_match_note": "输出完全一致率（朴素口径，语义等价不计入；语义对比用 judge=true）",
+    }
+    if judge:
+        pairs = ok_rows[: max(1, min(limit, 50))]
+        judge_rows = []
+        for r in pairs:
+            p = await _llm_judge(db, r.input_text, r.primary_output, cfg.judge_criteria)
+            s = await _llm_judge(db, r.input_text, r.shadow_output, cfg.judge_criteria)
+            judge_rows.append({"shadow_run_id": r.id, "primary_judge": p, "shadow_judge": s})
+
+        def _pass_avg(items: list[dict]) -> float:
+            return round(sum(1 for j in items if j.get("passed")) / len(items), 4) if items else 0.0
+
+        report["judge"] = {
+            "criteria": cfg.judge_criteria[:200],
+            "pairs": len(judge_rows),
+            "primary_pass_rate": _pass_avg([j["primary_judge"] for j in judge_rows]),
+            "shadow_pass_rate": _pass_avg([j["shadow_judge"] for j in judge_rows]),
+            "details": judge_rows,
+        }
+        audit.record("shadow.report.judge", actor=audit.actor_of(request), target=name,
+                     detail={"pairs": len(judge_rows)},
+                     trace_id=getattr(request.state, "trace_id", ""))
+    return {"config": name, "source_agent": cfg.source_agent,
+            "shadow_agent": cfg.shadow_agent, "sample_rate": cfg.sample_rate,
+            "report": report}
+
+
+# ---------- 人工抽检（M44-B，L10 评测深化）：任务抽样 → 人工评分 → 报表聚合 ----------
+
+_REVIEW_DIMS = ("correctness", "relevance", "format")
+
+
+class ReviewSampleCreate(BaseModel):
+    task_id: str = Field(min_length=1, description="从 agent.invoke/agent.hitl 任务快照抽样")
+
+
+class ReviewSubmit(BaseModel):
+    scores: dict = Field(default_factory=dict,
+                         description="维度评分，键限 correctness/relevance/format，值 1-5（可只评部分维度）")
+    note: str = Field(default="", max_length=2000)
+
+
+def _review_sample_or_404(db: Session, sample_id: int) -> ReviewSampleRecord:
+    row = db.get(ReviewSampleRecord, sample_id)
+    if row is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 抽检样本 {sample_id} 不存在")
+    return row
+
+
+@router.post("/reviews/sample", dependencies=[fastapi.Depends(require_admin)])
+def sample_review(body: ReviewSampleCreate, request: fastapi.Request,
+                  db: Session = fastapi.Depends(get_db)):
+    """从任务快照抽样进入人工抽检队列（admin+审计 eval.review.sample）。
+
+    仅 agent.invoke/agent.hitl 任务可抽（有 input/output 语义）；同源任务防重复入选。
+    """
+    task = db.get(TaskRecord, body.task_id)
+    if task is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 任务 {body.task_id} 不存在")
+    if task.type not in ("agent.invoke", "agent.hitl"):
+        raise fastapi.HTTPException(status_code=400,
+                                    detail=f"EAP-4000 任务类型 {task.type} 不支持抽检（仅 agent.invoke/agent.hitl）")
+    dup = db.scalar(select(ReviewSampleRecord).where(
+        ReviewSampleRecord.source == "task", ReviewSampleRecord.source_id == task.id))
+    if dup is not None:
+        raise fastapi.HTTPException(status_code=409,
+                                    detail=f"EAP-2002 任务 {task.id} 已在抽检队列（样本 #{dup.id}）")
+    agent = str((task.payload or {}).get("agent") or "")
+    if not agent:
+        raise fastapi.HTTPException(status_code=400, detail="EAP-4000 任务 payload 缺少 agent 字段，无法归属抽检")
+    row = ReviewSampleRecord(
+        agent=agent, source="task", source_id=task.id,
+        input_text=str((task.payload or {}).get("input", ""))[:8000],
+        output_text=str((task.result or {}).get("output", ""))[:8000],
+        sampled_by=audit.actor_of(request))
+    db.add(row)
+    db.commit()
+    audit.record("eval.review.sample", actor=audit.actor_of(request), target=task.id,
+                 detail={"sample_id": row.id, "agent": agent, "state": task.state},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"id": row.id, "agent": row.agent, "source": row.source, "source_id": row.source_id,
+            "status": row.status, "task_state": task.state, "created_at": str(row.created_at)}
+
+
+@router.get("/reviews")
+def list_reviews(status: str | None = None, agent: str | None = None, limit: int = 50,
+                 db: Session = fastapi.Depends(get_db)):
+    q = select(ReviewSampleRecord).order_by(ReviewSampleRecord.id.desc()).limit(min(limit, 200))
+    if status:
+        q = q.where(ReviewSampleRecord.status == status)
+    if agent:
+        q = q.where(ReviewSampleRecord.agent == agent)
+    rows = db.scalars(q).all()
+    return [{"id": r.id, "agent": r.agent, "status": r.status, "source_id": r.source_id,
+             "input": r.input_text[:200], "output": r.output_text[:200],
+             "scores": r.scores, "note": r.note, "reviewed_by": r.reviewed_by,
+             "created_at": str(r.created_at)} for r in rows]
+
+
+@router.get("/reviews/report")
+def review_report(agent: str | None = None, db: Session = fastapi.Depends(get_db)):
+    """人工抽检报表：抽样/评审量 + 各维度均值 + 好评率（全部已评维度均 ≥4 记正向）。"""
+    q = select(ReviewSampleRecord)
+    if agent:
+        q = q.where(ReviewSampleRecord.agent == agent)
+    rows = db.scalars(q).all()
+    reviewed = [r for r in rows if r.status == "reviewed"]
+    def _dim_avg(dim: str) -> float | None:
+        vals = [float(r.scores[dim]) for r in reviewed if dim in (r.scores or {})]
+        return round(sum(vals) / len(vals), 2) if vals else None
+    positive = sum(1 for r in reviewed
+                   if (r.scores or {}) and all(v >= 4 for v in r.scores.values()))
+    return {"agent": agent or "*",
+            "total": len(rows), "reviewed": len(reviewed), "pending": len(rows) - len(reviewed),
+            "avg_scores": {dim: _dim_avg(dim) for dim in _REVIEW_DIMS},
+            "positive_rate": round(positive / len(reviewed), 4) if reviewed else None,
+            "note": "positive_rate=已评样本中全部维度 ≥4 的占比（人工口径，与 LLM 裁判分位不同）"}
+
+
+@router.get("/reviews/{sample_id}")
+def get_review(sample_id: int, db: Session = fastapi.Depends(get_db)):
+    r = _review_sample_or_404(db, sample_id)
+    return {"id": r.id, "agent": r.agent, "status": r.status, "source": r.source,
+            "source_id": r.source_id, "input": r.input_text, "output": r.output_text,
+            "scores": r.scores, "note": r.note, "sampled_by": r.sampled_by,
+            "reviewed_by": r.reviewed_by, "created_at": str(r.created_at),
+            "reviewed_at": str(r.reviewed_at) if r.reviewed_at else None}
+
+
+@router.post("/reviews/{sample_id}/review", dependencies=[fastapi.Depends(require_admin)])
+def submit_review(sample_id: int, body: ReviewSubmit, request: fastapi.Request,
+                  db: Session = fastapi.Depends(get_db)):
+    """提交人工评分（admin+审计 eval.review.submit）：维度键与分值校验，pending → reviewed。"""
+    row = _review_sample_or_404(db, sample_id)
+    if row.status == "reviewed":
+        raise fastapi.HTTPException(status_code=409,
+                                    detail=f"EAP-2002 样本 #{sample_id} 已评审完成（不可重复评审）")
+    scores = {}
+    for dim, val in (body.scores or {}).items():
+        if dim not in _REVIEW_DIMS:
+            raise fastapi.HTTPException(status_code=400,
+                                        detail=f"EAP-4000 未知评分维度 {dim}（限 {'/'.join(_REVIEW_DIMS)}）")
+        if not isinstance(val, (int, float)) or not (1 <= val <= 5):
+            raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 维度 {dim} 分值须为 1-5")
+        scores[dim] = float(val)
+    if not scores:
+        raise fastapi.HTTPException(status_code=400, detail="EAP-4000 scores 至少包含一个维度评分")
+    from datetime import datetime, timezone
+
+    row.scores = scores
+    row.note = body.note
+    row.status = "reviewed"
+    row.reviewed_by = audit.actor_of(request)
+    row.reviewed_at = datetime.now(timezone.utc)
+    db.commit()
+    audit.record("eval.review.submit", actor=audit.actor_of(request), target=f"#{sample_id}",
+                 detail={"agent": row.agent, "scores": scores},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"id": row.id, "status": row.status, "scores": row.scores,
+            "reviewed_by": row.reviewed_by}

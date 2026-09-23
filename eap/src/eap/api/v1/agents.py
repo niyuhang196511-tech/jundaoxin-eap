@@ -186,6 +186,13 @@ async def invoke(
                          "elapsed_ms": int((_time.monotonic() - t0) * 1000)})
     except Exception:
         pass
+    # 影子流量（M44-A）：非交互挂起的完成调用按配置抽样分流到影子 agent（fire-and-forget）
+    if resp.interaction is None:
+        from ...runtime import shadow
+
+        shadow.launch_for(db, name, body, getattr(request.state, "trace_id", None),
+                          getattr(request.state, "tenant_id", None),
+                          primary_output=resp.output, primary_latency_ms=elapsed_ms)
     return resp
 
 
@@ -203,6 +210,8 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
     yield send("start", {"agent": name, "trace_id": trace_id})
     token = policy.set_tenant(getattr(request.state, "tenant_id", None))
     tokens_out = 0
+    final_content = ""  # 影子流量（M44-A）：result 帧捕获的主调用最终输出
+    interaction_result = False  # 交互挂起不触发影子（无完整输出可对比）
     try:
         registered = registry.get(name)  # 未注册 → KeyError → 404
         agent = registered.instance
@@ -216,6 +225,9 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
                             tokens_out += len(data.get("content", ""))
                         if event == "result" and config_version:
                             data = {**data, "config_version": config_version}
+                        if event == "result":
+                            final_content = str(data.get("content") or "")
+                            interaction_result = data.get("interaction") is not None
                         yield send(event, data)
                 except Exception as e:
                     from ...runtime.interaction import InteractionRequested
@@ -250,9 +262,21 @@ async def _stream_invoke(name: str, body: InvokeRequest, request: fastapi.Reques
                 yield send("step", {"step": step})
             yield send("result", resp.model_dump())
             tokens_out = resp.usage.get("tokens_out", 0)
+            if resp.interaction is None:
+                final_content = resp.content
+            else:
+                interaction_result = True
         record_usage(trace_id, getattr(request.state, "tenant_id", 0), kind="agent", model=name,
                      tokens_in=0, tokens_out=max(1, tokens_out // 4),
                      latency_ms=int((_time.monotonic() - t0) * 1000))
+        # 影子流量（M44-A）：流式完成且非交互挂起时按配置抽样分流（fire-and-forget）
+        if final_content and not interaction_result:
+            from ...runtime import shadow
+
+            shadow.launch_for(db, name, body, trace_id,
+                              getattr(request.state, "tenant_id", None),
+                              primary_output=final_content,
+                              primary_latency_ms=int((_time.monotonic() - t0) * 1000))
         # 事件中心（M30）：流式调用完成事件（发射失败不阻断流）
         try:
             from ...runtime.events import emit_event
