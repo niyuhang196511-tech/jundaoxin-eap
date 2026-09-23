@@ -64,6 +64,19 @@ if (info.available) await invoke('install_update', { endpoint, pubkey }); // 成
 - Windows 安装为静默 NSIS（插件自传 `/S`，完成后 `/R` 重启）——调用 install 后
   Promise 不会 resolve（进程在插件内退出），前端应提示"正在安装，即将重启"。
 
+## 5.5 版本更新推送（M43-D，端内自动提醒）
+
+- **触发**：设置页同时配置「更新源地址 + 签名公钥」后启用——首查延迟 2 分钟
+  （不拖慢启动），此后每 4 小时自动 check；
+- **通知**：发现新版本 → 应用内横幅（快捷调用页常驻 + 一键安装按钮）+
+  系统通知（Windows toast，`notify_update` 经 tauri-plugin-notification 直发）；
+- **节流**：同一版本只发一次系统通知（localStorage `harness.lastNotifiedVersion`），
+  安装升级后版本号变化自动恢复提醒；检查静默失败不打扰；
+- **边界（诚实说明）**：推送 = 端内轮询清单（无长连接，更新源为静态托管）；
+  窗口隐藏到托盘时 WebView 定时器可能被节流，检查顺延执行、语义不变；
+  系统通知依赖安装形态（AUMID），开发态可能失败——失败只返回 Err，横幅兜底；
+  **安装始终需用户确认**（横幅/设置页按钮），不做静默自动安装。
+
 ## 6. 常见坑
 
 | 现象 | 原因与处置 |
