@@ -149,27 +149,29 @@ jobs:
       - name: Unit tests (vitest)
         run: pnpm test
       - name: E2E (Playwright)
-        # M51-A 重写（原步骤挂起 1h43m+ 全部 cancelled）：
-        # ① 后端先行就绪——临时 sqlite（lifespan 自动建库+dev 种子：mock-llm/
-        #    dev-key-1/website-faq），curl /health 轮询等待，失败打印后端日志即红；
-        # ② `npx playwright test` 改为 `pnpm exec playwright test`——npx 在包未
-        #    安装时会交互提示等待输入（CI 无 TTY → 无限挂起，疑为 6h 挂起主因）；
-        # ③ 删除 E2E_NO_WEB_SERVER:''：空串在 JS 里 falsy，webServer 分支实际生效
-        #    （与该 env 名义意图相反）。现明确采用「不设置」语义：由
-        #    playwright.config webServer 自动拉起前端 dev(3001) 并等待就绪——与本地
-        #    实跑成功方式一致（后端 8300 + pnpm exec playwright test），且生命周期
-        #    由 playwright 托管（就绪等待/回收），无需手写前端启动与探活。
-        # NEXT_PUBLIC_API_BASE_URL：本地靠 git-ignored 的 .env.local 指向后端，
-        # CI 无该文件 → 编译期注入同值（NEXT_PUBLIC_* 在 dev 编译时内联进 bundle）。
-        timeout-minutes: 20
+        # M51-A 重写 + M51 二轮加固（一轮：CORS env 修复后仍整步骤撞 20min 超时——
+        # annotations 实证 timeout 而非断言红）。三个嫌疑逐一处置：
+        # ① playwright webServer 托管 `pnpm dev`：pnpm 对 next 子进程的 SIGTERM 转发
+        #    不可靠，测试结束后回收阶段存在已知挂起风险 → CI 改自管 dev server
+        #    （nohup + /login 探活），E2E_NO_WEB_SERVER 置真值 "1" 关闭 webServer 分支
+        #    （该 env 的 truthy 语义首次真正生效；旧值 '' 为 falsy 歧义源已删）；
+        # ② Next dev 按需编译：runner 冷启动每路由首访可达数十秒，逐用例撞 60s 超时
+        #    → dev 就绪后 curl 预热全部在用路由，把冷编译移出用例时间预算；
+        # ③ 无阶段可观测性 → 各阶段完成打 ::notice 注解（匿名 API 可读时间线），
+        #    失败打 ::error:: 注解 + 上传前后端日志与 playwright 报告工件。
+        # --reporter=line 紧凑输出；--max-failures=2 早止损。
+        # 后端与 CORS/NEXT_PUBLIC_API_BASE_URL 语义同一轮（本地 git-ignored 的
+        # eap/.env 与 frontend/.env.local 在 CI 均不存在，全部经步骤 env 显式注入）。
+        timeout-minutes: 25
         env:
           NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8300
-          # CORS 必配：本地开发靠 git-ignored 的 eap/.env 放行 3001 跨域，CI 无该文件，
-          # 缺省 cors_origins="" 不挂 CORS 中间件 → 浏览器 3001→8300 全部被拦（M51 实测红因）
+          # CORS 必配：缺省 cors_origins="" 不挂 CORS 中间件 → 浏览器 3001→8300 全拦（M51 一轮实测红因）
           EAP_CORS_ORIGINS: "http://localhost:3001,http://127.0.0.1:3001"
           EAP_DB_URL: sqlite:////tmp/eap-e2e.db
+          E2E_NO_WEB_SERVER: "1"
         run: |
           pnpm exec playwright install --with-deps chromium
+          echo "::notice::E2E phase 1/5 playwright+chromium installed"
           (cd .. && nohup uv run --no-sync python -m eap > /tmp/eap-backend.log 2>&1 &)
           backend_up=0
           for i in $(seq 1 90); do
@@ -177,12 +179,50 @@ jobs:
             sleep 1
           done
           if [ "$backend_up" != "1" ]; then
-            echo "::error::后端 8300 在 90s 内未就绪，日志如下"
-            cat /tmp/eap-backend.log
+            echo "::error::后端 8300 在 90s 内未就绪，日志尾部如下"
+            tail -60 /tmp/eap-backend.log
             exit 1
           fi
-          echo "backend ready after ~${i}s"
-          pnpm exec playwright test
+          echo "::notice::E2E phase 2/5 backend ready after ~${i}s"
+          (nohup pnpm dev -p 3001 > /tmp/eap-frontend.log 2>&1 &)
+          frontend_up=0
+          for i in $(seq 1 180); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3001/login || true)
+            if [ "$code" = "200" ]; then frontend_up=1; break; fi
+            sleep 1
+          done
+          if [ "$frontend_up" != "1" ]; then
+            echo "::error::前端 3001 /login 在 180s 内未就绪，日志尾部如下"
+            tail -60 /tmp/eap-frontend.log
+            exit 1
+          fi
+          echo "::notice::E2E phase 3/5 frontend dev ready after ~${i}s"
+          for p in /agents /evals /gov /conn /models /tasks /audit /kb /assets /extensions /canvas; do
+            curl -s -o /dev/null --max-time 120 "http://localhost:3001$p" || true
+          done
+          echo "::notice::E2E phase 4/5 routes pre-warmed"
+          set +e
+          pnpm exec playwright test --reporter=line --max-failures=2
+          rc=$?
+          set -e
+          echo "::notice::E2E phase 5/5 playwright exit=${rc}"
+          if [ $rc -ne 0 ]; then
+            echo "::error::Playwright 失败（exit ${rc}）——后端日志尾部：$(tail -25 /tmp/eap-backend.log | tr -d '\r' | paste -sd '; ' -)"
+            echo "::error::前端日志尾部：$(tail -25 /tmp/eap-frontend.log | tr -d '\r' | paste -sd '; ' -)"
+            exit $rc
+          fi
+      - name: Upload E2E diagnostics (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics
+          path: |
+            eap/frontend/playwright-report/
+            eap/frontend/test-results/
+            /tmp/eap-backend.log
+            /tmp/eap-frontend.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Build
         run: pnpm build
 
