@@ -182,7 +182,11 @@ def test_non_agent_task_type_no_receipt(client: TestClient):
     asyncio.run(TaskEngine()._notify_done("m40-kb-1", "kb.ingest", "COMPLETED",
                                           {"status": "ok"}))
     time.sleep(0.5)  # 推送窗口：非 agent 任务类型不应有任何出站
-    assert len(SENT) == n
+    # 断言按本用例任务 id 过滤：session 引擎里其他测试的在途任务若在窗口内完成，
+    # 其回执（挂钩不分来源）会进 SENT——与本用例断言无关（M48 实测满载偶发）
+    import json as _json
+    late = [e for e in SENT[n:] if "m40-kb-1" in _json.dumps(e)]
+    assert late == []
 
 
 def test_notify_done_idempotent_event_key(client: TestClient):
@@ -199,7 +203,10 @@ def test_notify_done_idempotent_event_key(client: TestClient):
         pushed2 = asyncio.run(im_out.notify_task_done("m40-idem-1", "agent.invoke",
                                                       "COMPLETED", "已生成 3 条记录", db))
     assert pushed2 == []  # 已 done 的同键投递 → 幂等跳过
-    assert len(SENT) == n
+    # 同上按任务 id 过滤（隔离 session 引擎其他在途任务的回执，M48 实测满载偶发）
+    import json as _json
+    late = [e for e in SENT[n:] if "m40-idem-1" in _json.dumps(e)]
+    assert late == []
     rec = _log_row("done:m40-idem-1:COMPLETED")
     assert rec is not None and rec.status == "done" and rec.attempts == 1
 
