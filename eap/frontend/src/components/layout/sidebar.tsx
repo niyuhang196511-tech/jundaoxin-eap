@@ -55,9 +55,10 @@ export function Sidebar() {
       {/* 导航分组 */}
       <nav className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3">
         {GROUPS.map(group => (
-          <div key={t(group.label)}>
+          <div key={group.label}>
             <p className="px-2 pt-1 pb-1.5 text-[11px] font-medium tracking-wide text-white/35">
-              {group.label}
+              {/* 分组标题必须走 t()——group.label 是词典键（nav.studio 等），直渲会露原始 key */}
+              {t(group.label)}
             </p>
             <div className="space-y-0.5">
               {group.items.map(item => {

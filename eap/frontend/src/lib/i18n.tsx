@@ -9,11 +9,16 @@ import { createContext, useContext } from 'react'
  *   const { t } = useI18n()
  *   t('sidebar.agents')          // 缺失 key 原样返回（增量翻译不阻断）
  *
- * 增量策略：布局壳与登录页已接入；各页面文案迁移按需进行——
- * 词典里加 `en` 条目 + 页面字符串替换为 t('key') 即可。
+ * 增量策略：I18nProvider 已在 app/layout.tsx 全局挂载（M50-D 接线，locale=DEFAULT_LOCALE
+ * 固定 zh，此前组件走 context 默认值兜底）；布局壳与登录页已接入，各页面文案迁移
+ * 按需进行——词典里加 `en` 条目 + 页面字符串替换为 t('key') 即可。
+ * 规约（新增文案必须走 t()）见 eap/frontend/README.md「i18n 规约」。
  */
 
 export type Locale = 'zh' | 'en'
+
+/** 默认语言（M50-D：app/layout.tsx 挂载 I18nProvider 用；切换 UI 属产品决策，未做） */
+export const DEFAULT_LOCALE: Locale = 'zh'
 
 const dict: Record<Locale, Record<string, string>> = {
   zh: {
