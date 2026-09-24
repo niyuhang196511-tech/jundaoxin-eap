@@ -26,6 +26,19 @@ e4a8c2f6b9d1 drop + recreate 全部策略）：
   （recreate_policies_m50a 复用前两者）共用同一套字面量谓词，
   tests/test_rls_coverage.py 设防漂移断言。
 
+M51-C 角色收敛已可启用（策略从「owner 豁免、形同虚设」变为 JWT 通道真实生效）：
+- 迁移 c7e9b2d4f6a8 幂等创建 NOLOGIN 应用角色 eap_app 并授应用级 DML
+  （全量 public 表 SELECT/INSERT/UPDATE/DELETE + 序列 + 默认权限，盘点口径见该迁移
+  docstring——租户隔离交给本文件的 RLS 策略而非表级 GRANT 裁剪）。
+- 启用：设 EAP_DB_APP_ROLE=eap_app 并重启（api/deps.py 的 JWT 通道在 set_config
+  之后同事务内 SET LOCAL ROLE，角色名经 ^[a-z_][a-z0-9_]{0,62}$ 白名单校验；
+  commit/rollback 后自动恢复登录角色，事务级作用域与 GUC 一致）。留空 = 关闭，
+  行为与历史完全一致。
+- 平台身份豁免路径不变：API Key/embed/worker 与 trigger/webhook 引擎的独立会话
+  reload() 仍走登录角色（部署形态 = 表 owner/超级用户，RLS 天然豁免、全量可见）。
+- 本文件仍刻意不用 FORCE ROW LEVEL SECURITY——收敛靠「SET LOCAL ROLE 到非 owner
+  角色」而非「FORCE 到 owner」，平台身份语义零改动（test_rls_behavior 设防）。
+
 安全说明：DDL 全部为逐表静态字面量、内联于 execute 调用（无运行时拼接/格式化/变量传递）——
 PostgreSQL 不支持标识符参数化，静态枚举是 DDL 场景下唯一的零注入面写法。
 

@@ -3,9 +3,16 @@
 - API Key（服务间/控制台）：全量权限
 - 会话令牌 eap_sess_（嵌入外链）：仅限绑定智能体的 invocations（最小权限）
 - 外部 IdP JWT（用户身份，租户系统签发）：JWKS RS256 验签 → claims 映射租户/用户/角色
+
+M51-C RLS 角色收敛：JWT 通道在事务内追加 SET LOCAL ROLE <EAP_DB_APP_ROLE>
+（非 owner 应用角色，迁移 c7e9b2d4f6a8 创建 eap_app），使 M47/M50 的 RLS 策略
+对租户通道真实生效（owner/超级用户默认豁免 → 收敛前策略从不被评估）。
+API Key/embed/worker 路径零改动——平台身份（owner 豁免）不变。
 """
 
 from __future__ import annotations
+
+import re
 
 import fastapi
 from sqlalchemy import select
@@ -18,6 +25,25 @@ from ..modelhub.router import hub
 from ..models import ApiKey, Tenant
 
 security = fastapi.Security(fastapi.security.APIKeyHeader(name="Authorization", auto_error=False))
+
+# M51-C：SET LOCAL ROLE 的角色名白名单。SET ROLE 与 SET 同款不支持绑定参数
+# （psycopg 服务端绑定渲染为 $1 → syntax error，见 resolve_tenant 内 M49-C 注释），
+# 角色名只能以字面量内联进语句——故对配置值做严格校验：仅小写 PG 常规标识符
+# （^[a-z_][a-z0-9_]{0,62}$，≤63 字节 NAMEDATALEN 上限）放行，其余一律拒绝
+# （fail-closed 抛错，绝不静默跳过——静默跳过等于悄悄回退 owner、RLS 失效）。
+# 内联值仅可能是通过校验的配置值本身，对齐 rls.py:29-30 的 DDL 静态字面量纪律（零注入面）。
+_APP_ROLE_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+
+def _set_local_role_sql(role: str) -> str:
+    """构造 JWT 通道的 SET LOCAL ROLE 语句（角色名经 _APP_ROLE_RE 白名单校验）。
+
+    非法角色名抛 ValueError（resolve_tenant 转 500）——配置错误必须显性失败。
+    """
+    if not _APP_ROLE_RE.fullmatch(role):
+        raise ValueError(
+            f"EAP_DB_APP_ROLE 非法: {role!r}（仅允许 ^[a-z_][a-z0-9_]{{0,62}}$）")
+    return f"SET LOCAL ROLE {role}"
 
 
 def _resolve_jwt_tenant(db: Session, claims: dict) -> Tenant | None:
@@ -40,7 +66,17 @@ def resolve_tenant(
 ) -> Tenant:
     """Bearer 凭证三轨：嵌入会话令牌 → API Key → 外部 IdP JWT（资源服务器）。
 
-    JWT 通道把租户写入请求级会话变量（PostgreSQL RLS 行级隔离依据，db.get_db 消费）。
+    JWT 通道把租户写入请求级会话变量（PostgreSQL RLS 行级隔离依据，db.get_db 消费）；
+    M51-C 起当 EAP_DB_APP_ROLE 非空时同事务内追加 SET LOCAL ROLE 收敛为非 owner
+    应用角色（RLS 策略真实生效）。作用域与既有语义（M49-C 登记）：
+
+    - set_config(..., true) 与 SET LOCAL ROLE 均为**事务级**：请求会话 commit/
+      rollback 后一并失效——GUC 在池化连接上残留为 ''（NULLIF 谓词下 fail-closed，
+      迁移 e4a8c2f6b9d1），角色自动恢复为登录角色（部署形态 = 表 owner）。
+    - 因此端点在**同一请求内 commit 之后**的后续查询回到 owner 身份：GUC 丢失且
+      RLS 不再约束（owner 豁免）。这是既有 GUC 语义的自然延伸，本改动如实登记、
+      不扩大改动面（现有端点的 commit 后查询多为审计/用量落库，走独立会话的
+      平台身份路径，本就不受请求事务影响）。
     """
     token = None
     if authorization and authorization.lower().startswith("bearer "):
@@ -109,6 +145,22 @@ def resolve_tenant(
 
                 db.execute(_text("SELECT set_config('eap.tenant_id', :t, true)"),
                            {"t": str(tenant.id)})
+                # M51-C RLS 角色收敛：EAP_DB_APP_ROLE 非空时同事务内 SET LOCAL ROLE
+                # 收敛为非 owner 应用角色（迁移 c7e9b2d4f6a8 创建 eap_app 并授应用级
+                # DML）——owner/超级用户对 RLS 默认豁免，收敛前策略从不被评估；收敛后
+                # JWT 租户通道按上方 GUC 真实过滤。事务级作用域（commit/rollback 后
+                # 恢复登录角色），与 set_config(..., true) 生命周期一致；commit 后的
+                # 同请求后续查询回到 owner（RLS 不约束），既有 GUC 语义的如实延伸，
+                # 见 resolve_tenant docstring。角色名白名单校验见 _APP_ROLE_RE——
+                # SET ROLE 不支持绑定参数，只能字面量内联（零注入面纪律同 rls.py）。
+                app_role = get_settings().db_app_role
+                if app_role:
+                    try:
+                        role_sql = _set_local_role_sql(app_role)
+                    except ValueError as e:
+                        raise fastapi.HTTPException(
+                            status_code=500, detail=f"EAP-1005 {e}") from e
+                    db.execute(_text(role_sql))
             return tenant
 
     raise fastapi.HTTPException(status_code=401, detail="EAP-1001 无效 API Key")

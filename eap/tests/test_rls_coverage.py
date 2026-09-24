@@ -19,6 +19,16 @@ M50-A 增补：策略谓词统一 NULLIF(current_setting('eap.tenant_id', true),
 （防池化连接 GUC '' 残留抛错，M49-C 实测）；本文件 pin 断言同步为 NULLIF 形态，
 并新增「运行时启用路径与迁移 e4a8c2f6b9d1 产出同一套谓词」的防漂移断言
 （_Recorder 离线执行比对，含 downgrade 旧谓词恢复的表集对应）。
+
+M51-C 增补（防线 3：角色收敛静态防线，SQLite 也须绿）：
+- 迁移 c7e9b2d4f6a8 源码断言——eap_app NOLOGIN 角色幂等创建（pg_roles 守卫）、
+  应用级 DML GRANT（表/序列/schema/默认权限）、方言守卫、downgrade 对称回收
+  （成员关系 → DROP OWNED → DROP ROLE）与迁移链单头衔接；
+- deps.py 源码断言——SET LOCAL ROLE 位于 set_config('eap.tenant_id', ...) 之后、
+  postgresql 方言守卫之内，且经 _APP_ROLE_RE 白名单校验（SET ROLE 不支持绑定
+  参数，角色名字面量内联必须先过 ^[a-z_][a-z0-9_]{0,62}$）；
+- 白名单校验函数的行为级单测（合法角色名 → 静态字面量语句；注入形态一律 ValueError）。
+PG 行为实测（HTTP 全链路 + '' 残留组合）见 tests/test_rls_behavior.py 的 M51-C 段。
 """
 
 from __future__ import annotations
@@ -26,8 +36,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 _EAP_DIR = Path(__file__).resolve().parents[1]  # eap/（alembic.ini、migrations/ 所在）
 _RLS_SRC = _EAP_DIR / "src" / "eap" / "observability" / "rls.py"
+_DEPS_SRC = _EAP_DIR / "src" / "eap" / "api" / "deps.py"
+_M51C_MIGRATION = _EAP_DIR / "migrations" / "versions" / "c7e9b2d4f6a8_rls_app_role.py"
 
 
 # ---------- 防线 1：元数据覆盖（有 tenant_id 列的表 ∈ RLS ∪ 豁免） ----------
@@ -243,13 +257,13 @@ def test_migration_rls_upgrade_head_on_fresh_sqlite(tmp_path):
 
 
 def test_migration_rls_downgrade_then_upgrade_roundtrip(tmp_path):
-    """head → downgrade -1（回 M47-A 前一版）→ upgrade head：PG-only DDL 在 SQLite
+    """head → downgrade -1（回 head 前一版）→ upgrade head：PG-only DDL 在 SQLite
     上下行均为 no-op，链路可逆。"""
     from alembic.script import ScriptDirectory
 
     sd = ScriptDirectory(str(_EAP_DIR / "migrations"))
     head = str(sd.get_heads()[0])
-    prev = str(sd.get_revision(head).down_revision)  # M47-A 的父版本
+    prev = str(sd.get_revision(head).down_revision)  # head 的父版本
 
     db_path = tmp_path / "mig-rls.db"
     _alembic(tmp_path, "upgrade", "head")
@@ -260,3 +274,71 @@ def test_migration_rls_downgrade_then_upgrade_roundtrip(tmp_path):
 
     _alembic(tmp_path, "upgrade", "head")
     assert _version(db_path) == head
+
+
+# ---------- M51-C 防线 3：角色收敛（迁移 DDL / deps.py SET LOCAL ROLE 静态断言） ----------
+
+def test_m51c_migration_creates_app_role_with_grants():
+    """迁移 c7e9b2d4f6a8 源码断言：eap_app NOLOGIN 角色幂等创建 + 应用级 DML GRANT
+    全量存在（表/序列/schema/默认权限），方言守卫与 downgrade 对称回收齐备。
+    行为实测（GRANT 完整性门禁）见 test_rls_behavior.py 的 HTTP 全链路用例。"""
+    from alembic.script import ScriptDirectory
+
+    # 迁移链衔接：接 M50-A head（e4a8c2f6b9d1），单头线性（多头即红）
+    sd = ScriptDirectory(str(_EAP_DIR / "migrations"))
+    assert len(sd.get_heads()) == 1, f"迁移链多头: {sd.get_heads()}"
+    assert str(sd.get_revision("c7e9b2d4f6a8").down_revision) == "e4a8c2f6b9d1"
+
+    src = _M51C_MIGRATION.read_text(encoding="utf-8")
+    # 方言守卫（SQLite no-op，upgrade/downgrade 两侧）
+    assert src.count('dialect.name != "postgresql"') == 2, "upgrade/downgrade 均须方言守卫"
+    # 幂等建角色：pg_roles 不存在才 CREATE（DO $$ 块），NOLOGIN
+    assert "pg_roles WHERE rolname = 'eap_app'" in src
+    assert "CREATE ROLE eap_app NOLOGIN" in src
+    # GRANT 盘点结论的落地（应用级 DML 全量；租户隔离交给 RLS 而非表级裁剪）
+    assert "GRANT USAGE ON SCHEMA public TO eap_app" in src
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO eap_app" in src
+    assert "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO eap_app" in src
+    # 未来新建表/序列自动携带同款授权（防后续建表迁移漏 GRANT → 运行时 42501）
+    assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public" in src
+    # downgrade 对称回收：成员关系遍历 + 对象归属防御检查 + DROP OWNED + DROP ROLE
+    for stmt in ("pg_auth_members", "REVOKE eap_app FROM", "relowner = 'eap_app'::regrole",
+                 "DROP OWNED BY eap_app", "DROP ROLE eap_app"):
+        assert stmt in src, f"downgrade 缺少 {stmt!r}（回收不完整会阻塞 DROP ROLE 或残留授权）"
+
+
+def test_m51c_deps_set_local_role_after_set_config_with_whitelist():
+    """deps.py 源码断言：JWT 通道的 SET LOCAL ROLE 必须
+    ① 在 postgresql 方言守卫之内、② 位于 set_config('eap.tenant_id', ...) 之后
+    （先设 GUC 再收敛角色，与迁移 c7e9b2d4f6a8 的授权配套）、
+    ③ 经 settings.db_app_role 开关（空 = 关闭，向后兼容）、
+    ④ 角色名过 _APP_ROLE_RE 白名单（SET ROLE 不支持绑定参数，字面量内联的唯一
+    零注入面写法——对齐 rls.py 的 DDL 静态字面量纪律）。"""
+    src = _DEPS_SRC.read_text(encoding="utf-8")
+    i_dialect = src.index('dialect.name == "postgresql"')
+    i_set_config = src.index("set_config('eap.tenant_id', :t, true)")
+    i_gate = src.index("get_settings().db_app_role")
+    i_role = src.index("_set_local_role_sql(app_role)")
+    assert i_dialect < i_set_config < i_gate < i_role, (
+        "SET LOCAL ROLE 必须在 postgresql 守卫内、set_config 之后、经 db_app_role 开关")
+    # 白名单正则与 SET LOCAL ROLE 字面量构造同在 deps.py（防校验被绕过/正则被弱化）
+    assert r're.compile(r"^[a-z_][a-z0-9_]{0,62}$")' in src
+    # 语句构造点唯一（仅 _set_local_role_sql 一处内联角色名；API Key/embed/worker 路径零改动）
+    assert src.count('return f"SET LOCAL ROLE {role}"') == 1
+
+
+def test_m51c_app_role_whitelist_validation_behavior():
+    """白名单校验的行为级单测：合法 PG 常规标识符 → 静态字面量语句；
+    大写/连字符/空格/分号注入/数字开头/超长（>63 字节 NAMEDATALEN）/空串一律 ValueError
+    （fail-closed，resolve_tenant 转 500——绝不静默跳过回退 owner）。"""
+    from eap.api.deps import _set_local_role_sql
+
+    assert _set_local_role_sql("eap_app") == "SET LOCAL ROLE eap_app"
+    assert _set_local_role_sql("_a1") == "SET LOCAL ROLE _a1"
+    assert _set_local_role_sql("a" * 63) == f"SET LOCAL ROLE {'a' * 63}"
+
+    for bad in ("", "EAP_APP", "eap-app", "eap app", "1eap", "eap;DROP ROLE x",
+                "eap_app--", "a" * 64, "eap\napp", "eap.app", '"eap_app"',
+                "eap_app TO PUBLIC"):
+        with pytest.raises(ValueError):
+            _set_local_role_sql(bad)

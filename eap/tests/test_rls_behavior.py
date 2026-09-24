@@ -34,15 +34,27 @@
   test_empty_guc_residue_* 为该修复的行为级回归（'' 残留下不抛错 + 只见平台/共享行）。
 - 「GUC 真未设置（NULL）」的 fail-closed 断言仍用 NullPool 全新会话 + 已提交探针数据
   （用后即删）；其余断言全部在事务内完成并回滚，对共享测试库零残留。
+
+M51-C 增补（角色收敛：EAP_DB_APP_ROLE=eap_app，迁移 c7e9b2d4f6a8 建角色）：
+- HTTP 全链路门禁：真实 TestClient + JWT 凭证 + db_app_role=eap_app——JWT 通道在
+  收敛角色下列表跨租户不可见 / 写入成功且按租户隔离 / 非 RLS 表端点正常，且无
+  403/500（迁移 GRANT 盘点完整性的行为门禁）；API Key 通道对照全见（owner 豁免）。
+- '' 残留 GUC × SET LOCAL ROLE eap_app 组合：M50-A NULLIF 语义在收敛后仍成立
+  （不抛错、fail-closed），且 SET LOCAL 事务结束后自动恢复登录角色。
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 from sqlalchemy import create_engine, text as sa_text
 from sqlalchemy.pool import NullPool
 
 from eap.db import engine
+
+from .conftest import AUTH
+from .test_oidc import _jwks, _make_id_token  # 复用模拟 IdP 的签名密钥/JWKS（函数级复用）
 
 pytestmark = pytest.mark.skipif(
     engine.dialect.name != "postgresql",
@@ -337,3 +349,223 @@ def test_empty_guc_residue_policies_platform_default(residue_conn):
     不抛错，且仍见 tenant_id=0 平台默认行、不见租户 A 行——平台默认回退语义
     （runtime/policy.py::_policies_for）在池化连接残留状态下保持不变。"""
     assert _rows(residue_conn, "policies", "name", _RS_PREFIX) == {_RS_POLICY_PLATFORM}
+
+
+# ---------- M51-C：角色收敛（eap_app）——'' 残留组合 + HTTP 全链路门禁 ----------
+
+_APP_ROLE = "eap_app"
+
+# '' 残留 × SET LOCAL ROLE 组合专用（须提交才对 NullPool 新连接可见；用后即删）
+_RA_POLICY_A, _RA_POLICY_PLATFORM = "rls-probe-ra-pol-a", "rls-probe-ra-pol-platform"
+_RA_TRIG_A, _RA_TRIG_SHARED = "rls-probe-ra-trig-a", "rls-probe-ra-trig-shared"
+_RA_HOOK_A, _RA_HOOK_SHARED = "rls-probe-ra-hook-a", "rls-probe-ra-hook-shared"
+_RA_PREFIX = "rls-probe-ra-%"
+
+# HTTP 全链路专用（API 写入 + 直插播种均带前缀；fixture  teardown 全删，零残留）
+_HTTP_POLICY_A, _HTTP_POLICY_B = "rls-m51c-pol-a", "rls-m51c-pol-b"
+_HTTP_TRIG_A = "rls-m51c-trig-a"
+_HTTP_PREFIX = "rls-m51c-%"
+_HTTP_TENANT_B_ID = 990102  # 显式高位 id（tenants 序列在低位，避免撞号；用后即删）
+_ISSUER = "https://idp.example"  # 与 test_oidc.fake_idp 的 issuer 一致
+
+
+def _require_app_role() -> None:
+    """前置：迁移 c7e9b2d4f6a8 已建 eap_app 角色（client 夹具的 lifespan upgrade head 落实）。"""
+    with engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": _APP_ROLE}).scalar(), (
+            "缺少 eap_app 角色：测试库未经 alembic upgrade 到迁移 c7e9b2d4f6a8"
+            "（stamp head 对齐路径不执行迁移 DDL）")
+
+
+def test_empty_guc_residue_with_set_local_app_role():
+    """M51-C 组合回归：'' 残留 GUC × SET LOCAL ROLE eap_app（= 收敛后 JWT 通道在
+    池化连接上的真实状态）——M50-A NULLIF 语义在角色收敛下仍成立：查询不抛错
+    （旧谓词此处 InvalidTextRepresentation）、租户 A 行不可见、平台默认/共享行可见；
+    且 SET LOCAL 为事务级——commit 后自动恢复登录角色（与 set_config(...,true) 同生命周期）。"""
+    _require_app_role()
+    with engine.begin() as conn:  # 平台身份播种（提交，对 NullPool 新连接可见）
+        conn.execute(_INSERT_POLICY, {"n": _RA_POLICY_A, "t": _TENANT_A})
+        conn.execute(_INSERT_POLICY, {"n": _RA_POLICY_PLATFORM, "t": 0})
+        conn.execute(_INSERT_TRIGGER, {"n": _RA_TRIG_A, "t": _TENANT_A,
+                                       "ev": "rls.probe.none"})
+        conn.execute(_INSERT_TRIGGER, {"n": _RA_TRIG_SHARED, "t": None,
+                                       "ev": "rls.probe.none"})
+        conn.execute(_INSERT_HOOK, {"n": _RA_HOOK_A, "t": _TENANT_A,
+                                    "evs": '["rls.probe.none"]'})
+        conn.execute(_INSERT_HOOK, {"n": _RA_HOOK_SHARED, "t": None,
+                                    "evs": '["rls.probe.none"]'})
+    fresh = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with fresh.connect() as c:
+            login_user = c.execute(sa_text("SELECT current_user")).scalar()
+            c.commit()  # 结束 autobegin 事务（后续 begin() 须显式开启）
+            with c.begin():  # 事务内 set_config → 提交，制造 '' 残留（M49-C 实测行为）
+                c.execute(sa_text("SELECT set_config('eap.tenant_id', '1', true)"))
+            assert c.execute(sa_text(  # 此查询 autobegin 一个只读事务
+                "SELECT current_setting('eap.tenant_id', true)")).scalar() == "", \
+                "前置条件失效：事务结束后 GUC 应残留为 ''（M49-C 实测行为）"
+            c.commit()  # 结束 autobegin 事务（'' 残留为会话级状态，不受影响）
+            with c.begin():  # 收敛后 JWT 通道状态：SET LOCAL ROLE，不再新设 GUC
+                c.execute(sa_text(f"SET LOCAL ROLE {_APP_ROLE}"))
+                assert c.execute(sa_text("SELECT current_user")).scalar() == _APP_ROLE
+                assert _rows(c, "policies", "name", _RA_PREFIX) == {_RA_POLICY_PLATFORM}
+                assert _rows(c, "trigger_rules", "name", _RA_PREFIX) == {_RA_TRIG_SHARED}
+                assert _rows(c, "webhook_endpoints", "name", _RA_PREFIX) == {_RA_HOOK_SHARED}
+            # 事务结束（commit）后 SET LOCAL 自动恢复登录角色——事务级作用域语义
+            assert c.execute(sa_text("SELECT current_user")).scalar() == login_user
+            c.commit()  # 收尾 autobegin 事务（NullPool 连接随即关闭，零残留）
+    finally:
+        fresh.dispose()
+        with engine.begin() as conn:  # 清理已提交探针数据（用后即删，零残留）
+            for table in ("policies", "trigger_rules", "webhook_endpoints"):
+                conn.execute(sa_text(
+                    f'DELETE FROM "{table}" WHERE name LIKE :p'), {"p": _RA_PREFIX})
+
+
+@pytest.fixture()
+def fake_idp_m51c(monkeypatch):
+    """模拟 IdP 最小注入（test_oidc.fake_idp 的本地等价版）。
+
+    不复用导入再导出：本文件不在 pyproject per-file-ignores 的 F811 豁免清单，
+    `from .test_oidc import fake_idp` + 测试参数同名会被 ruff 报 F811（误报场景）。
+    access token 验签只需 issuer 配置 + JWKS 端点（_http_get），签名密钥复用
+    test_oidc._jwks()（与 _make_id_token 同一把 RSA 密钥）。
+    """
+    from eap.config import get_settings
+    from eap.runtime import oidc as oidc_rt
+
+    monkeypatch.setenv("EAP_OIDC_ISSUER", _ISSUER)
+    monkeypatch.setenv("EAP_OIDC_CLIENT_ID", "eap-console")
+    get_settings.cache_clear()
+
+    def fake_get(url: str) -> dict:
+        if url.endswith("/.well-known/openid-configuration"):
+            return {"issuer": _ISSUER,
+                    "authorization_endpoint": f"{_ISSUER}/authorize",
+                    "token_endpoint": f"{_ISSUER}/token",
+                    "jwks_uri": f"{_ISSUER}/jwks"}
+        if url.endswith("/jwks"):
+            return _jwks()
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(oidc_rt, "_http_get", fake_get)
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture()
+def app_role_env(monkeypatch):
+    """启用收敛：EAP_DB_APP_ROLE=eap_app（env + get_settings.cache_clear，与 fake_idp
+    同款模式；teardown 恢复 settings 缓存，monkeypatch 自动还原 env）。"""
+    from eap.config import get_settings
+
+    _require_app_role()
+    monkeypatch.setenv("EAP_DB_APP_ROLE", _APP_ROLE)
+    get_settings.cache_clear()
+    yield _APP_ROLE
+    get_settings.cache_clear()
+
+
+@pytest.fixture()
+def http_seed():
+    """HTTP 全链路播种（须提交才跨请求可见；teardown 全删 + 恢复 settings，零残留）。
+
+    租户 A = 种子 dev 租户（动态取 id，不硬编码）；租户 B = 显式高位 id 直插。
+    policies 直插（A 租户行 + B 租户行）；trigger 经 API 写入（顺路验证写路径）。
+    """
+    with engine.begin() as conn:
+        tenant_a = conn.execute(sa_text(
+            "SELECT id FROM tenants WHERE name = 'dev'")).scalar()
+        assert tenant_a is not None, "种子 dev 租户缺失（seed.run 未执行？）"
+        conn.execute(sa_text(
+            "INSERT INTO tenants (id, name, created_at) VALUES (:i, :n, now())"),
+            {"i": _HTTP_TENANT_B_ID, "n": "rls-m51c-tenant-b"})
+        conn.execute(_INSERT_POLICY, {"n": _HTTP_POLICY_A, "t": tenant_a})
+        conn.execute(_INSERT_POLICY, {"n": _HTTP_POLICY_B, "t": _HTTP_TENANT_B_ID})
+    yield tenant_a
+    with engine.begin() as conn:  # 清理：API 写入 + 直插播种 + 落库审计 + 租户 B
+        for table in ("trigger_rules", "policies"):
+            conn.execute(sa_text(
+                f'DELETE FROM "{table}" WHERE name LIKE :p'), {"p": _HTTP_PREFIX})
+        conn.execute(sa_text(
+            'DELETE FROM audit_logs WHERE target LIKE :p'), {"p": _HTTP_PREFIX})
+        conn.execute(sa_text(
+            "DELETE FROM tenants WHERE id = :i"), {"i": _HTTP_TENANT_B_ID})
+
+
+def _jwt(tenant_id: int, roles: list[str] | None = None) -> dict:
+    """JWT 请求头（claims 形态照 test_jwt_auth._access_token；fake_idp 验签）。"""
+    token = _make_id_token({"iss": _ISSUER, "sub": f"m51c-user-{tenant_id}",
+                            "exp": int(time.time()) + 600,
+                            "tenant_id": tenant_id, "roles": roles or ["admin"]})
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_http_jwt_channel_rls_enforced_under_app_role(client, fake_idp_m51c, app_role_env, http_seed):
+    """M51-C HTTP 全链路门禁（GRANT 盘点完整性的行为防线）：EAP_DB_APP_ROLE=eap_app
+    下真实 TestClient 走 JWT 通道——
+
+    ① RLS 表列表端点跨租户不可见（GET /policies：A 见 A 行不见 B 行，B 对称）；
+    ② 写入端点成功且按租户隔离（POST /triggers 200 → A 列表可见、B 不可见）；
+    ③ 非 RLS 表端点正常（GET /agents，无 tenant_id 列，收敛角色下 200）；
+    ④ API Key 通道对照全见（平台身份 = owner 豁免，A+B 行均可见）。
+
+    全部请求断言 200——收敛角色缺任何一张触达表的 GRANT 都会以 403/500 红在这里。
+    """
+    tenant_a = http_seed
+    hdr_a, hdr_b = _jwt(tenant_a), _jwt(_HTTP_TENANT_B_ID)
+
+    # ① RLS 表列表端点：policies 特例（本租户 OR tenant_id=0），跨租户零泄露
+    r = client.get("/api/v1/policies", headers=hdr_a)
+    assert r.status_code == 200, r.text
+    names_a = {p["name"] for p in r.json()}
+    assert _HTTP_POLICY_A in names_a and _HTTP_POLICY_B not in names_a
+    r = client.get("/api/v1/policies", headers=hdr_b)
+    assert r.status_code == 200, r.text
+    names_b = {p["name"] for p in r.json()}
+    assert _HTTP_POLICY_B in names_b and _HTTP_POLICY_A not in names_b
+
+    # ② 写入端点：租户 A admin JWT 建 trigger（tenant_id=本租户，过 WITH CHECK）
+    r = client.post("/api/v1/triggers", headers=hdr_a, json={
+        "name": _HTTP_TRIG_A, "tenant_id": tenant_a, "source": "event",
+        "event_type": "rls.probe.none",  # 无害事件类型（不被引擎执行，同 fail-closed 探针先例）
+        "target_type": "agent", "target_name": "faq"})
+    assert r.status_code == 200, r.text
+    r = client.get("/api/v1/triggers", headers=hdr_a)
+    assert r.status_code == 200, r.text
+    assert _HTTP_TRIG_A in {t["name"] for t in r.json()}
+    r = client.get("/api/v1/triggers", headers=hdr_b)
+    assert r.status_code == 200, r.text
+    assert _HTTP_TRIG_A not in {t["name"] for t in r.json()}
+
+    # ③ 非 RLS 表端点（agents 无 tenant_id 列）：收敛角色下正常
+    r = client.get("/api/v1/agents", headers=hdr_a)
+    assert r.status_code == 200, r.text
+
+    # ④ API Key 通道对照：平台身份（owner 豁免）不受 RLS 约束，A+B 全见
+    r = client.get("/api/v1/policies", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert {_HTTP_POLICY_A, _HTTP_POLICY_B} <= {p["name"] for p in r.json()}
+    r = client.get("/api/v1/triggers", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert _HTTP_TRIG_A in {t["name"] for t in r.json()}
+
+
+def test_http_cross_tenant_write_blocked_by_rls(client, fake_idp_m51c, app_role_env, http_seed):
+    """M51-C 收敛红利（RLS WITH CHECK 真实生效的证明）：租户 B 的 admin JWT 试图
+    写入 tenant_id=A 的 trigger——收敛前（owner 身份）会成功造成跨租户写入；
+    收敛后策略 WITH CHECK 拒绝：PG 抛 "new row violates row-level security policy"
+    （42501，SQLAlchemy 包为 DBAPIError；应用无全局异常处理器 → TestClient
+    raise_server_exceptions 原样上抛），数据零落库。"""
+    from sqlalchemy.exc import DBAPIError
+
+    tenant_a = http_seed
+    with pytest.raises(DBAPIError) as ei:
+        client.post("/api/v1/triggers", headers=_jwt(_HTTP_TENANT_B_ID), json={
+            "name": "rls-m51c-trig-x", "tenant_id": tenant_a, "source": "event",
+            "event_type": "rls.probe.none", "target_type": "agent", "target_name": "faq"})
+    assert "row-level security" in str(ei.value)
+    with engine.connect() as conn:  # 零落库（跨租户写入被策略拒绝）
+        assert conn.execute(sa_text(
+            "SELECT count(*) FROM trigger_rules WHERE name = 'rls-m51c-trig-x'")).scalar() == 0

@@ -34,6 +34,55 @@ cd eap && uv run alembic upgrade head
 
 存量库首次接入 Alembic：`alembic stamp head`（对齐版本号，不改动数据）。
 
+### 2.1 RLS 角色收敛（M51-C，`EAP_DB_APP_ROLE`）
+
+背景：应用以 postgres 初始用户（`POSTGRES_USER=eap`，建表 owner/超级用户）连接时，
+PostgreSQL 对 owner/超级用户默认豁免 RLS——11 张表的 `tenant_isolation` 策略建而不评。
+迁移 `c7e9b2d4f6a8` 创建 NOLOGIN 应用角色 `eap_app` 并授应用级 DML（全量 public 表
+SELECT/INSERT/UPDATE/DELETE + 序列 + 默认权限；租户隔离由 RLS 策略承担，不做表级裁剪）。
+`EAP_DB_APP_ROLE=eap_app` 时 **JWT 租户通道**在请求事务内 `SET LOCAL ROLE eap_app`，
+RLS 真实生效；API Key/embed/worker/触发器与 webhook 引擎保持平台身份（owner 豁免）不变。
+
+启用步骤：
+
+```bash
+# 1) 先跑迁移（建角色 + 授权；compose 形态由 eap-migrate 服务自动执行）
+cd eap && uv run alembic upgrade head
+
+# 2) .env.prod 设置（deploy/.env.example.prod 已有条目）
+#    EAP_DB_APP_ROLE=eap_app
+
+# 3) 重启后端使配置生效
+docker compose -f deploy/docker-compose.prod.yml up -d eap worker
+
+# 4) 验证：以 eap_app 身份跨租户 SELECT 应为空（fail-closed），设 GUC 后只见本租户行
+docker exec -it eap-postgres-1 psql -U eap -d eap -c "
+  BEGIN;
+  SET LOCAL ROLE eap_app;
+  SELECT count(*) FROM policies;                       -- 仅 tenant_id=0 平台默认行
+  SELECT set_config('eap.tenant_id', '1', true);
+  SELECT count(*) FROM policies WHERE tenant_id = 1;   -- 只见租户 1 的行
+  ROLLBACK;"
+# 应用侧冒烟：JWT（租户 A）GET /api/v1/policies 不见租户 B 的行；API Key 通道全见。
+```
+
+回滚：`EAP_DB_APP_ROLE=`（置空）+ 重启即回退 owner 豁免路径，无需回退迁移；
+彻底移除角色走 `alembic downgrade -1`（REVOKE 成员关系 → DROP OWNED → DROP ROLE）。
+
+托管 RDS/Cloud SQL 注意事项：迁移以登录主用户执行时会自动 `CREATE ROLE eap_app`
+并 `GRANT eap_app TO <登录用户>`（非超级用户 `SET ROLE` 需要成员身份；该句尽力而为，
+失败仅 NOTICE）。若组织策略禁止应用迁移建角色，请 DBA 预先手工执行：
+`CREATE ROLE eap_app NOLOGIN;` + 迁移同款 GRANT（见 `eap/migrations/versions/c7e9b2d4f6a8_rls_app_role.py`）
++ `GRANT eap_app TO <应用登录用户>;`——迁移幂等，角色已存在即跳过创建。
+
+既有语义如实说明（commit 后 RLS 约束回退）：`SET LOCAL ROLE` 与
+`set_config('eap.tenant_id', ..., true)` 同为**事务级**——请求内一旦 `commit`，
+角色自动恢复登录角色（owner）、GUC 在池化连接上残留为 `''`；同一请求 commit 之后的
+后续查询**不再受 RLS 约束**（与 M49-C 登记的 GUC 丢失语义一致，策略谓词已 NULLIF
+加固为 fail-closed 不抛错）。现有端点的 commit 后落库（审计/用量）走独立会话的平台
+身份路径，不受影响；新端点若在 JWT 通道 commit 后仍需租户隔离查询，应在新事务内
+重设 GUC 或拆分为独立请求。
+
 ## 3. 备份
 
 ### PostgreSQL（全量数据：任务/知识库元数据/chunk/用量）
