@@ -1,22 +1,55 @@
-# EAP 可观测栈样例（M47-C，P1 #23 日志聚合 + #24 仪表盘资产）：
-# Loki（日志聚合）+ Promtail（采 Docker 容器日志）+ Grafana（仪表盘，含 eap-dashboard.json）
-# + Alertmanager（prometheus-alerts.yml 告警的路由/静默）。
+# EAP 可观测栈样例（M47-C 建栈；M49-D 补 Prometheus + Loki 生产调优）：
+# Prometheus（抓 eap /metrics，加载 deploy/prometheus-alerts.yml 规则并推 Alertmanager）
+# + Loki（日志聚合，自定义 loki-config.yml：30d 保留 + 限额 + compactor 清理）
+# + Promtail（采 Docker 容器日志）+ Grafana（仪表盘 eap-dashboard.json，数据源已预置
+# prometheus:9090）+ Alertmanager（告警路由/分组/抑制）。
 #
-# 用法（与 docker-compose.prod.yml 同网或独立栈均可；独立栈示例）：
-#   docker compose -f docker-compose.observability.yml up -d
+# 用法（前提：后端栈已起——见下方 networks 注释的 external network 说明）：
+#   docker compose -f deploy/docker-compose.prod.yml --env-file .env.prod up -d   # 生产栈先起
+#   docker compose -f deploy/observability/docker-compose.observability.yml up -d
+#   开发栈改用：EAP_BACKEND_NETWORK=eap_default docker compose -f deploy/observability/... up -d
 #   Grafana http://localhost:3300 （admin/admin，首次登录改密）→ 导入 grafana-dashboard-eap.json
-# Prometheus 抓取后端 /metrics（deploy/docker-compose.prod.yml 的 eap 服务已暴露 8300）——
-# 若 Prometheus 不在本栈，需在其 scrape_configs 指向 eap:8300。
-# 诚实说明：这是最小可用样例（单副本、本地卷），生产需按规模调保留期（Loki 默认 15d）与存储。
+#   Prometheus http://localhost:9090（targets/rules）、Alertmanager http://localhost:9093
+#   联调步骤与占位 receiver 换真实通知渠道：docs/11-production-runbook.md §9.5。
+# 诚实说明：这是最小可用样例（单副本、本地卷）；保留期/限额已按 30d 量级调优
+# （loki-config.yml 头注释），更大规模需按磁盘与查询量再调，或换对象存储/微服务模式。
 
 services:
+  prometheus:
+    # 与 alertmanager v0.27.0 同代的 Prometheus 2.x LTS（2024 线）
+    image: prom/prometheus:v2.54.1
+    ports:
+      # 生产加固可整段注释关闭宿主暴露：Grafana 数据源（prometheus:9090）与
+      # alertmanager 推送都走栈内网络，不依赖宿主端口；临时排障再放开或用 ssh 隧道
+      - "9090:9090"
+    volumes:
+      # 主配置与规则文件都在 deploy/ 下（compose 相对路径以本文件所在目录为基准）：
+      #   ../prometheus.yml 的 rule_files 指向 /etc/prometheus/rules/*.yml，与下方挂载一致
+      - ../prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus-alerts.yml:/etc/prometheus/rules/prometheus-alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d   # TSDB 保留与 Loki 日志保留（30d）对齐
+      - --web.enable-lifecycle              # 允许 POST /-/reload 热加载配置/规则（联调用）
+    networks:
+      - default          # 栈内：推 alertmanager:9093、被 grafana 数据源访问
+      - eap-backend      # 后端栈 external 网络：按服务名抓 eap:8300（见 networks 注释）
+    depends_on:
+      - alertmanager
+    restart: unless-stopped
+
   loki:
     image: grafana/loki:3.2.0
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
     volumes:
+      # M49-D：改挂自定义配置（原用镜像内置 local-config.yaml——无显式限额、
+      # retention_period=0s 永久保留且 compactor 不清理；调优项与理由见该文件头注释）
+      - ./loki-config.yml:/etc/loki/config.yaml:ro
       - loki-data:/loki
+    command: -config.file=/etc/loki/config.yaml
     restart: unless-stopped
 
   promtail:
@@ -51,6 +84,18 @@ services:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: unless-stopped
 
+networks:
+  # 后端栈网络（external，跨 compose 项目接法）——prometheus 借此按服务名抓 eap:8300：
+  #   生产栈 deploy/docker-compose.prod.yml 声明 name: eap-prod → 默认网络 eap-prod_default；
+  #   开发栈 eap/docker-compose.yml → 网络 eap_default（用 EAP_BACKEND_NETWORK 覆盖）。
+  # 前提（诚实说明）：external 网络必须先存在，否则本栈 up 直接报错——
+  #   先起后端栈；仅想校验本栈配置（无后端可抓）时先 docker network create eap-prod_default
+  #   建同名空网络，prometheus 能起但 eap target 为 down，属预期。
+  eap-backend:
+    external: true
+    name: ${EAP_BACKEND_NETWORK:-eap-prod_default}
+
 volumes:
+  prometheus-data:
   loki-data:
   grafana-data:

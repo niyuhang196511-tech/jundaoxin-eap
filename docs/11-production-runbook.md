@@ -189,14 +189,99 @@ prod 栈默认开启：存在开发默认密钥（dev api key / session secret�
 
 ### 9.5 可观测栈样例（deploy/observability/）
 
+Prometheus（M49-D 补入：抓 eap `/metrics`，加载 [deploy/prometheus.yml](../deploy/prometheus.yml)
++ [deploy/prometheus-alerts.yml](../deploy/prometheus-alerts.yml) 规则并推 Alertmanager）+
 Loki + Promtail（采 Docker 容器日志，EAP 结构化日志的 level/trace_id 提炼为标签）+
 Grafana（预置数据源与 `grafana-dashboard-eap.json` 仪表盘：请求速率/p95 延迟/Agent 调用/
 Token 用量/队列深度/熔断状态/沙箱违规/网关拒绝）+ Alertmanager 路由样例。
 
 ```bash
+# 前提：后端栈已起（observability 栈以 external network 接入其内网抓 eap:8300，见下）
+docker compose -f deploy/docker-compose.prod.yml --env-file .env.prod up -d
 docker compose -f deploy/observability/docker-compose.observability.yml up -d
 # Grafana http://localhost:3300 → Dashboards → EAP 平台运行概览
 ```
+
+#### 告警链路联调（M49-D：P2 #23 Loki 生产调余 + #24 alertmanager 联调）
+
+M49-D 补齐 #24 核心缺口：此前仓库没有 Prometheus 主配置，`prometheus-alerts.yml` 的
+10 条规则从未被加载。现在 `deploy/prometheus.yml`（scrape/rule_files/alerting）由
+observability 栈新增的 prometheus 服务（prom/prometheus:v2.54.1，与 alertmanager
+v0.27.0 同代）挂载；Loki 从镜像内置 `local-config.yaml` 换为自定义
+[deploy/observability/loki-config.yml](../deploy/observability/loki-config.yml)。
+
+**网络前提**（跨 compose 项目，诚实说明）：eap 服务只在后端栈内网 `expose` 8300
+（不映射宿主），prometheus 以 external network 接入——默认 `eap-prod_default`
+（生产栈 `name: eap-prod` 的默认网络，须先起生产栈）；开发栈用
+`EAP_BACKEND_NETWORK=eap_default` 覆盖。external 网络必须先存在，否则本栈 `up`
+直接报错；仅想校验观测栈本身（无后端可抓）时先 `docker network create
+eap-prod_default` 建同名空网络，prometheus 能起但 eap target 为 down，属预期。
+
+**联调步骤**：
+
+1. 静态 + 深度校验（`--docker` 用容器内 promtool / amtool / `loki -verify-config`
+   做深度校验，镜像拉取失败打印 SKIP 不计失败）：
+
+   ```bash
+   uv run --with pyyaml python scripts/check_observability.py
+   uv run --with pyyaml python scripts/check_observability.py --docker
+   ```
+
+2. 采集验证：起栈后开 Prometheus `http://localhost:9090/targets`——`job=eap`
+   端点应为 UP（down 则先查 external 网络前提）；`/rules` 应见 3 组 / 10 条规则。
+
+3. 触发测试告警（两种方式，均已在 v2.54.1 + v0.27.0 实测走通）：
+   - 临时规则端到端：向 `prometheus-alerts.yml` 临时追加
+     `- alert: SmokeTestAlert` / `expr: vector(1)` / `labels: {severity: critical}`，
+     `curl -X POST http://localhost:9090/-/reload` 热加载（`--web.enable-lifecycle`
+     已开启），`/alerts` 页见其 firing 后到 Alertmanager 确认；**验证完删除临时规则
+     并再次 reload**。
+   - amtool 直推 Alertmanager（跳过 Prometheus，只验路由/UI；容器需加入观测栈网络，
+     默认项目名 observability → 网络 observability_default）：
+
+     ```bash
+     docker run --rm --network observability_default --entrypoint amtool \
+       prom/alertmanager:v0.27.0 --alertmanager.url=http://alertmanager:9093 \
+       alert add alertname=AmtoolSmoke severity=warning
+     ```
+
+   单实例注意：`EapInstanceDown`（`sum(up{job="eap"}) < 2`，双实例 HA 口径）与
+   eap 不可达时的 `EapAllInstancesDown` 在单机形态会持续触发，属已知口径差异，
+   见 `deploy/prometheus.yml` 注释。
+
+4. Alertmanager 看路由：UI `http://localhost:9093`——critical 应命中 `oncall`、
+   warning 命中 `ops-channel`（receiver 为占位，UI 可见但无外发动作）。不开 UI 可
+   用 amtool 干跑路由（输出即命中的 receiver 名；Git Bash 需 `MSYS_NO_PATHCONV=1`
+   防容器内路径被转换）：
+
+   ```bash
+   MSYS_NO_PATHCONV=1 docker run --rm \
+     -v ${PWD}/deploy/observability/alertmanager.yml:/tmp/am.yml:ro \
+     --entrypoint amtool prom/alertmanager:v0.27.0 \
+     config routes test --config.file=/tmp/am.yml --verify.receivers=oncall \
+     alertname=EapAllInstancesDown severity=critical
+   ```
+
+5. 占位 receiver 换真实渠道：`deploy/observability/alertmanager.yml` 三个 receiver
+   均为占位（告警到达后止步，不通知）。邮件（SMTP）/企业微信应用消息/飞书·钉钉·
+   企微群机器人的配置样例见该文件 receivers 段注释——群机器人消息体与 Alertmanager
+   webhook 载荷格式不匹配（且有关键词/加签校验），**必须经格式转换中转服务**（如
+   prometheus-webhook-dingtalk），不能直连；凭据经 env/secrets 注入，勿提交入库。
+   改后先 `amtool check-config`（同上容器方式）再
+   `docker compose -f deploy/observability/docker-compose.observability.yml restart alertmanager`。
+
+6. Loki 保留期调优入口：`loki-config.yml` 的 `limits_config.retention_period`
+   （默认 720h=30d，按磁盘/合规在 7d~30d+ 调整）。镜像内置默认实为 **0s=永久保留
+   且 compactor 不清理**（经 `-print-config-stderr` 实测；旧注释所称「默认 15d」
+   有误），真正删除依赖 `compactor.retention_enabled: true`。摄入/查询限额
+   （`ingestion_rate_mb`、`max_query_series`、`max_global_streams_per_user`）同文件；
+   改后 `docker compose -f deploy/observability/docker-compose.observability.yml restart loki`。
+   注意 promtail 把 trace_id 提升为标签会放大流基数，大流量环境的根治方案见
+   `loki-config.yml` 内注释（降级为 structured metadata）。
+
+**诚实局限**：真实通知触达（SMTP 凭据、IM 机器人 webhook/中转服务）属外部条件，
+仓库内只给注释样例与联调步骤，未做真实外发验证；本小节链路验证止于 Alertmanager
+路由命中（UI/API/amtool 可证）。
 
 ### 9.6 依赖漏洞扫描
 

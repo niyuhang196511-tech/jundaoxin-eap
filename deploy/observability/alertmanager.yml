@@ -1,5 +1,6 @@
-# Prometheus 告警路由/静默样例（M47-C）：与 deploy/prometheus-alerts.yml 的 10 条规则配套。
-# 挂接方式：prometheus.yml -> alerting: alertmanagers: [static: localhost:9093]
+# Prometheus 告警路由/静默样例（M47-C；M49-D 补通知渠道挂接样例注释）。
+# 与 deploy/prometheus-alerts.yml 的 10 条规则配套；上游挂接已落地：
+# deploy/prometheus.yml -> alerting: alertmanagers: [alertmanager:9093]（同栈服务名）。
 route:
   receiver: default
   group_by: [alertname, agent]
@@ -15,8 +16,46 @@ route:
       receiver: ops-channel
 
 receivers:
+  # 三个 receiver 均为占位（无任何通知方式）：告警会正常进入 Alertmanager、UI 可见、
+  # 分组/抑制/静默照常生效，但不会对外发出通知。真实 webhook/SMTP 凭据属外部条件，
+  # 不入库——按下方样例替换后，先本地校验再重启容器：
+  #   docker run --rm -v ${PWD}/deploy/observability/alertmanager.yml:/am.yml:ro \
+  #     prom/alertmanager:v0.27.0 amtool check-config /am.yml
+  #   docker compose -f deploy/observability/docker-compose.observability.yml restart alertmanager
+  #
+  # —— 样例 1：邮件（SMTP，Alertmanager 原生支持，最容易先跑通联调）——
+  #   - name: default
+  #     email_configs:
+  #       - to: ops@example.com
+  #         from: alertmanager@example.com
+  #         smarthost: smtp.example.com:465      # 465=SSL 配 require_tls: false；587=STARTTLS 配 true
+  #         auth_username: alertmanager@example.com
+  #         auth_password: <SMTP 授权码>          # 勿提交明文：用 env 注入或 secrets 挂载
+  #         require_tls: false
+  #         send_resolved: true                  # 恢复也通知
+  #
+  # —— 样例 2：企业微信「应用消息」（原生 wechat_configs；注意不是群机器人 webhook）——
+  #   - name: oncall
+  #     wechat_configs:
+  #       - corp_id: ww1234567890abcdef
+  #         agent_id: 1000002
+  #         api_secret: <自建应用 Secret>
+  #         to_user: "@all"                      # 或 to_party: "2" / to_tag
+  #         send_resolved: true
+  #
+  # —— 样例 3：飞书 / 钉钉 / 企微「群机器人」——不能直连，需中转（诚实说明）：
+  #   Alertmanager webhook 发出的 JSON 载荷与这三家机器人要求的消息体格式不同
+  #   （且钉钉/飞书机器人普遍有关键词或加签校验），直接 webhook_configs 指向机器人
+  #   地址会被拒收。通用做法是部署一个格式转换中转服务再指向它，例如开源
+  #   prometheus-webhook-dingtalk（钉钉）、feishu-alert 类桥接（飞书），或自建
+  #   一个收 webhook 转机器人 API 的小服务。中转就绪后：
+  #   - name: ops-channel
+  #     webhook_configs:
+  #       - url: http://<中转服务>:8060/dingtalk/ops/send
+  #         send_resolved: true
+  #         max_alerts: 20                       # 分组告警条数多时防载荷过大被机器人拒收
   - name: default
-    # 占位：接企业 IM/邮件 webhook（如飞书机器人 https://open.feishu.cn/hook/xxx）
+    # 占位：接企业 IM/邮件 webhook（样例见上方注释）
   - name: oncall
     # 占位：值班通道
   - name: ops-channel

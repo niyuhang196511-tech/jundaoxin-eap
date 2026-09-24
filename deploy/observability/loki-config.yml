@@ -1,0 +1,78 @@
+# Loki 3.2 单体（single binary）最小配置 + 生产调优（M49-D · P2 #23 Loki 生产调余）。
+#
+# 本文件替换镜像内置 /etc/loki/local-config.yaml（compose loki 服务已改挂本文件，
+# command: -config.file=/etc/loki/config.yaml）。内置默认（经 loki -print-config-stderr
+# 实测核实）：无 limits_config 显式配置——retention_period=0s（永久保留）、
+# compactor.retention_enabled=false，chunk 永不清理，磁盘必然被写满；且 analytics
+# 默认向 stats.grafana.org 上报使用统计。旧注释所称「Loki 默认保留 15d」有误，
+# 实际默认是「无保留期限制、永不删除」。本文件显式设 30d 保留 + 打开 compactor
+# retention 清理 + 关闭 analytics 上报，并给出常用限额。
+#
+# 与现 compose 的对齐：存储 filesystem、path_prefix /loki（卷 loki-data:/loki）、
+# http 3100（端口映射 3100:3100）。schema 与内置默认一致（tsdb/v13, from 2020-10-24），
+# 已按默认配置写过数据的卷可直接换用本文件，无需迁移。
+
+auth_enabled: false           # 单租户；多租户网关形态才需要开
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki          # = 卷挂载点（loki-data:/loki）
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1       # 单体无副本
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24        # 与镜像内置一致，兼容存量数据
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # —— 保留期（本次调优核心）——
+  retention_period: 720h      # 30d；与 Prometheus TSDB 保留对齐。按磁盘/合规调整：
+                              # 日志量大或磁盘紧张改 168h(7d)~360h(15d)，审计要求长可上调；
+                              # 实际删除依赖下方 compactor.retention_enabled: true
+  # —— 摄入限额（默认 4/6；容器 JSON 日志有突发，放宽一倍防误丢）——
+  ingestion_rate_mb: 8        # 每租户平滑摄入速率 MB/s
+  ingestion_burst_size_mb: 16 # 突发桶容量 MB
+  # —— 流基数限额 ——
+  max_global_streams_per_user: 20000
+    # 默认 5000。注意：promtail-config.yml 把 trace_id 提升为标签——每条 trace 一个流，
+    # 基数随流量线性增长，这是暂时性放宽而非根治；根治方案是把 trace_id 降级为
+    # structured metadata（Loki 3.x 支持，可查不可索引）或从标签中移除。
+  # —— 查询限额 ——
+  max_query_series: 2000      # 默认 500；仪表盘按 route/agent/status 维度下钻易超 500
+  max_query_parallelism: 32   # 默认即 32，显式写出；单机 filesystem 后端不建议再调高
+  reject_old_samples: true    # 默认值，显式写出
+  reject_old_samples_max_age: 168h  # 默认 1w；超过 7 天的旧日志拒收（补采历史需临时放宽）
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true     # 必须为 true，否则上面的 retention_period 不会真正删 chunk
+  delete_request_store: filesystem   # 3.x 删除落盘介质，与 object_store 一致
+  compaction_interval: 10m    # 默认值，显式写出
+  retention_delete_delay: 2h  # 到期后延迟删除（默认 2h，留反悔窗口）
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true         # 内嵌结果缓存：filesystem 后端重复查询（仪表盘轮询）收益明显
+        max_size_mb: 100
+
+analytics:
+  reporting_enabled: false    # 关闭向 stats.grafana.org 的使用统计上报（镜像默认开启）
