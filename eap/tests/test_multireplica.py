@@ -52,9 +52,13 @@ def test_rate_limiter_fallback_without_redis(client: TestClient):
 def test_rate_limiter_redis_path(client: TestClient, monkeypatch):
     """配置 EAP_REDIS_URL：走 Redis 滑窗（compose redis 已在本地 63790）。"""
 
+    import redis as redis_lib
+
     from eap.api.security import SlidingWindow
     from eap.config import get_settings
 
+    # 测试隔离：滑窗键持久在 Redis db9，跨运行会污染断言——先清空本用例专用库
+    redis_lib.Redis(host="localhost", port=63790, db=9).flushdb()
     monkeypatch.setenv("EAP_REDIS_URL", "redis://localhost:63790/9")
     get_settings.cache_clear()
     try:

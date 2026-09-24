@@ -35,9 +35,13 @@ pytestmark = pytest.mark.skipif(
 def redis_client_client():
     """带 EAP_REDIS_URL 的独立应用实例（进程内新引擎走 Redis Streams 后端）。"""
 
+    import redis as redis_lib
+
     host, port = "127.0.0.1", 63790
     with socket.create_connection((host, port), timeout=1):
         pass
+    # 测试隔离（M48）：Redis 长驻后（compose redis 常开）跨运行残留会污染断言——先清测试库
+    redis_lib.Redis(host=host, port=port, db=5).flushdb()
     os.environ["EAP_REDIS_URL"] = f"redis://{host}:{port}/5"
     from eap.config import get_settings
 
@@ -57,7 +61,8 @@ def redis_client_client():
     r.close()
 
 
-def _wait_state(client, task_id, until, rounds=60):
+def _wait_state(client, task_id, until, rounds=200):
+    # 预算 30s：全量回归同机多引擎实例轮询时负载高，9s 档会出现偶发超时假失败（M48 实测）
     for _ in range(rounds):
         t = client.get(f"/api/v1/tasks/{task_id}", headers=AUTH).json()
         if t["state"] in until:
