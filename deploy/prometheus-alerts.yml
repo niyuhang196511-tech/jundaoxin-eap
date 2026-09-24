@@ -10,7 +10,8 @@
 #                                              已知 state 显式补零；多实例共享同一 DB，勿 sum——见积压规则）
 #   eap_circuit_state{model}                   熔断器状态 gauge（0 closed / 1 open / 2 half-open）
 #   eap_gateway_inflight                       网关在途请求 gauge（网关中间件启用时有意义）
-# 接入：Prometheus scrape 两个 API 实例（job 名下例用 eap，k8s 用 ServiceMonitor 对齐即可），
+# 接入：Prometheus scrape 全部 API 实例（单/多副本均可——M50-D 起可用性规则为副本数无关
+#       口径；job 名下例用 eap，k8s 用 ServiceMonitor 对齐即可），
 #       将本文件放入 rule_files 目录（或 ConfigMap 挂载 prometheus）：
 #       rule_files: ["/etc/prometheus/rules/*.yml"]
 #
@@ -19,29 +20,36 @@
 #     （histogram_quantile 内插精度受桶边界限制，边界见 metrics.py HISTOGRAMS）；
 #   - 原「均值代理」规则保留（口径不同：均值漂移 vs 尾部恶化，互补；_sum/_count
 #     均改自 histogram 自带序列，与旧 {path} 计数器口径一致但 labels 变化）；
-#   - 队列深度为共享 DB 真值，多副本各实例导出同一数值，聚合必须用 max（sum 会按副本数翻倍）。
+#   - 队列深度为共享 DB 真值，多副本各实例导出同一数值，聚合必须用 max（sum 会按副本数翻倍）；
+#   - 可用性口径（M50-D）：EapInstanceDown 改为按实例 up==0、EapAllInstancesDown 为
+#     sum(up)==0 or absent(up)——均与副本数无关，单实例部署不再常燃（旧 sum(up)<2 为双实例口径）。
 
 groups:
   - name: eap-availability
     rules:
-      # 实例宕机：up 由采集端生成（job 名对齐 scrape 配置；双实例形态下任一 <2 即降级）
+      # 实例宕机（M50-D 改副本数无关口径）：up 由采集端生成（job 名对齐 scrape 配置），
+      # 按实例逐条评估——任一实例 up==0 即触发。旧口径 sum(up)<2 为双实例 HA 专用，
+      # 单实例部署（当前主流形态）sum(up)=1<2 会常燃，已废弃。
       - alert: EapInstanceDown
-        expr: sum(up{job="eap"}) < 2
+        expr: up{job="eap"} == 0
         for: 2m
         labels:
           severity: warning
         annotations:
-          summary: "EAP 双实例降级为单实例（{{ $value }}/2 存活）"
-          description: "检查 {{ $labels.instance }} 容器/Pod 状态与 /health；单实例期间无冗余。"
+          summary: "EAP 实例不可达（{{ $labels.instance }}）"
+          description: "检查该实例容器/Pod 状态与 /health；多实例形态下单实例宕机即无冗余，单实例形态下等同于服务中断（另见 EapAllInstancesDown）。"
 
+      # 全部实例宕机（critical）：sum(up)==0 天然副本数无关；or absent(...) 兜底
+      # scrape 配置被误删/targets 清空时 up 序列整体消失的形态（空集合的 sum 为
+      # 空向量，==0 不会触发，absent 补上这个盲区）。
       - alert: EapAllInstancesDown
-        expr: sum(up{job="eap"}) == 0
+        expr: sum(up{job="eap"}) == 0 or absent(up{job="eap"})
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "EAP 全部实例不可达"
-          description: "服务中断：检查 nginx/负载均衡与全部 eap-api 实例；必要时按 runbook §4 恢复。"
+          description: "服务中断：检查 nginx/负载均衡与全部 eap-api 实例（absent 分支触发时先查 Prometheus scrape 配置里 job=eap 是否还在）；必要时按 runbook §4 恢复。"
 
   - name: eap-traffic
     rules:

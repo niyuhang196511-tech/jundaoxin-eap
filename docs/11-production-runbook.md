@@ -148,8 +148,10 @@ EAP_DB_URL=postgresql+psycopg://eap:pass@pg:5432/eap \
 
 指标名取自 `/metrics` 实际导出（`eap_requests_total` / `eap_request_latency_seconds_sum` /
 `eap_tasks_total` / `eap_circuit_state` / `eap_gateway_inflight` 等）。Prometheus 端 scrape 两个
-API 实例（`job="eap"`），`rule_files` 挂载该文件；规则含：实例宕机（`sum(up{job="eap"}) < 2`）、
-5xx 占比 > 5%、平均延迟（histogram 桶导出前为均值代理）、任务失败增速、熔断跳闸、网关在途。
+API 实例（`job="eap"`），`rule_files` 挂载该文件；规则含：实例宕机（M50-D 起副本数无关口径：
+按实例 `up{job="eap"} == 0` warning + 全挂 `sum(up{job="eap"}) == 0 or absent(up{job="eap"})`
+critical，单/双实例部署均适用）、5xx 占比 > 5%、平均延迟（histogram 桶导出前为均值代理）、
+任务失败增速、熔断跳闸、网关在途。
 
 
 ## 9. 生产部署栈与运营资产（M47-C）
@@ -245,9 +247,14 @@ eap-prod_default` 建同名空网络，prometheus 能起但 eap target 为 down�
        alert add alertname=AmtoolSmoke severity=warning
      ```
 
-   单实例注意：`EapInstanceDown`（`sum(up{job="eap"}) < 2`，双实例 HA 口径）与
-   eap 不可达时的 `EapAllInstancesDown` 在单机形态会持续触发，属已知口径差异，
-   见 `deploy/prometheus.yml` 注释。
+   单实例口径（M50-D 已修正）：旧版 `EapInstanceDown` 用双实例 HA 口径
+   `sum(up{job="eap"}) < 2`，单机形态（sum(up)=1）会常燃。现改为副本数无关的
+   按实例口径 `up{job="eap"} == 0`（warning），`EapAllInstancesDown` 为
+   `sum(up{job="eap"}) == 0 or absent(up{job="eap"})`（critical）——单实例部署
+   仅在 eap 真正不可达时触发。触发测试可临时停掉后端栈 eap 容器观察两条规则
+   先后进入 firing（1m/2m `for` 窗口后），验完 `docker compose ... start` 恢复。
+   注意 `deploy/prometheus.yml` scrape 段注释仍描述旧口径（该文件不在 M50-D
+   改动范围），以 `deploy/prometheus-alerts.yml` 规则本体为准。
 
 4. Alertmanager 看路由：UI `http://localhost:9093`——critical 应命中 `oncall`、
    warning 命中 `ops-channel`（receiver 为占位，UI 可见但无外发动作）。不开 UI 可

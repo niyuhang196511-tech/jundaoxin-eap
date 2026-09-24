@@ -42,10 +42,10 @@ scrape_configs:
   # targets 走服务名解析，前提是 external network 已接通（见文件头网络前提）；
   # 网络未接通时 target 显示 down，属预期，先按 runbook §9.5 排查。
   #
-  # 诚实说明（副本数口径）：单机生产栈只有一个 eap 服务，sum(up{job="eap"})=1 < 2，
-  # EapInstanceDown（双实例 HA 口径，见 runbook §8.2）将持续触发——单机部署可接受
-  # 该「无冗余」提醒，或自行把规则阈值改为 ==0（规则文件不属本次改动范围）。
-  # HA 双实例/k8s 形态：把第二实例地址追加进 targets（k8s 用 ServiceMonitor 对齐 job 名）。
+  # 副本数口径（M50-D 规则修订后）：EapInstanceDown 按实例 up{job="eap"}==0 评估
+  # （warning），EapAllInstancesDown 为 sum(up)==0 or absent（critical）——均与副本数
+  # 无关，单实例部署不再常燃。HA 双实例/k8s 形态：把第二实例地址追加进 targets
+  # （k8s 用 ServiceMonitor 对齐 job 名），规则本体见 deploy/prometheus-alerts.yml。
   - job_name: eap
     metrics_path: /metrics
     static_configs:
