@@ -6,7 +6,7 @@ import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api, webhooksApi, type WebhookDelivery, type WebhookEndpoint } from '@/lib/api'
+import { api, triggersApi, webhooksApi, type TriggerRule, type WebhookDelivery, type WebhookEndpoint } from '@/lib/api'
 
 type Connector = {
   name: string
@@ -27,15 +27,20 @@ const WH_STATUS_TONE: Record<string, BadgeTone> = {
   done: 'green', pending: 'amber', dead: 'red',
 }
 
-/** 企业集成：连接器（业务系统 API）+ IM 渠道（群机器人 webhook）+ 对外 Webhook 推送 */
+const TRIGGER_SOURCE_TONE: Record<string, BadgeTone> = {
+  event: 'purple', cron: 'amber', webhook: 'blue',
+}
+
+/** 企业集成：连接器（业务系统 API）+ IM 渠道（群机器人 webhook）+ 对外 Webhook 推送 + 事件触发器 */
 export default function IntegrationsPage() {
   return (
     <div>
-      <PageHeader title="连接器 · IM · Webhooks" description="企业系统连接器（HITL 审批出站）、IM 渠道（群机器人双向接入）与对外 Webhook 推送（事件订阅 + HMAC 签名）" />
+      <PageHeader title="连接器 · IM · Webhooks · 触发器" description="企业系统连接器（HITL 审批出站）、IM 渠道（群机器人双向接入）、对外 Webhook 推送（事件订阅 + HMAC 签名）与事件触发器（事件/cron/入站 webhook → 智能体/工作流/连接器）" />
       <TabBar items={[
         { key: 'conn', label: '连接器', content: <ConnectorsTab /> },
         { key: 'im', label: 'IM 渠道', content: <ImTab /> },
         { key: 'wh', label: 'Webhooks', content: <WebhooksTab /> },
+        { key: 'triggers', label: '触发器', content: <TriggersTab /> },
       ]} />
     </div>
   )
@@ -486,6 +491,228 @@ function WebhooksTab() {
           <div>
             <Label>{editing ? '签名密钥（留空保持不变，仅入库不回显）' : '签名密钥（可空，仅入库不回显）'}</Label>
             <Input type="password" value={form.secret} onChange={e => setForm({ ...form, secret: e.target.value })} />
+          </div>
+        </div>
+      </DialogContent>
+    </div>
+  )
+}
+
+/** 事件触发器（M30）：事件/cron/入站 webhook 三源 → agent/workflow/connector 目标；
+ * CRUD admin + 审计，webhook 源 URL 形如 POST /api/v1/triggers/webhook/{id}（HMAC 签名即凭证） */
+function TriggersTab() {
+  const [list, setList] = useState<TriggerRule[]>([])
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<TriggerRule | null>(null)
+  const emptyForm = {
+    name: '', source: 'event' as TriggerRule['source'], eventType: '',
+    cron: '0 9 * * *', secret: '', targetType: 'agent' as TriggerRule['target_type'],
+    targetName: '', minInterval: '0',
+  }
+  const [form, setForm] = useState(emptyForm)
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      setList(await triggersApi.list())
+    } catch (e) {
+      toast.error(`加载触发器失败：${(e as Error).message}`)
+    }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const openCreate = () => {
+    setEditing(null)
+    setForm(emptyForm)
+    setOpen(true)
+  }
+  const openEdit = (r: TriggerRule) => {
+    setEditing(r)
+    setForm({
+      name: r.name, source: r.source, eventType: r.event_type ?? '',
+      cron: r.cron ?? '0 9 * * *', secret: '',
+      targetType: r.target_type, targetName: r.target_name,
+      minInterval: String(r.min_interval_s ?? 0),
+    })
+    setOpen(true)
+  }
+  const submit = async () => {
+    const shared = {
+      target_type: form.targetType,
+      target_name: form.targetName.trim(),
+      min_interval_s: parseInt(form.minInterval) || 0,
+    }
+    try {
+      if (editing) {
+        await triggersApi.update(editing.id, {
+          ...shared,
+          event_type: form.eventType.trim() || null,
+          cron: form.source === 'cron' ? form.cron.trim() || null : null,
+          ...(form.secret.trim() ? { secret: form.secret.trim() } : {}),  // 留空 = 密钥不变
+        })
+        toast.success('触发器已更新')
+      } else {
+        await triggersApi.create({
+          name: form.name.trim(),
+          source: form.source,
+          event_type: form.source === 'event' ? form.eventType.trim() : null,
+          cron: form.source === 'cron' ? form.cron.trim() : null,
+          secret: form.source === 'webhook' ? (form.secret.trim() || null) : null,
+          ...shared,
+        })
+        toast.success('触发器已创建')
+      }
+      setOpen(false)
+      load()
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`)
+    }
+  }
+
+  const toggle = async (r: TriggerRule) => {
+    setBusy(`toggle-${r.id}`)
+    try {
+      await triggersApi.update(r.id, { enabled: !r.enabled })
+      load()
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+  const remove = async (r: TriggerRule) => {
+    if (!window.confirm(`确认删除触发器「${r.name}」？删除后事件/cron/webhook 将不再触发该规则。`)) return
+    setBusy(`del-${r.id}`)
+    try {
+      await triggersApi.remove(r.id)
+      toast.success('触发器已删除')
+      load()
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+  const testFire = async (r: TriggerRule) => {
+    setBusy(`fire-${r.id}`)
+    try {
+      const res = await triggersApi.testFire(r.id)
+      toast.success(`试触发已注入（${res.rule}），触发结果见任务/审计`)
+    } catch (e) {
+      toast.error(`试触发失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={openCreate}><Plus className="size-3.5" />新建触发器</Button>
+      </div>
+      <div className="rounded-[--radius-card] border border-line bg-surface">
+        <Table<TriggerRule>
+          rowKey={r => String(r.id)}
+          data={list}
+          columns={[
+            { key: 'name', title: '名称', render: r => <span className="font-medium">{r.name}</span> },
+            { key: 'source', title: '来源', render: r => <Badge tone={TRIGGER_SOURCE_TONE[r.source] ?? 'gray'}>{r.source}</Badge> },
+            { key: 'cond', title: '触发条件', render: r => (
+              <code className="text-[11px]">{r.source === 'cron' ? (r.cron ?? '—') : (r.event_type ?? '—')}</code>
+            ) },
+            { key: 'target', title: '目标', render: r => (
+              <span className="text-[12px]"><Badge tone="brand">{r.target_type}</Badge> <code className="ml-1 text-[11px]">{r.target_name}</code></span>
+            ) },
+            { key: 'min_interval_s', title: '最小间隔', render: r => (r.min_interval_s ? `${r.min_interval_s}s` : '-') },
+            { key: 'has_secret', title: '签名密钥', render: r => r.source === 'webhook'
+              ? (r.has_secret ? <Badge tone="green">已配置</Badge> : <Badge tone="gray">未配置</Badge>)
+              : <span className="text-ink-3">-</span> },
+            { key: 'enabled', title: '状态', render: r => r.enabled ? <Badge tone="green">启用</Badge> : <Badge tone="gray">停用</Badge> },
+            { key: 'actions', title: '操作', render: r => (
+              <span className="flex gap-1.5">
+                <Button size="xs" variant="secondary" loading={busy === `toggle-${r.id}`}
+                  onClick={() => toggle(r)}>{r.enabled ? '停用' : '启用'}</Button>
+                <Button size="xs" variant="secondary" loading={busy === `fire-${r.id}`}
+                  onClick={() => testFire(r)}>试触发</Button>
+                <Button size="xs" variant="secondary" onClick={() => openEdit(r)}>编辑</Button>
+                <Button size="xs" variant="ghost" loading={busy === `del-${r.id}`}
+                  onClick={() => remove(r)}>删除</Button>
+              </span>
+            ) },
+          ]}
+          empty="暂无触发器：事件（event_type 命中）/ cron（UTC 定时）/ 入站 webhook（POST /api/v1/triggers/webhook/{id}，HMAC 签名）三种来源均可驱动智能体、工作流或连接器工具"
+        />
+      </div>
+
+      <DialogContent open={open} onOpenChange={setOpen}
+        title={editing ? `编辑触发器 ${editing.name}` : '新建触发器'}
+        description="来源决定触发条件：event 填事件类型、cron 填 5 段 UTC 表达式、webhook 凭签名调用"
+        footer={<>
+          <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={submit}
+            disabled={!editing && !form.name.trim() || !form.targetName.trim()
+              || (form.source === 'event' && !form.eventType.trim())}>
+            {editing ? '保存' : '创建'}
+          </Button>
+        </>}>
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>名称（小写字母开头，a-z0-9-）</Label>
+              <Input value={form.name} disabled={!!editing} placeholder="daily-report"
+                onChange={e => setForm({ ...form, name: e.target.value })} />
+            </div>
+            <div>
+              <Label>来源</Label>
+              <Select value={form.source} disabled={!!editing}
+                onChange={e => setForm({ ...form, source: e.target.value as TriggerRule['source'] })}>
+                <option value="event">event（平台事件）</option>
+                <option value="cron">cron（定时）</option>
+                <option value="webhook">webhook（入站）</option>
+              </Select>
+            </div>
+          </div>
+          {form.source === 'event' && (
+            <div>
+              <Label>事件类型（如 kb.document.indexed / agent.run.completed）</Label>
+              <Input value={form.eventType} placeholder="kb.document.indexed"
+                onChange={e => setForm({ ...form, eventType: e.target.value })} />
+            </div>
+          )}
+          {form.source === 'cron' && (
+            <div>
+              <Label>cron 表达式（5 段，UTC）</Label>
+              <Input value={form.cron} placeholder="0 9 * * *"
+                onChange={e => setForm({ ...form, cron: e.target.value })} />
+            </div>
+          )}
+          {form.source === 'webhook' && (
+            <div>
+              <Label>{editing ? 'HMAC 密钥（留空保持不变，仅入库不回显）' : 'HMAC 密钥（可空，仅入库不回显；X-EAP-Signature = HMAC-SHA256(body, secret)）'}</Label>
+              <Input type="password" value={form.secret}
+                onChange={e => setForm({ ...form, secret: e.target.value })} />
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>目标类型</Label>
+              <Select value={form.targetType}
+                onChange={e => setForm({ ...form, targetType: e.target.value as TriggerRule['target_type'] })}>
+                <option value="agent">agent（智能体）</option>
+                <option value="workflow">workflow（工作流）</option>
+                <option value="connector">connector（连接器工具）</option>
+              </Select>
+            </div>
+            <div>
+              <Label>目标名称</Label>
+              <Input value={form.targetName} placeholder="faq-agent"
+                onChange={e => setForm({ ...form, targetName: e.target.value })} />
+            </div>
+          </div>
+          <div>
+            <Label>最小触发间隔（秒，0 = 不限，防抖）</Label>
+            <Input type="number" min={0} max={86400} value={form.minInterval}
+              onChange={e => setForm({ ...form, minInterval: e.target.value })} />
           </div>
         </div>
       </DialogContent>

@@ -232,6 +232,166 @@ export const webhooksApi = {
     api<{ endpoint: string; event_id: string; delivery_id: number }>('POST', `/api/v1/webhooks/${id}/test`, {}),
 }
 
+/* ---------- 事件触发器（事件中心 M30，admin） ---------- */
+
+// type 别名（非 interface）：携带隐式索引签名，满足 Table 泛型 Record<string, unknown> 约束
+export type TriggerRule = {
+  id: number
+  name: string
+  tenant_id: number | null
+  source: 'event' | 'cron' | 'webhook'
+  event_type: string | null
+  match: Record<string, unknown> | null
+  cron: string | null
+  has_secret: boolean
+  target_type: 'agent' | 'workflow' | 'connector'
+  target_name: string
+  input_mode: 'payload' | 'template'
+  template: Record<string, unknown> | string | null
+  min_interval_s: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const triggersApi = {
+  list: () => api<TriggerRule[]>('GET', '/api/v1/triggers'),
+  create: (body: {
+    name: string
+    source: TriggerRule['source']
+    event_type?: string | null
+    match?: Record<string, unknown> | null
+    cron?: string | null
+    secret?: string | null
+    target_type: TriggerRule['target_type']
+    target_name: string
+    min_interval_s?: number
+    enabled?: boolean
+  }) => api<TriggerRule>('POST', '/api/v1/triggers', body),
+  update: (id: number, body: Partial<{
+    event_type: string | null
+    match: Record<string, unknown> | null
+    cron: string | null
+    secret: string | null
+    target_type: TriggerRule['target_type']
+    target_name: string
+    min_interval_s: number
+    enabled: boolean
+  }>) => api<TriggerRule>('PATCH', `/api/v1/triggers/${id}`, body),
+  remove: (id: number) => api<{ name: string; status: string }>('DELETE', `/api/v1/triggers/${id}`),
+  testFire: (id: number, data: Record<string, unknown> = {}) =>
+    api<{ rule: string; status?: string; ref?: string }>(
+      'POST', `/api/v1/triggers/${id}/test-fire`, { data }),
+}
+
+/* ---------- LoRA adapter 托管（M42-A，admin 写 / 读开放） ---------- */
+
+export type LoraAdapter = {
+  name: string
+  base_model: string
+  source_path: string
+  served_as: string
+  status: 'registered' | 'loaded' | 'unloaded' | 'failed'
+  note: string
+  created_at: string
+  updated_at: string
+}
+
+export type LoraHealth = {
+  name: string
+  base_url: string
+  healthy: boolean
+  models: string[]
+  served: boolean
+  error?: string
+}
+
+export const loraApi = {
+  list: () => api<LoraAdapter[]>('GET', '/api/v1/lora'),
+  register: (body: { name: string; base_model: string; source_path: string; served_as?: string; note?: string }) =>
+    api<LoraAdapter>('POST', '/api/v1/lora', body),
+  remove: (name: string) => api<{ name: string; deleted: boolean }>(
+    'DELETE', `/api/v1/lora/${encodeURIComponent(name)}`),
+  load: (name: string, baseUrl?: string) =>
+    api<LoraAdapter & { vllm: Record<string, unknown> }>(
+      'POST', `/api/v1/lora/${encodeURIComponent(name)}/load`,
+      baseUrl ? { base_url: baseUrl } : undefined),
+  unload: (name: string, baseUrl?: string) =>
+    api<LoraAdapter & { vllm: Record<string, unknown> }>(
+      'POST', `/api/v1/lora/${encodeURIComponent(name)}/unload`,
+      baseUrl ? { base_url: baseUrl } : undefined),
+  health: (name: string, baseUrl?: string) => {
+    const q = baseUrl ? `?base_url=${encodeURIComponent(baseUrl)}` : ''
+    return api<LoraHealth>('GET', `/api/v1/lora/${encodeURIComponent(name)}/health${q}`)
+  },
+}
+
+/* ---------- 记忆治理（数据权利 + 保留期清理 + 组织记忆沉淀，admin） ---------- */
+
+export type MemoryItem = {
+  id: number
+  scope: string
+  kind: string
+  content: string
+  user_id: string | null
+  session_id: string | null
+  agent: string
+  importance: number
+  expires_at: string | null
+  created_at: string
+}
+
+export const memoryOpsApi = {
+  orgMemories: () => api<MemoryItem[]>('GET', '/api/v1/memory?scope=org'),
+  purge: () => api<{ deleted: number; retention_days: number }>('POST', '/api/v1/memory/purge', {}),
+  forgetUser: (userId: string) =>
+    api<{ user_id: string; deleted: number }>(
+      'DELETE', `/api/v1/memory/users/${encodeURIComponent(userId)}`),
+  exportUser: (userId: string) =>
+    api<{ user_id: string; memories: MemoryItem[] }>(
+      'GET', `/api/v1/memory/users/${encodeURIComponent(userId)}/export`),
+  consolidate: (body: { kb_name?: string; min_importance?: number; limit?: number }) =>
+    api<{ consolidated: number; kb: string; document_id: number | null; title: string | null }>(
+      'POST', '/api/v1/memory/consolidate', body),
+}
+
+/* ---------- 成本报表导出（M48-A，#25） ---------- */
+
+/** 成本报表导出 CSV（admin）：原生 fetch 附件下载（api() 走 JSON 解析不适用 CSV），
+ * 过滤参数（租户 / 天数）与报表查询端点一致；文件名取后端 Content-Disposition */
+export async function exportBudgetReport(params: { tenantId: number; days?: number }): Promise<void> {
+  const q = new URLSearchParams({ tenant_id: String(params.tenantId) })
+  if (params.days !== undefined) q.set('days', String(params.days))
+  const r = await fetch(
+    new URL(safeApiPath(`/api/v1/budgets/report/export?${q.toString()}`),
+      API_BASE || window.location.origin),
+    { headers: headers() },
+  )
+  if (r.status === 401 && !window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login'
+    throw new Error('登录已失效，请重新登录')
+  }
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}))
+    const detail = (d as any).detail
+    throw new Error(typeof detail === 'string' ? detail : `HTTP ${r.status}`)
+  }
+  const blob = await r.blob()
+  const m = (r.headers.get('Content-Disposition') ?? '').match(/filename="([^"]+)"/)
+  const name = m ? m[1] : `budget-report-tenant${params.tenantId}.csv`
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 /* ---------- Workflow 版本化 + prod-env- 环境体系（M32） ---------- */
 
 export type WfEnv = 'dev' | 'test' | 'staging' | 'prod'

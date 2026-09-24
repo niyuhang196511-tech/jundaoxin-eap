@@ -61,6 +61,11 @@ def usage_summary(tenant_id: int, db: Session = fastapi.Depends(get_db)):
 @router.get("/{tenant_id}/report")
 def cost_report(tenant_id: int, days: int = 30, db: Session = fastapi.Depends(get_db)):
     """成本报表（v0.6-⑤）：按模型 / 智能体 / 日的 SQL 聚合（金额单位与定价一致）。"""
+    return _report_payload(db, tenant_id, days)
+
+
+def _report_payload(db: Session, tenant_id: int, days: int) -> dict:
+    """报表聚合（report 查询与 export 导出共用，M48-A）：since 语义 days 夹取 [1, 365]。"""
     from datetime import datetime, timedelta
 
     from sqlalchemy import func
@@ -68,10 +73,6 @@ def cost_report(tenant_id: int, days: int = 30, db: Session = fastapi.Depends(ge
     from ...models import UsageRecord
 
     since = datetime.utcnow() - timedelta(days=max(1, min(days, 365)))
-    base = (select(UsageRecord)
-            .where(UsageRecord.tenant_id == tenant_id,
-                   UsageRecord.created_at >= since))
-
     by_model = db.execute(
         select(UsageRecord.model,
                func.count(UsageRecord.id),
@@ -101,7 +102,6 @@ def cost_report(tenant_id: int, days: int = 30, db: Session = fastapi.Depends(ge
         select(func.coalesce(func.sum(UsageRecord.cost), 0.0))
         .where(UsageRecord.tenant_id == tenant_id,
                UsageRecord.created_at >= since)).scalar()
-    _ = base  # 保留 since 语义说明
     return {
         "tenant_id": tenant_id, "days": days, "total_cost": round(float(total or 0.0), 6),
         "by_model": [{"model": m or "", "calls": c,
@@ -112,3 +112,46 @@ def cost_report(tenant_id: int, days: int = 30, db: Session = fastapi.Depends(ge
                       "cost": round(float(cost or 0.0), 6)} for a, c, ti, to, cost in by_agent],
         "by_day": [{"date": str(d), "cost": round(float(cost or 0.0), 6)} for d, cost in by_day],
     }
+
+
+@router.get("/report/export", dependencies=[fastapi.Depends(require_admin)])
+def export_report(tenant_id: int, days: int = 30, request: fastapi.Request = None,
+                  db: Session = fastapi.Depends(get_db)):
+    """成本报表导出（M48-A，#25）：admin 专用 CSV 附件下载，聚合逻辑与过滤参数（tenant_id/days）
+    与 GET /{tenant_id}/report 完全一致（路径用固定前缀 report/export，避开 /{tenant_id} 通配）。
+
+    - 平面 CSV（UTF-8 BOM，Excel 直开中文不乱码）：section(model/agent/day/total) + dimension +
+      calls/tokens_in/tokens_out/cost；day 行无 token 维度留空，total 行汇总总成本；
+    - 行数可控（days≤365 × 模型/智能体基数）直接拼装，不流式；
+    - 导出动作自身落审计 budget.export（仅条数与过滤条件，不含导出内容，对齐 audit.export）。
+    """
+    import csv
+    import io
+    from datetime import datetime, timezone
+
+    from ...observability import audit
+
+    report = _report_payload(db, tenant_id, days)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["section", "dimension", "calls", "tokens_in", "tokens_out", "cost"])
+    for r in report["by_model"]:
+        writer.writerow(["model", r["model"], r["calls"], r["tokens_in"], r["tokens_out"],
+                         f"{r['cost']:.6f}"])
+    for r in report["by_agent"]:
+        writer.writerow(["agent", r["agent"], r["calls"], r["tokens_in"], r["tokens_out"],
+                         f"{r['cost']:.6f}"])
+    for r in report["by_day"]:
+        writer.writerow(["day", r["date"], "", "", "", f"{r['cost']:.6f}"])
+    writer.writerow(["total", "all", "", "", "", f"{report['total_cost']:.6f}"])
+    rows = len(report["by_model"]) + len(report["by_agent"]) + len(report["by_day"]) + 1
+    audit.record("budget.export", actor=audit.actor_of(request), target=str(tenant_id),
+                 detail={"days": report["days"], "rows": rows},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return fastapi.responses.Response(
+        content="\ufeff" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="budget-report-tenant{tenant_id}-{stamp}.csv"'},
+    )

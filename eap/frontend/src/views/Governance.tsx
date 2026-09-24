@@ -1,12 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, RefreshCw } from 'lucide-react'
+import { Download, Plus, RefreshCw } from 'lucide-react'
 import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api } from '@/lib/api'
+import { api, exportBudgetReport, memoryOpsApi, type MemoryItem } from '@/lib/api'
 
 type Release = {
   id: string
@@ -31,14 +31,15 @@ const STATE_TONE: Record<string, BadgeTone> = {
   prod: 'green', rolled_back: 'red', retired: 'gray',
 }
 
-/** 治理中心：发布治理（评测门禁 → 灰度 → 提升/回滚）/ 成本预算 / 策略 */
+/** 治理中心：发布治理（评测门禁 → 灰度 → 提升/回滚）/ 成本预算 / 记忆治理 / 策略 */
 export default function GovernancePage() {
   return (
     <div>
-      <PageHeader title="治理 · 成本" description="发布治理链（评测门禁 → canary 灰度 → promote/rollback）/ 成本预算熔断 / 租户策略" />
+      <PageHeader title="治理 · 成本" description="发布治理链（评测门禁 → canary 灰度 → promote/rollback）/ 成本预算熔断与报表导出 / 记忆治理（保留期 · 数据权利 · 组织沉淀）/ 租户策略" />
       <TabBar items={[
         { key: 'releases', label: '发布治理', content: <ReleasesTab /> },
         { key: 'budgets', label: '成本预算', content: <BudgetsTab /> },
+        { key: 'memory', label: '记忆治理', content: <MemoryTab /> },
         { key: 'policies', label: '策略', content: <PoliciesTab /> },
       ]} />
     </div>
@@ -142,6 +143,8 @@ function BudgetsTab() {
   const [detail, setDetail] = useState<BudgetDetail | null>(null)
   const [tenant, setTenant] = useState(1)
   const [budget, setBudget] = useState(1000000)
+  const [days, setDays] = useState(30)
+  const [exporting, setExporting] = useState(false)
 
   const load = useCallback(async (t: number) => {
     try {
@@ -162,6 +165,18 @@ function BudgetsTab() {
     }
   }
 
+  /** 成本报表导出 CSV（M48-A）：复用报表查询的租户/天数过滤，admin，浏览器附件下载 */
+  const doExport = useCallback(async () => {
+    setExporting(true)
+    try {
+      await exportBudgetReport({ tenantId: tenant, days })
+    } catch (e) {
+      toast.error(`导出失败：${(e as Error).message}`)
+    } finally {
+      setExporting(false)
+    }
+  }, [tenant, days])
+
   return (
     <div className="grid grid-cols-[360px_1fr] items-start gap-4">
       <div className="space-y-3 rounded-[--radius-card] border border-line bg-surface p-4">
@@ -175,6 +190,20 @@ function BudgetsTab() {
         </div>
         <Button variant="primary" className="w-full" onClick={save}>保存预算</Button>
         {detail?.blocked && <Badge tone="red">已熔断：预算超限，调用返回 429</Badge>}
+        <div className="border-t border-line pt-3">
+          <Label>成本报表导出（CSV，admin）</Label>
+          <div className="flex items-center gap-2">
+            <Input className="!w-24" type="number" min={1} max={365} value={days}
+              onChange={e => setDays(parseInt(e.target.value) || 30)} />
+            <span className="text-xs text-ink-3">天</span>
+            <Button variant="secondary" className="ml-auto" loading={exporting} onClick={doExport}>
+              <Download className="size-3.5" />导出 CSV
+            </Button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-ink-3">
+            按模型 / 智能体 / 日聚合（与报表查询同一过滤条件），导出动作落审计 budget.export
+          </p>
+        </div>
       </div>
       <div className="rounded-[--radius-card] border border-line bg-surface p-4">
         {detail ? (
@@ -324,6 +353,186 @@ function PoliciesTab() {
           </div>
         </div>
       </DialogContent>
+    </div>
+  )
+}
+
+/** 记忆治理（M48-A）：保留期清理（purge）/ 按用户遗忘与导出（数据权利）/ 组织记忆沉淀 KB（M41-A）。
+ * 全部 admin + 审计（memory.purge / memory.forget_user / memory.consolidate）；
+ * purge 的保留期取环境变量 EAP_MEMORY_RETENTION_DAYS（默认 180，后端不接收天数参数） */
+function MemoryTab() {
+  const [memories, setMemories] = useState<MemoryItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [userId, setUserId] = useState('')
+  const [kbName, setKbName] = useState('org-memory')
+  const [minImportance, setMinImportance] = useState('0.7')
+  const [limit, setLimit] = useState(50)
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setMemories(await memoryOpsApi.orgMemories())
+    } catch (e) {
+      toast.error(`加载组织记忆失败：${(e as Error).message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const purge = async () => {
+    if (!window.confirm('确认执行保留期清理？将删除超过保留期（EAP_MEMORY_RETENTION_DAYS，默认 180 天）及 TTL 已到期的全部记忆，不可恢复。')) return
+    setBusy('purge')
+    try {
+      const r = await memoryOpsApi.purge()
+      toast.success(`清理完成：删除 ${r.deleted} 条（保留期 ${r.retention_days} 天）`)
+      load()
+    } catch (e) {
+      toast.error(`清理失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const forgetUser = async () => {
+    const uid = userId.trim()
+    if (!uid) return
+    if (!window.confirm(`确认遗忘用户「${uid}」的全部记忆？该操作不可恢复（数据删除，不提供导出回滚）。如需留存请先导出。`)) return
+    setBusy('forget')
+    try {
+      const r = await memoryOpsApi.forgetUser(uid)
+      toast.success(`已遗忘用户 ${r.user_id} 的 ${r.deleted} 条记忆`)
+      load()
+    } catch (e) {
+      toast.error(`遗忘失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const exportUser = async () => {
+    const uid = userId.trim()
+    if (!uid) return
+    setBusy('export')
+    try {
+      const r = await memoryOpsApi.exportUser(uid)
+      const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      try {
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `memory-export-${uid}.json`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+      toast.success(`已导出用户 ${r.user_id} 的 ${r.memories.length} 条记忆`)
+    } catch (e) {
+      toast.error(`导出失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const consolidate = async () => {
+    setBusy('consolidate')
+    try {
+      const r = await memoryOpsApi.consolidate({
+        kb_name: kbName.trim() || undefined,
+        min_importance: parseFloat(minImportance) || 0.7,
+        limit,
+      })
+      if (r.consolidated > 0) {
+        toast.success(`已沉淀 ${r.consolidated} 条组织记忆 → KB「${r.kb}」文档 #${r.document_id}`)
+      } else {
+        toast.error('无可沉淀记忆：没有 importance 达标且未沉淀过的组织级记忆')
+      }
+      load()
+    } catch (e) {
+      toast.error(`沉淀失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-3">
+        <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
+          <div className="text-sm font-medium">保留期清理</div>
+          <p className="text-[11px] text-ink-3">
+            删除超过保留期的记忆（天数由环境变量 EAP_MEMORY_RETENTION_DAYS 配置，默认 180），
+            同时清理 TTL 已到期的记忆；动作落审计 memory.purge
+          </p>
+          <Button variant="danger" size="sm" loading={busy === 'purge'} onClick={purge}>执行清理</Button>
+        </div>
+        <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
+          <div className="text-sm font-medium">按用户遗忘 / 导出</div>
+          <p className="text-[11px] text-ink-3">
+            数据权利（v0.6-⑦）：删除或导出某用户的全部记忆；导出为 JSON 附件下载，遗忘落审计 memory.forget_user
+          </p>
+          <Input value={userId} placeholder="user_id，如 user-42"
+            onChange={e => setUserId(e.target.value)} />
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" loading={busy === 'export'}
+              disabled={!userId.trim()} onClick={exportUser}>导出 JSON</Button>
+            <Button variant="danger" size="sm" loading={busy === 'forget'}
+              disabled={!userId.trim()} onClick={forgetUser}>遗忘</Button>
+          </div>
+        </div>
+        <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
+          <div className="text-sm font-medium">组织记忆沉淀 KB</div>
+          <p className="text-[11px] text-ink-3">
+            M41-A：挑 importance ≥ 阈值的组织级记忆聚合为 markdown 文档写入知识库（不存在自动创建，
+            全员可见），已沉淀记忆打标防重复；落审计 memory.consolidate
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <Label>KB 名</Label>
+              <Input value={kbName} onChange={e => setKbName(e.target.value)} />
+            </div>
+            <div>
+              <Label>阈值</Label>
+              <Input type="number" min={0} max={1} step={0.05} value={minImportance}
+                onChange={e => setMinImportance(e.target.value)} />
+            </div>
+            <div>
+              <Label>条数上限</Label>
+              <Input type="number" min={1} max={500} value={limit}
+                onChange={e => setLimit(parseInt(e.target.value) || 50)} />
+            </div>
+          </div>
+          <Button variant="primary" size="sm" loading={busy === 'consolidate'} onClick={consolidate}>
+            执行沉淀
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-[--radius-card] border border-line bg-surface">
+        <div className="flex items-center justify-between px-3 py-2">
+          <div className="text-sm font-medium">组织级记忆（scope=org，最近 100 条）</div>
+          <Button size="xs" variant="secondary" onClick={load}><RefreshCw className="size-3" />刷新</Button>
+        </div>
+        <Table<MemoryItem>
+          rowKey={m => String(m.id)}
+          data={memories}
+          columns={[
+            { key: 'id', title: '#', render: m => <span className="text-[11px] text-ink-500">{m.id}</span> },
+            { key: 'kind', title: '类型', render: m => <Badge tone="brand">{m.kind}</Badge> },
+            { key: 'content', title: '内容', className: 'max-w-lg truncate' },
+            { key: 'importance', title: '重要性', render: m => m.importance.toFixed(2) },
+            { key: 'agent', title: '智能体', render: m => m.agent || '—' },
+            { key: 'created_at', title: '写入时间', render: m => (
+              <span className="text-[11px] text-ink-3">{m.created_at.slice(0, 19).replace('T', ' ')}</span>
+            ) },
+          ]}
+          empty={loading ? '加载中…'
+            : '暂无组织级记忆：智能体经记忆 API 写入 scope=org 的共享记忆后在此查看，达到重要性阈值的可沉淀进知识库'}
+        />
+      </div>
     </div>
   )
 }
