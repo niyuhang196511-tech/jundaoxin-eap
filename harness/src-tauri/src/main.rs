@@ -40,6 +40,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // M43-D 版本更新推送：系统通知插件（notify_update command 直发，Rust 侧无需 capability）
         .plugin(tauri_plugin_notification::init())
+        // M49-F 输入改选择：文件选择对话框（pythonPath「浏览…」，capability 见 default.json dialog:default）
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 本地数据仓（M38）：会话/本地记忆/审计 SQLite，默认不出端
             local_db::init(app)?;

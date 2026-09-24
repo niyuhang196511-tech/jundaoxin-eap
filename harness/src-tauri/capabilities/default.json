@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Harness 默认能力：窗口/托盘 + 全局快捷键（M37 壳工程）+ 自动更新（M43-C）",
+  "description": "Harness 默认能力：窗口/托盘 + 全局快捷键（M37 壳工程）+ 自动更新（M43-C）+ 文件选择对话框（M49-F）",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -10,6 +10,7 @@
     "core:window:allow-set-focus",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "updater:default"
+    "updater:default",
+    "dialog:default"
   ]
 }

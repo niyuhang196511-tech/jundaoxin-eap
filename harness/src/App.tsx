@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import MonitorView from "./MonitorView";
 
 type Agent = { name: string; description?: string; status?: string };
@@ -104,6 +105,9 @@ export default function App() {
   // M43-B 离线降级提示（非空 = 本次回答来自本地模型）
   const [degraded, setDegraded] = useState("");
   const [localModelProbe, setLocalModelProbe] = useState("");
+  // M49-F 输入改选择：本地模型名 datalist 选项（探测成功后填充）+ 并发保护
+  const [localModelOptions, setLocalModelOptions] = useState<string[]>([]);
+  const probeBusyRef = useRef(false);
   // M43-C 自动更新：检查/安装状态（契约见 updater.rs check_update/install_update）
   const [updateMsg, setUpdateMsg] = useState("");
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -119,6 +123,10 @@ export default function App() {
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   const [bundleText, setBundleText] = useState("");
   const [pullName, setPullName] = useState("");
+  // M49-F 输入改选择：平台技能目录（技能名 datalist 选项）+ 降级原因小字
+  const [platformSkills, setPlatformSkills] = useState<{ name: string; description?: string }[]>([]);
+  const [skillListMsg, setSkillListMsg] = useState("");
+  const skillListBusyRef = useRef(false);
   const [pending, setPending] = useState<InspectInfo | null>(null);
   const [pendingBundle, setPendingBundle] = useState("");
   const [grantDraft, setGrantDraft] = useState<Grants>(NO_GRANTS);
@@ -363,18 +371,70 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
     await loadPrivacy();
   }
 
-  // 本地模型连通性探测（M43-B）：GET {localModelUrl}/models 列出可服务模型，配置参考
-  async function probeLocalModel() {
-    setLocalModelProbe("检测中…");
+  // 本地模型连通性探测（M43-B + M49-F）：先走 OpenAI 兼容 GET {localModelUrl}/models，
+  // 失败/空列表再试 Ollama 原生 GET {ollamaUrl}/api/tags（localModelUrl 去掉 /v1 后缀
+  // 即 Ollama 根）。成功把模型名灌进「本地模型名」datalist 选项；失败保持自由输入。
+  // silent=true（聚焦触发的静默探测）不改提示文案，避免打扰；「检测」按钮行为不变。
+  async function probeLocalModel(silent = false) {
+    if (probeBusyRef.current) return;
+    probeBusyRef.current = true;
+    if (!silent) setLocalModelProbe("检测中…");
     try {
       const url = settings.localModelUrl.replace(/\/+$/, "");
-      const r = await fetch(`${url}/models`);
-      if (!r.ok) { setLocalModelProbe(`服务可达但 HTTP ${r.status}`); return; }
-      const j = await r.json();
-      const ids = ((j.data ?? []) as { id?: string }[]).map(m => m.id).filter(Boolean) as string[];
-      setLocalModelProbe(ids.length ? `可用模型：${ids.join("、")}` : "服务可达但未列出模型");
+      let ids: string[] = [];
+      let failure = "";
+      try {
+        const r = await fetch(`${url}/models`);
+        if (!r.ok) failure = `服务可达但 HTTP ${r.status}`;
+        else {
+          const j = await r.json();
+          ids = ((j.data ?? []) as { id?: string }[]).map(m => m.id).filter(Boolean) as string[];
+          if (!ids.length) failure = "服务可达但未列出模型";
+        }
+      } catch (e) {
+        failure = `不可达：${(e as Error).message}`;
+      }
+      if (!ids.length) {
+        const ollamaBase = url.replace(/\/v1$/, "");
+        try {
+          const r = await fetch(`${ollamaBase}/api/tags`);
+          if (!r.ok) failure = `服务可达但 HTTP ${r.status}`;
+          else {
+            const j = await r.json();
+            ids = ((j.models ?? []) as { name?: string }[]).map(m => m.name).filter(Boolean) as string[];
+          }
+        } catch (e) {
+          failure = `不可达：${(e as Error).message}`;
+        }
+      }
+      if (ids.length) {
+        setLocalModelOptions(ids);
+        setLocalModelProbe(`可用模型：${ids.join("、")}（已填入「本地模型名」下拉建议）`);
+      } else if (!silent) {
+        setLocalModelProbe(failure || "服务可达但未列出模型");
+      }
+    } finally {
+      probeBusyRef.current = false;
+    }
+  }
+
+  // M49-F 输入改选择：pythonPath「浏览…」——Tauri 文件选择对话框（plugin-dialog）。
+  // 过滤器如实说明：对话框按扩展名过滤，Windows 用 *.exe（python.exe/python3.exe/venv
+  // 解释器均由用户在其中选定）；*nix 可执行文件常无扩展名，不加过滤、直接浏览文件系统。
+  // 取消选择 → 不改任何值；对话框不可用（异常）→ 提示并保持手输。
+  async function browsePython() {
+    try {
+      const isWindows = navigator.userAgent.includes("Windows");
+      const picked = await openFileDialog({
+        multiple: false,
+        title: "选择 Python 解释器",
+        filters: isWindows ? [{ name: "Python 解释器（*.exe）", extensions: ["exe"] }] : [],
+      });
+      if (typeof picked === "string" && picked) {
+        setSettings(s => ({ ...s, pythonPath: picked }));
+      }
     } catch (e) {
-      setLocalModelProbe(`不可达：${(e as Error).message}`);
+      setError(`文件选择对话框不可用：${(e as Error).message}（仍可手动输入路径）`);
     }
   }
 
@@ -474,6 +534,45 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
     }
   }
   useEffect(() => { if (view === "skills") void loadSkills(); /* eslint-disable-line */ }, [view]);
+
+  // M49-F 输入改选择：拉平台技能目录填充「技能名」datalist（GET /api/v1/skills，
+  // 鉴权头 + 8s 超时对齐 MonitorView.fetchJson）。聚焦时刷新一次（并发保护）；
+  // 未配置平台/拉取失败 → 保持自由输入并小字如实说明原因（不阻塞、不弹错）。
+  async function refreshSkillOptions() {
+    if (skillListBusyRef.current) return;
+    if (!settings.baseUrl.trim() || !settings.deviceKey.trim()) {
+      setPlatformSkills([]);
+      setSkillListMsg("未配置平台地址/设备 Key——技能名为自由输入（「连接设置」注册后可选平台目录）");
+      return;
+    }
+    skillListBusyRef.current = true;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      let r: Response;
+      try {
+        r = await fetch(`${settings.baseUrl}/api/v1/skills`, {
+          headers: { Authorization: `Bearer ${settings.deviceKey}` },
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      checkAuthStatus(r);
+      if (!r.ok) throw new Error(httpError(r));
+      const list = (await r.json()) as { name: string; description?: string }[];
+      setPlatformSkills(list);
+      setSkillListMsg(list.length
+        ? `平台技能目录 ${list.length} 项——聚焦输入框下拉可选，仍可自由输入`
+        : "平台技能目录为空——自由输入名称");
+    } catch (e) {
+      const msg = (e as Error).name === "AbortError" ? "请求超时" : (e as Error).message;
+      setPlatformSkills([]);
+      setSkillListMsg(`平台技能目录拉取失败（${msg}）——保持自由输入`);
+    } finally {
+      skillListBusyRef.current = false;
+    }
+  }
 
   // 从平台技能中心拉取签名包（GET /api/v1/skills/{name}/package）
   async function pullPackage() {
@@ -672,10 +771,20 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
               <button onClick={pullPubKey}>从平台获取</button>
             </div>
             <label>技能名</label>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input style={{ flex: 1 }} value={pullName} onChange={e => setPullName(e.target.value)}
-                placeholder="如 excel-report（配合平台地址与设备 Key 拉取）" />
-              <button onClick={pullPackage} disabled={!settings.deviceKey}>从平台拉取</button>
+            <div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input style={{ flex: 1 }} list="m49-platform-skills" value={pullName}
+                  onChange={e => setPullName(e.target.value)}
+                  onFocus={() => void refreshSkillOptions()}
+                  placeholder="如 excel-report（聚焦拉取平台目录供选择，也可自由输入）" />
+                <button onClick={pullPackage} disabled={!settings.deviceKey}>从平台拉取</button>
+              </div>
+              <datalist id="m49-platform-skills">
+                {platformSkills.map(s => (
+                  <option key={s.name} value={s.name} label={s.description || undefined} />
+                ))}
+              </datalist>
+              {skillListMsg && <small style={{ color: "#888" }}>{skillListMsg}</small>}
             </div>
           </div>
           <textarea style={{ width: "100%", marginTop: 6, boxSizing: "border-box" }} rows={6}
@@ -722,8 +831,12 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
               {runScripts.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
             <label>Python</label>
-            <input value={settings.pythonPath} onChange={e => setSettings(s => ({ ...s, pythonPath: e.target.value }))}
-              placeholder="解释器路径/命令，留空用 PATH 上的 python" />
+            <div style={{ display: "flex", gap: 6 }}>
+              <input style={{ flex: 1 }} value={settings.pythonPath}
+                onChange={e => setSettings(s => ({ ...s, pythonPath: e.target.value }))}
+                placeholder="解释器路径/命令，留空用 PATH 上的 python" />
+              <button onClick={browsePython} title="打开文件选择对话框挑选解释器，选中后回填">浏览…</button>
+            </div>
             <label>超时(秒)</label>
             <input type="number" min={1} max={300} value={runTimeout}
               onChange={e => setRunTimeout(Math.max(1, Math.min(300, Number(e.target.value) || 30)))} />
@@ -846,12 +959,22 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
             <input style={{ flex: 1 }} value={settings.localModelUrl}
               onChange={e => setSettings(s => ({ ...s, localModelUrl: e.target.value }))}
               placeholder="http://localhost:11434/v1（Ollama 默认）" />
-            <button onClick={probeLocalModel}>检测</button>
+            <button onClick={() => void probeLocalModel()}>检测</button>
           </div>
           <label>本地模型名</label>
-          <input value={settings.localModelName}
-            onChange={e => setSettings(s => ({ ...s, localModelName: e.target.value }))}
-            placeholder="留空 = 不启用离线降级；如 qwen3:4b" />
+          <div>
+            <input style={{ width: "100%", boxSizing: "border-box" }} list="m49-local-models"
+              value={settings.localModelName}
+              onChange={e => setSettings(s => ({ ...s, localModelName: e.target.value }))}
+              onFocus={() => {
+                // M49-F：首次聚焦静默探测填充下拉建议（失败不提示，保持自由输入）
+                if (!localModelOptions.length && settings.localModelUrl.trim()) void probeLocalModel(true);
+              }}
+              placeholder="留空 = 不启用离线降级；如 qwen3:4b（点「检测」或聚焦后自动填充可选模型）" />
+            <datalist id="m49-local-models">
+              {localModelOptions.map(m => <option key={m} value={m} />)}
+            </datalist>
+          </div>
           {/* M43-C 自动更新（工程接入）：更新源与公钥由部署侧提供（docs/21） */}
           <label>更新源地址</label>
           <input value={settings.updateEndpoint}
