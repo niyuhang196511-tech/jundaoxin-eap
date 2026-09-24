@@ -38,7 +38,6 @@ def _bundle(name: str, version: str, code: str = TOOL_CODE,
 
 def test_bundle_install_upgrade_uninstall_roundtrip(tmp_path, monkeypatch):
     """安装 → 工具注册 → 升级 → 卸载 全生命周期（不走 HTTP，直接用运行时）。"""
-    from eap.config import get_settings
     from eap.db import init_db
     from eap.runtime.bundles import install_bundle, uninstall_bundle
     from eap.runtime.workflow import _WORKFLOW_TOOLS

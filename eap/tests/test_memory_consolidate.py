@@ -91,7 +91,7 @@ def test_consolidate_no_candidates_no_kb_created(client: TestClient):
     assert bad.status_code == 422
 
 
-def test_consolidate_rbac_member_403(client: TestClient, fake_idp):
+def test_consolidate_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参数仅为激活夹具（模块级导入供 pytest 发现）
     """RBAC：member JWT 调用沉淀端点 → 403（admin 语义，与 purge 一致）。"""
     member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
     resp = client.post("/api/v1/memory/consolidate", headers=member, json={})

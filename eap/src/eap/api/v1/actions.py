@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ...db import get_db
-from ...observability.middleware import record_usage
 from ..deps import require_api_key, resolve_tenant
 
 router = fastapi.APIRouter(prefix="/api/v1/actions",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 
 from fastapi.testclient import TestClient
 
@@ -52,7 +51,6 @@ def test_cost_report_endpoint(client: TestClient):
 def test_rate_limit_chat_429(client: TestClient, monkeypatch):
     """chat 限流：超限 → 429（按凭证计窗）。"""
     from eap.api.security import get_limiter
-    from eap.config import get_settings
 
     limiter = get_limiter("chat")
     monkeypatch.setattr(limiter, "limit", 1)  # 收紧到 1 次触发限流

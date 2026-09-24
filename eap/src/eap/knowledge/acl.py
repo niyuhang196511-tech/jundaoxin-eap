@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextvars
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sqlalchemy import select
 

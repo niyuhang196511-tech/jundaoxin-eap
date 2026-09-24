@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,9 @@ from .graph import delete_graph_for_doc, graph_recall, index_chunk_graph
 from .retrieval import bm25_scores, rrf_combine, top_n
 from .tokenize import tokenize
 from .vector_store import get_vector_store
+
+if TYPE_CHECKING:
+    from .acl import AclContext  # 仅注解引用（运行期过滤逻辑经 .acl 惰性导入）
 
 
 def _kb_pipeline(kb: KB) -> dict:

@@ -7,11 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
@@ -206,7 +203,6 @@ def test_token_refresh_endpoint(client: TestClient, monkeypatch):
 
 def test_validate_passes_auth_headers(client: TestClient, monkeypatch):
     """validate → load_mcp_tools 携带 OAuth 认证头（假传输捕获 http_client 默认头）。"""
-    from eap.runtime import mcp_client
     import mcp.client.streamable_http as _http_mod
     import mcp as _mcp
 

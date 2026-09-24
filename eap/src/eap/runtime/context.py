@@ -122,7 +122,6 @@ async def compress_messages(
         return trim_messages(messages, max_chars)
 
     # 摘要落库留痕（kind=summary, scope=session，meta 记录压缩来源信息）
-    from ..observability import audit
     from .memory import memory_service
 
     record = memory_service.remember(

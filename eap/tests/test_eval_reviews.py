@@ -112,7 +112,7 @@ def test_review_sample_rejects_non_agent_task(client: TestClient):
     assert "agent.invoke" in r.json()["detail"]
 
 
-def test_review_rbac_member_403(client: TestClient, fake_idp):
+def test_review_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参数仅为激活夹具（模块级导入供 pytest 发现）
     """RBAC：member JWT 抽样/评审 → 403（admin 语义）。"""
     from .test_jwt_auth import _access_token  # noqa: F401 复用 JWT 构造（需 fake_idp 配置 OIDC）
 

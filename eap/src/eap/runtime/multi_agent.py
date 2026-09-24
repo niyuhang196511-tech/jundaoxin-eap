@@ -48,7 +48,7 @@ def delegate_tool(target_agent: str, description: str = "") -> Tool:
         from ..agents.registry import registry
         from ..schemas import InvokeRequest
         from ..db import SessionLocal
-        from .policy import PolicyDenied, check_agent_delegation
+        from .policy import check_agent_delegation
 
         token = _depth.set(depth + 1)
         try:

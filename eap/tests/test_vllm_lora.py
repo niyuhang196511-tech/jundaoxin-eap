@@ -224,7 +224,7 @@ def test_lora_delete_blocked_while_loaded(client: TestClient, monkeypatch):
     assert client.delete("/api/v1/lora/m42-adapter-del", headers=AUTH).status_code == 200
 
 
-def test_lora_rbac_member_403(client: TestClient, fake_idp):
+def test_lora_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参数仅为激活夹具（模块级导入供 pytest 发现）
     """RBAC：member JWT 注册/删除/load → 403（管理面写操作 admin 语义）。"""
     member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
     assert client.post("/api/v1/lora", headers=member, json={

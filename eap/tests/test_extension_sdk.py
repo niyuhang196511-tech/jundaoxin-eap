@@ -6,8 +6,6 @@ import json
 
 from fastapi.testclient import TestClient
 
-from .conftest import AUTH
-
 
 def test_rag_sdk_chunker_reranker(client: TestClient):
     """RAG SDK：Chunker/Reranker 基类子类经 register 注册进组件注册表。"""
@@ -65,7 +63,6 @@ def test_custom_workflow_node(client: TestClient):
             db.commit()
         ctx = get_platform_context()
         with SessionLocal() as db:
-            state_vars = {}
             from eap.runtime.workflow import _RunState, _execute_node
             step = spec.steps[0]
             st = _RunState("hello")
@@ -80,12 +77,10 @@ def test_custom_workflow_node(client: TestClient):
 def test_model_provider_sdk(client: TestClient):
     """Provider SDK：注册自定义供应商 → get_provider 解析 → 路由可用。"""
     from eap.modelhub import providers
-    from eap.modelhub.providers import LLMResult, ProviderError
+    from eap.modelhub.providers import LLMResult
 
     class EchoProvider:
         async def complete(self, *, record, messages, tools, temperature, response_schema=None):
-            from eap.modelhub.providers import approx_tokens
-
             text = "echo-provider 回声"
             return LLMResult(content=text, tokens_in=3, tokens_out=3, model=record.name)
 
@@ -100,13 +95,13 @@ def test_model_provider_sdk(client: TestClient):
                             "capabilities": ["chat"], "priority": 1, "enabled": True})()
     from eap.modelhub.providers import get_provider
 
-    provider = get_provider("echo_sdk")
+    provider = get_provider(record.provider)
     assert provider is not None
 
 
 def test_ui_component_sdk(client: TestClient):
     """UI SDK：注册组合式自定义组件 → API 列表可见。"""
-    from eap.ext import register_ui_component, ui_components
+    from eap.ext import register_ui_component
 
     register_ui_component("warehouse_selector", {
         "fields": [

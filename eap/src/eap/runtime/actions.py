@@ -23,7 +23,7 @@ async def run_action(db: Session, *, action: str, tool: str, args: dict,
     返回 {status: "executed"|"approval_required", ...}。
     """
     from ..observability.metrics import incr
-    from .tools import Tool, find_tool
+    from .tools import Tool
     from .workflow import resolve_tool
 
     resolved: Tool | None

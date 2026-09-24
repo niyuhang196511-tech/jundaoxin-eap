@@ -283,7 +283,7 @@ def experiment_report(name: str, request: fastapi.Request, since_hours: float | 
       暂不落该审计，不计入），token/成本按 trace_id 关联 usage_records；
     - 归因不到的维度（如某 variant 无归因调用）返回 0 或 null，不编造数据。
     """
-    from ...models import AuditLog, PromptExperimentRecord, UsageRecord
+    from ...models import AuditLog, PromptExperimentRecord
 
     exp = db.scalar(select(PromptExperimentRecord).where(PromptExperimentRecord.name == name))
     if exp is None:

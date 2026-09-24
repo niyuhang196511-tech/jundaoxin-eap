@@ -145,7 +145,7 @@ def test_report_and_conclude_unknown_experiment_404(client):
                        json={"winner": "a"}).status_code == 404
 
 
-def test_ab_report_rbac_member_403(client, fake_idp):
+def test_ab_report_rbac_member_403(client, fake_idp):  # noqa: F811 参数仅为激活夹具（模块级导入供 pytest 发现）
     """RBAC：member JWT 访问报表/结论端点 → 403（admin 语义，与审计查询一致）。"""
     member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
     assert client.get("/api/v1/prompts/experiments/exp-faq-rpt/report",

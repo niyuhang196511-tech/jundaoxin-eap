@@ -139,9 +139,9 @@ def test_eval_gate_router_fallback(client: TestClient):
             "name": name, "capabilities": ["reasoning"], "provider": "mock", "priority": prio})
         assert resp.status_code == 200, resp.text
 
-    policy = client.post("/api/v1/policies", headers=HEADERS, json={
+    client.post("/api/v1/policies", headers=HEADERS, json={
         "name": "m42b-gate-route", "kind": "eval-gate",
-        "config": {"models": [GATED_MODEL], "require_eval": True, "min_pass_rate": 0.8}}).json()
+        "config": {"models": [GATED_MODEL], "require_eval": True, "min_pass_rate": 0.8}})
     try:
         # FAIL 模型被门禁剔除 → 自然落到降级链第二个
         assert _complete("reasoning", "门禁降级测试") == FALLBACK_MODEL

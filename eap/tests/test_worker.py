@@ -204,7 +204,6 @@ def test_graceful_stop_requeues_inflight_task(client):
 def test_drain_waits_for_inflight_then_finishes(client):
     """drain（独立 worker 优雅停第一阶段）：停领新任务、等在途完成，任务不丢。"""
     from eap.db import SessionLocal
-    from eap.models import TaskRecord
     from eap.runtime.tasks import AsyncioQueueBackend, TaskEngine
 
     started = asyncio.Event()

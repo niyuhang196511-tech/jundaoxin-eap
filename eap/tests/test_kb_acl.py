@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from .conftest import AUTH
 

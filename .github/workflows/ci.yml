@@ -102,9 +102,21 @@ jobs:
           print('migration dry-run (postgres) OK')
           "
       - name: Run tests on PostgreSQL
-        run: uv run pytest -q --ignore=tests/test_mcp.py --ignore=tests/test_tasks_redis.py
+        # M51-A 诊断增强：该步骤曾在 CI 红（65s 后 exit 1）而匿名侧拿不到日志
+        # （logs 端点 403）；同款 PG16 在本地纯净克隆（HEAD 与 f1198f0 两棵树）
+        # 均全量绿——ubuntu 侧差异本地无法穷尽。--tb=short 压缩 traceback 防刷屏，
+        # --junitxml 落逐用例结果，失败时经下方工件二次诊断（无需日志权限）。
+        run: uv run pytest -q --tb=short --junitxml=pg-results.xml --ignore=tests/test_mcp.py --ignore=tests/test_tasks_redis.py
         env:
           EAP_TEST_DB_URL: postgresql+psycopg://eap:eap@localhost:5432/eap
+      - name: Upload pytest JUnit results (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-pytest-results
+          path: eap/pg-results.xml
+          if-no-files-found: warn
+          retention-days: 14
 
   frontend:
     runs-on: ubuntu-latest
@@ -121,6 +133,15 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: eap/frontend/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync backend dependencies (E2E 后端运行环境)
+        # M51-A：E2E 步骤要以 `uv run --no-sync python -m eap` 拉起后端——
+        # 原 job 没有任何 Python/uv 环境，该命令必然失败（8300 无后端）。
+        # extras 对齐 backend job（去掉 postgres：E2E 用临时 sqlite）。
+        working-directory: eap
+        run: uv sync --frozen --extra redis --extra otel --extra docs --extra tokens
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Typecheck
@@ -128,14 +149,37 @@ jobs:
       - name: Unit tests (vitest)
         run: pnpm test
       - name: E2E (Playwright)
-        run: |
-          pnpm exec playwright install chromium
-          cd ../ && uv run --no-sync python -m eap > /tmp/eap.log 2>&1 &
-          cd ../eap && sleep 8
-          cd ../frontend
-          npx playwright test
+        # M51-A 重写（原步骤挂起 1h43m+ 全部 cancelled）：
+        # ① 后端先行就绪——临时 sqlite（lifespan 自动建库+dev 种子：mock-llm/
+        #    dev-key-1/website-faq），curl /health 轮询等待，失败打印后端日志即红；
+        # ② `npx playwright test` 改为 `pnpm exec playwright test`——npx 在包未
+        #    安装时会交互提示等待输入（CI 无 TTY → 无限挂起，疑为 6h 挂起主因）；
+        # ③ 删除 E2E_NO_WEB_SERVER:''：空串在 JS 里 falsy，webServer 分支实际生效
+        #    （与该 env 名义意图相反）。现明确采用「不设置」语义：由
+        #    playwright.config webServer 自动拉起前端 dev(3001) 并等待就绪——与本地
+        #    实跑成功方式一致（后端 8300 + pnpm exec playwright test），且生命周期
+        #    由 playwright 托管（就绪等待/回收），无需手写前端启动与探活。
+        # NEXT_PUBLIC_API_BASE_URL：本地靠 git-ignored 的 .env.local 指向后端，
+        # CI 无该文件 → 编译期注入同值（NEXT_PUBLIC_* 在 dev 编译时内联进 bundle）。
+        timeout-minutes: 20
         env:
-          E2E_NO_WEB_SERVER: ''
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8300
+          EAP_DB_URL: sqlite:////tmp/eap-e2e.db
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          (cd .. && nohup uv run --no-sync python -m eap > /tmp/eap-backend.log 2>&1 &)
+          backend_up=0
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8300/health > /dev/null; then backend_up=1; break; fi
+            sleep 1
+          done
+          if [ "$backend_up" != "1" ]; then
+            echo "::error::后端 8300 在 90s 内未就绪，日志如下"
+            cat /tmp/eap-backend.log
+            exit 1
+          fi
+          echo "backend ready after ~${i}s"
+          pnpm exec playwright test
       - name: Build
         run: pnpm build
 
@@ -164,8 +208,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: eap/frontend/pnpm-lock.yaml
+          # M51-A：不配 cache:pnpm——本 job 只跑 `pnpm audit`（读 lockfile 即可），
+          # 从不 pnpm install；setup-node 的 pnpm 缓存在 Post Run 阶段因 store 路径
+          # 不存在而必失败（job 长期红在 Post Run actions/setup-node@v4）。
       - name: pnpm audit (console prod deps)
         run: pnpm audit --prod --audit-level=high
         working-directory: eap/frontend

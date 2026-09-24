@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 
 import jsonschema
-import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
@@ -137,3 +135,13 @@ def test_run_loop_structuring_with_tools(client: TestClient):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["data"] is not None and data["data"]["stock"] == 1  # mock 合成 integer → 1
+
+
+def test_cleanup_faq_schema_overlay(client: TestClient):
+    """发布空配置归零 faq-agent 覆盖层（隔离纪律，同 test_agent_versions 收尾惯例）：
+    7.7.7 的 output_schema 若泄漏到后续文件，全进程 faq-agent 调用都会被结构化成
+    {"summary": …}，破坏 test_prompt_ab / test_prompts_evals 等的输出断言。"""
+    assert client.post("/api/v1/agents/faq-agent/versions", headers=AUTH,
+                       json={"version": "7.7.8", "config": {}}).status_code == 200
+    assert client.post("/api/v1/agents/faq-agent/versions/7.7.8/publish",
+                       headers=AUTH).status_code == 200

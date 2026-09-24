@@ -40,7 +40,6 @@ def test_eap_plugin_normalization():
 
 def test_plugin_load_syncs_extension_record(client: TestClient, tmp_path, monkeypatch):
     """插件目录加载后与 ExtensionRecord 同步（含 exposes 与统一 manifest）。"""
-    import os
 
     from eap.config import get_settings
 

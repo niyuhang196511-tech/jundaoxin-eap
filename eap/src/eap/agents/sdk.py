@@ -193,13 +193,22 @@ class PlatformContext:
         )
 
     async def delegated_invoke(self, db, target_agent: str, input: str) -> "InvokeResult":
-        """多智能体委派（带 agent-allowlist 策略边界，v0.6-①）。"""
+        """多智能体委派（带 agent-allowlist 策略边界，v0.6-①）。
+
+        registry.invoke 返回 InvokeResponse（HTTP 通道信封），此处收敛为 SDK 原生
+        InvokeResult——与 AgentApp.on_invoke 返回契约一致，委派方可直接消费
+        content/citations/data 等字段。
+        """
         from ..runtime.policy import check_agent_delegation
 
         check_agent_delegation(db, target_agent)
-        from ..schemas import InvokeRequest
+        # 延迟导入：registry 模块运行期反向引用本模块（PlatformContext），顶层导入会成环
+        from .registry import registry
 
-        return await registry.invoke(db, target_agent, InvokeRequest(input=input))
+        resp = await registry.invoke(db, target_agent, InvokeRequest(input=input))
+        return InvokeResult(content=resp.output, citations=resp.citations, steps=resp.steps,
+                            usage=resp.usage, data=resp.data, data_schema=resp.data_schema,
+                            interaction=resp.interaction, artifacts=resp.artifacts)
 
     def skill_context(self, names: list[str]) -> str:
         """技能渐进披露（L2）：加载指定技能的完整指令文本（docs/04 §3）。

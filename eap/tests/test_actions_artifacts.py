@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import time
 
 from fastapi.testclient import TestClient
 
@@ -67,8 +65,7 @@ def test_artifact_create_preview_download(client: TestClient):
     # 直接经 SDK 创建产物（模拟 agent 产物生成）
     import asyncio
 
-    from eap.agents.registry import registry
-    from eap.runtime.artifacts import create_artifact, get_artifact
+    from eap.runtime.artifacts import create_artifact
 
     async def _make():
         from eap.db import SessionLocal

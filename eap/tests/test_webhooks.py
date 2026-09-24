@@ -377,7 +377,7 @@ def test_secret_encrypted_at_rest(client: TestClient, monkeypatch):
     get_settings.cache_clear()
     try:
         ep = _create_endpoint(client, "wh31-enc", ["wh31.enc.*"], secret="sk-plain-enc")
-        row = db_row = None
+        db_row = None
         with SessionLocal() as db:
             db_row = db.scalar(select(WebhookEndpointRecord)
                                .where(WebhookEndpointRecord.id == ep["id"]))

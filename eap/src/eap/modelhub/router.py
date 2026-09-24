@@ -161,7 +161,7 @@ class ModelHub:
                 errors.append(str(e))
                 if span is not None:
                     span.record_exception(e)
-            except Exception as e:
+            except Exception:
                 breaker.record_failure(record.name)  # 非供应商异常同样计入熔断（防半开探测泄漏）
                 raise
             finally:

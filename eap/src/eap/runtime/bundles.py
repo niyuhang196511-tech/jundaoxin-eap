@@ -93,7 +93,7 @@ def install_bundle(data: bytes, *, plugins_root: str, actor: str = "system",
     from sqlalchemy import select
 
     from ..db import SessionLocal
-    from .extension_manifest import check_runtime_compatibility, normalize_eap_plugin
+    from .extension_manifest import check_runtime_compatibility
     from ..models import ExtensionRecord
     from ..plugins import load_plugins
 

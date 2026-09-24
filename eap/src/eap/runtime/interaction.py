@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import InteractionRecord
 
 # UI Schema 支持的控件类型（v0.5 核心集）
 INTERACTION_TYPES = {

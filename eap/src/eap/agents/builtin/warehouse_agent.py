@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 
 from ..app import AgentApp
 from ..manifest import AgentManifest

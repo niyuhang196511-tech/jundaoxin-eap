@@ -180,7 +180,6 @@ def _long_history(n: int = 4, chars: int = 80) -> list[dict]:
 def test_summary_compress_disabled_keeps_truncate(client: TestClient):
     """开关关闭（默认）：超预算仍走字符截断，不产生 summary 记录（v0.9.0 行为不变）。"""
     from eap.db import SessionLocal
-    from eap.models import MemoryRecord
     from eap.runtime.context import compress_messages
 
     sid = _sid()
