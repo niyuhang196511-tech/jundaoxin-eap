@@ -1,7 +1,12 @@
 # 14 - Extension SDK 开发者指南（v0.7）
 
 > 面向扩展开发者：统一 Manifest、各类型 SDK 契约、开发→打包→安装→启停的生命周期。
-> 配套示例见 `python -m eap.scaffold generate <type> <name>` 生成的模板。
+> 配套示例见 `python -m eap.scaffold generate <type> <name>` 生成的模板
+> （type 全集见 §五 CLI；`eap/examples/` 另有可运行示例：rag-pipeline（自定义重排器）、
+> task-flow（经任务引擎跑长任务））。
+>
+> API 契约机读版：`docs/openapi.json`（由 `scripts/export_openapi.py` 从 create_app()
+> 导出，CI 校验漂移——接口/Schema 变更未同步入库版本即红）。
 
 ## 一、统一 Manifest
 
@@ -52,19 +57,24 @@ KB 创建后经 `pipeline` 字段选择：`{"chunker": {"name": "slash-chunker"}
 
 ### 3. Workflow Node SDK
 `register_workflow_node(kind, executor)`：自定义节点类型进入 DSL 合法集合，
-executor(step, ctx, db, state, invoke_input) -> str；parallel/loop 体内不可用。
+executor(step, ctx, db, state, invoke_input) -> str（async）；parallel/loop 体内不可用。
+脚手架：`python -m eap.scaffold generate workflow-node <name>`（executor 骨架 + manifest + README）。
 
 ### 4. Model Provider SDK
 `register_provider(name, provider)`：实现 `complete(...)/stream_complete(...)`
-协议（见 `modelhub/providers.py` Provider Protocol）的供应商适配即可入路由链。
+协议（见 `modelhub/providers.py` Provider Protocol）的供应商适配即可入路由链；
+模型登记的 provider 字段填该名字，`get_provider(name)` 即解析到它（自定义注册表
+→ mock → openai_compat）。脚手架：`python -m eap.scaffold generate model-provider <name>`。
 
 ### 5. Connector SDK
 `register_connector_kind(kind, factory)`：factory(ConnectorRecord) -> list[Tool]，
 扩展 rest/mock-erp 之外的连接器形态（如 SDK 化的 SaaS 客户端）。
+脚手架：`python -m eap.scaffold generate connector <name>`（endpoints→工具集骨架 + 鉴权占位）。
 
 ### 6. UI SDK（MVP）
 `register_ui_component(id, schema_fragment)`：自定义交互组件 = 组合式 UISchema 片段，
 interaction schema 以 `{"type": "custom", "component": "id"}` 引用，前端以内联子表单渲染。
+脚手架：`python -m eap.scaffold generate ui-component <name>`。
 
 ### 7. Agent SDK
 `AgentApp` / `AgentManifest` / `register_agent`（见 docs/03 §7 与 `agents/sdk.py`），
@@ -82,3 +92,8 @@ scaffold generate → 开发/测试 → scaffold pack（.eapext）
 
 CLI：`python -m eap.scaffold generate <type> <name> [--dir ./plugins]`、
 `python -m eap.scaffold pack <dir> <out.eapext>`。
+type 全集：`agent` / `tool` / `rag` / `mcp` / `skill` /
+`workflow-node` / `model-provider` / `connector` / `ui-component`
+（后四者为 M48-B 补齐的 SDK 脚手架：每类生成 manifest.json + 入口 manifest.py + README，
+manifest type 对应统一 Manifest 的 workflow_node / model_provider / connector / ui，
+`pack` 打包与安装端点开箱可用）。

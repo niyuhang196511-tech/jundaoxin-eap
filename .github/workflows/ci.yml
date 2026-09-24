@@ -35,6 +35,11 @@ jobs:
         run: uv run pytest tests/test_mcp.py tests/test_tasks_redis.py -q
         env:
           EAP_HOST: "127.0.0.1"
+      - name: OpenAPI contract export & drift check (M48-B)
+        # 契约即文档：重新导出 docs/openapi.json 与入库版本 diff——接口/Schema 漂移未同步即红
+        run: |
+          uv run python ../scripts/export_openapi.py
+          git diff --exit-code -- ../docs/openapi.json
 
   frontend:
     runs-on: ubuntu-latest
