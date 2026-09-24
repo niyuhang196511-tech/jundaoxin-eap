@@ -415,11 +415,6 @@ export default function WorkflowCanvasPage() {
                   onConnect={onConnect}
                   nodeTypes={nodeTypes}
                   onDelete={deleteSelected}
-                  onNodeDoubleClick={(_, n) => {
-                    const el = document.getElementById('wf-drawer-opener') as HTMLButtonElement | null
-                    el?.click()
-                    void n
-                  }}
                   fitView
                   deleteKeyCode={null}
                   proOptions={{ hideAttribution: true }}
@@ -451,7 +446,7 @@ export default function WorkflowCanvasPage() {
         </div>
       </div>
 
-      {/* 配置抽屉（通过隐藏按钮让节点双击也能打开） */}
+      {/* 配置抽屉（选中节点即打开；原「隐藏按钮 + 节点双击触发」为死代码已删除，M51-B） */}
       {dsl && (
         <ConfigDrawer
           step={selectedStep}

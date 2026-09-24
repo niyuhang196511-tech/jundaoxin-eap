@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { BookOpen, FileText, Plus, Search, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import {
-  Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Select,
+  Badge, Button, Card, CardBody, ConfirmDialog, DialogContent, EmptyState, Input, Label, PageHeader, Select,
   Skeleton, Textarea, toast,
 } from '@/components/ui'
 import { api } from '@/lib/api'
@@ -198,13 +198,39 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
     }
   }
 
-  const removeDoc = async (docId: number) => {
+  // 破坏性删除需确认（M51-B）：删除按钮只置目标，ConfirmDialog 确认后执行
+  const [removeDocTarget, setRemoveDocTarget] = useState<DocItem | null>(null)
+  const [removingDoc, setRemovingDoc] = useState(false)
+  const removeDoc = async () => {
+    if (!removeDocTarget) return
+    setRemovingDoc(true)
     try {
-      await api('DELETE', `/api/v1/kb/${encodeURIComponent(name)}/documents/${docId}`)
+      await api('DELETE', `/api/v1/kb/${encodeURIComponent(name)}/documents/${removeDocTarget.id}`)
       toast.success('文档已删除（chunk/图谱/向量级联清理）')
+      setRemoveDocTarget(null)
       loadDocs()
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setRemovingDoc(false)
+    }
+  }
+
+  // ACL 规则删除同样过确认（M51-B）
+  const [removeAclTarget, setRemoveAclTarget] = useState<AclRule | null>(null)
+  const [removingAcl, setRemovingAcl] = useState(false)
+  const removeAcl = async () => {
+    if (!removeAclTarget) return
+    setRemovingAcl(true)
+    try {
+      await api('DELETE', `/api/v1/kb/acls/${removeAclTarget.id}`)
+      setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
+      toast.success('ACL 规则已删除')
+      setRemoveAclTarget(null)
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setRemovingAcl(false)
     }
   }
 
@@ -342,7 +368,7 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
                     <Badge tone={(d.meta as { type?: string })?.type === 'faq' ? 'amber' : 'green'}>
                       {(d.meta as { type?: string })?.type === 'faq' ? 'FAQ' : '已索引'}
                     </Badge>
-                    <Button size="xs" variant="ghost" onClick={() => removeDoc(d.id)} title="删除">
+                    <Button size="xs" variant="ghost" onClick={() => setRemoveDocTarget(d)} title="删除">
                       <Trash2 className="size-3.5" />
                     </Button>
                   </div>
@@ -424,7 +450,7 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
         </div>
       </DialogContent>
 
-<DialogContent open={aclOpen} onOpenChange={setAclOpen}
+      <DialogContent open={aclOpen} onOpenChange={setAclOpen}
         title={`访问控制 · ${name}`} description="deny 优先 → allow → 默认可见（无规则对租户内全部可见）"
         footer={<Button variant="ghost" onClick={() => setAclOpen(false)}>关闭</Button>}>
         <div className="space-y-3">
@@ -468,13 +494,14 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
                 {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
               </Select>
             </div>
-            <Button variant="primary" disabled={!aclForm.subject} loading={false}
+            <Button variant="primary" disabled={!aclForm.subject}
               onClick={async () => {
                 try {
                   await api('POST', `/api/v1/kb/${encodeURIComponent(name)}/acls`, {
                     effect: aclForm.effect, subject_type: aclForm.subject_type,
                     subject: aclForm.subject,
-                    document_id: aclForm.document_id ? Number(aclForm.document_id) : null})
+                    document_id: aclForm.document_id ? Number(aclForm.document_id) : null,
+                  })
                   setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
                   setAclForm({ ...aclForm, subject: '' })
                   toast.success('ACL 规则已创建')
@@ -489,17 +516,25 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
                 <Badge tone={a.effect === 'deny' ? 'red' : 'green'}>{a.effect}</Badge>
                 <span className="text-ink">{a.subject_type}:{a.subject}</span>
                 <span className="text-ink-3">→ {a.document}</span>
-                <Button size="xs" variant="ghost" className="ml-auto" onClick={async () => {
-                  try {
-                    await api('DELETE', `/api/v1/kb/acls/${a.id}`)
-                    setAcls(await api<AclRule[]>('GET', `/api/v1/kb/${encodeURIComponent(name)}/acls`))
-                  } catch (e) { toast.error(`删除失败：${(e as Error).message}`) }
-                }}><Trash2 className="size-3.5" /></Button>
+                <Button size="xs" variant="ghost" className="ml-auto" title="删除规则"
+                  onClick={() => setRemoveAclTarget(a)}><Trash2 className="size-3.5" /></Button>
               </div>
             ))}
           </div>
         </div>
       </DialogContent>
+
+      <ConfirmDialog open={!!removeDocTarget} onCancel={() => setRemoveDocTarget(null)}
+        title={`删除文档「${removeDocTarget?.title ?? ''}」？`}
+        description="将级联清理该文档的全部分块、向量索引与图谱关系，删除后不可恢复；引用该文档的检索结果随即消失。"
+        confirmLabel="删除" busy={removingDoc} onConfirm={removeDoc} />
+
+      <ConfirmDialog open={!!removeAclTarget} onCancel={() => setRemoveAclTarget(null)}
+        title="删除该 ACL 规则？"
+        description={removeAclTarget
+          ? `规则「${removeAclTarget.effect} ${removeAclTarget.subject_type}:${removeAclTarget.subject}」删除后立即按剩余规则生效（无规则时租户内默认可见）。`
+          : undefined}
+        confirmLabel="删除" busy={removingAcl} onConfirm={removeAcl} />
     </div>
   )
 }

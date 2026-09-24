@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CircleStop, Plus, RefreshCw } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
+  Badge, Button, ConfirmDialog, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import { UISchemaRenderer, type UISchema } from '@/components/chat/UISchemaRenderer'
@@ -166,16 +166,13 @@ function TasksPanel() {
         )}
       </DialogContent>
 
-      {/* 审批确认 */}
-      <DialogContent open={!!confirm} onOpenChange={o => !o && setConfirm(null)}
+      {/* 审批确认（ConfirmDialog 金标准范本，M51-B 抽为可复用组件后原位替换） */}
+      <ConfirmDialog open={!!confirm} onCancel={() => setConfirm(null)}
         title={confirm?.decision ? '批准该操作？' : '否决该操作？'}
         description="批准后任务将从 Checkpoint 续跑；否决则工具不执行，由模型向用户说明。"
-        footer={<>
-          <Button variant="ghost" onClick={() => setConfirm(null)}>取消</Button>
-          <Button variant={confirm?.decision ? 'primary' : 'danger'} onClick={doApprove} loading={busy}>
-            {confirm?.decision ? '批准' : '否决'}
-          </Button>
-        </>} />
+        confirmLabel={confirm?.decision ? '批准' : '否决'}
+        variant={confirm?.decision ? 'primary' : 'danger'}
+        busy={busy} onConfirm={doApprove} />
 
       {/* 交互引擎表单（v0.5-④）：WAITING_INPUT 任务的表单填写与提交续跑 */}
       <DialogContent open={!!interactTask} onOpenChange={o => !o && setInteractTask(null)}
@@ -274,13 +271,21 @@ function SchedulesPanel() {
     }
   }
 
-  const remove = async (name: string) => {
+  // 破坏性删除需确认（M51-B）：删除按钮只置目标，ConfirmDialog 确认后执行
+  const [removeName, setRemoveName] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const remove = async () => {
+    if (!removeName) return
+    setRemoving(true)
     try {
-      await api('DELETE', `/api/v1/tasks/schedules/${name}`)
+      await api('DELETE', `/api/v1/tasks/schedules/${removeName}`)
       toast.success('已删除')
+      setRemoveName(null)
       load()
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setRemoving(false)
     }
   }
 
@@ -304,7 +309,7 @@ function SchedulesPanel() {
                 <Button size="xs" variant="secondary" onClick={() => toggle(s.name, !s.enabled)}>
                   {s.enabled ? '停用' : '启用'}
                 </Button>
-                <Button size="xs" variant="ghost" onClick={() => remove(s.name)}>
+                <Button size="xs" variant="ghost" onClick={() => setRemoveName(s.name)}>
                   删除
                 </Button>
               </div>
@@ -351,6 +356,11 @@ function SchedulesPanel() {
           </div>
         </div>
       </DialogContent>
+
+      <ConfirmDialog open={!!removeName} onCancel={() => setRemoveName(null)}
+        title={`删除调度「${removeName ?? ''}」？`}
+        description="删除后到期不再自动提交任务；已产生的历史任务不受影响。"
+        confirmLabel="删除" busy={removing} onConfirm={remove} />
     </div>
   )
 }

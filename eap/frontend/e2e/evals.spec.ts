@@ -74,10 +74,13 @@ test.describe.serial('评测中心·影子流量', () => {
     await page.goto('/evals')
     await page.getByRole('tab', { name: '影子流量' }).click()
     await page.getByText(CFG).first().click()
-    // 删除按钮按行定位（dev 库可能存在多个历史配置）；confirm 确认框自动接受
-    page.once('dialog', d => d.accept())
+    // 删除按钮按行定位（dev 库可能存在多个历史配置）
     await page.locator('table').first().locator('tbody tr', { hasText: CFG })
       .getByRole('button', { name: '删除' }).click()
+    // M51-B：window.confirm → ConfirmDialog，点击对话框内「删除」确认
+    const confirm = page.locator('[role="dialog"]')
+    await expect(confirm.getByText(`删除影子配置「${CFG}」？`)).toBeVisible({ timeout: 10_000 })
+    await confirm.getByRole('button', { name: '删除', exact: true }).click()
     await expect(page.getByText(CFG)).toHaveCount(0, { timeout: 10_000 })
   })
 })

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowUp, BookOpen, Bot, Check, ChevronDown, CircleStop, ListTree, Plus, SquarePen, Trash2, User,
 } from 'lucide-react'
-import { Button, Input } from '@/components/ui'
+import { Button, ConfirmDialog, Input, toast } from '@/components/ui'
 import { Markdown } from '@/components/chat/Markdown'
 import { SchemaRenderer } from '@/components/chat/renderers/SchemaRenderer'
 import { UISchemaRenderer, toastInteractionError, type UISchema } from '@/components/chat/UISchemaRenderer'
@@ -62,7 +62,9 @@ export function ChatPanel({ agent }: { agent: string }) {
       const msgs = await conversationsApi.messages(sid)
       setMessages(msgs.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })))
     } catch (e) {
+      // bug 修复（M51-B）：失败不再静默清空——如实提示（消息区保持空态）
       setMessages([])
+      toast.error(`加载会话消息失败：${(e as Error).message}`)
     }
   }
 
@@ -71,15 +73,25 @@ export function ChatPanel({ agent }: { agent: string }) {
     setMessages([])
   }
 
-  const removeSession = async (sid: string) => {
+  // 破坏性删除需确认（M51-B）：删除按钮只置目标，ConfirmDialog 确认后执行
+  const [removeSid, setRemoveSid] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const removeSession = async () => {
+    if (!removeSid) return
+    setRemoving(true)
     try {
-      await conversationsApi.remove(sid)
-      if (sid === sessionId) {
+      await conversationsApi.remove(removeSid)
+      if (removeSid === sessionId) {
         setSessionId('')
         setMessages([])
       }
+      setRemoveSid(null)
       loadSessions()
-    } catch { /* 静默 */ }
+    } catch (e) {
+      toast.error(`删除会话失败：${(e as Error).message}`)
+    } finally {
+      setRemoving(false)
+    }
   }
 
   const patchLast = useCallback((patch: Partial<ChatMsg>) => {
@@ -253,7 +265,7 @@ export function ChatPanel({ agent }: { agent: string }) {
               </div>
               <button
                 className="hidden shrink-0 cursor-pointer rounded p-1 text-ink-3 hover:bg-red-50 hover:text-red-500 group-hover:block dark:hover:bg-red-900/30"
-                onClick={e => { e.stopPropagation(); removeSession(s.session_id) }}
+                onClick={e => { e.stopPropagation(); setRemoveSid(s.session_id) }}
                 title="删除会话"
               >
                 <Trash2 className="size-3.5" />
@@ -316,6 +328,11 @@ export function ChatPanel({ agent }: { agent: string }) {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog open={!!removeSid} onCancel={() => setRemoveSid(null)}
+        title="删除该会话？"
+        description="会话及其消息记录将被删除，不可恢复。"
+        confirmLabel="删除" busy={removing} onConfirm={removeSession} />
     </div>
   )
 }

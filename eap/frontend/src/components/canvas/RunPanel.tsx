@@ -51,8 +51,10 @@ export function RunPanel({
         `/api/v1/workflows/${encodeURIComponent(workflowName)}/test-run`, { input })
       poll(run_id)
     } catch (e) {
+      // bug 修复（M51-B）：原 catch 后重抛 → onClick 的 async 回调产生 unhandled rejection；
+      // 对齐全站错误处理：toast 如实提示
       setRunning(false)
-      throw e
+      toast.error(`试运行失败：${(e as Error).message}`)
     }
   }
 

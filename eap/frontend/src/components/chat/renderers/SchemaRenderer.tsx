@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { Play } from 'lucide-react'
-import { Button, Table, toast } from '@/components/ui'
+import { Button, ConfirmDialog, Table, toast } from '@/components/ui'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
 
@@ -15,12 +15,13 @@ export interface ActionSpec {
   [key: string]: unknown
 }
 
-/** 动作按钮（v0.5-⑥）：点击 → 可选确认 → /actions/invoke → 结果 toast + 回调 */
+/** 动作按钮（v0.5-⑥）：点击 → 可选确认（M51-B：window.confirm → ConfirmDialog）→ /actions/invoke → 结果 toast + 回调 */
 function ActionButton({ action, onDone }: {
   action: ActionSpec
   onDone?: (result: Record<string, unknown>) => void
 }) {
   const [pending, setPending] = useState(false)
+  const [askOpen, setAskOpen] = useState(false)
   const run = () => {
     const exec = async () => {
       setPending(true)
@@ -43,12 +44,19 @@ function ActionButton({ action, onDone }: {
     void exec()
   }
   return (
-    <Button size="xs" variant="secondary" disabled={pending}
-      onClick={action.confirmation
-        ? () => { if (window.confirm(`确认执行「${action.label}」？`)) run() }
-        : run}>
-      <Play className="size-3" />{pending ? '执行中…' : action.label}
-    </Button>
+    <>
+      <Button size="xs" variant="secondary" disabled={pending}
+        onClick={action.confirmation ? () => setAskOpen(true) : run}>
+        <Play className="size-3" />{pending ? '执行中…' : action.label}
+      </Button>
+      {action.confirmation && (
+        /* 一般动作确认（非破坏性删除语义）→ variant=primary */
+        <ConfirmDialog open={askOpen} onCancel={() => setAskOpen(false)}
+          title={`确认执行「${action.label}」？`}
+          confirmLabel="执行" variant="primary" busy={pending}
+          onConfirm={() => { setAskOpen(false); run() }} />
+      )}
+    </>
   )
 }
 

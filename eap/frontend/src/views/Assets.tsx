@@ -16,25 +16,34 @@ export default function AssetsPage() {
   const [skills, setSkills] = useState<Skill[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [flows, setFlows] = useState<Flow[]>([])
+  // 首屏加载（M51-B）：三个目录并行拉齐后统一熄灭；面板内 reload 静默刷新不闪 spinner
+  const [loading, setLoading] = useState(true)
 
   const loadSkills = useCallback(async () => {
-    try { setSkills(await api<Skill[]>('GET', '/api/v1/skills')) } catch { /* 静默 */ }
+    try { setSkills(await api<Skill[]>('GET', '/api/v1/skills')) }
+    catch (e) { toast.error(`加载技能失败：${(e as Error).message}`) }
   }, [])
   const loadPrompts = useCallback(async () => {
-    try { setPrompts(await api<Prompt[]>('GET', '/api/v1/prompts')) } catch { /* 静默 */ }
+    try { setPrompts(await api<Prompt[]>('GET', '/api/v1/prompts')) }
+    catch (e) { toast.error(`加载 Prompt 失败：${(e as Error).message}`) }
   }, [])
   const loadFlows = useCallback(async () => {
-    try { setFlows(await api<Flow[]>('GET', '/api/v1/workflows')) } catch { /* 静默 */ }
+    try { setFlows(await api<Flow[]>('GET', '/api/v1/workflows')) }
+    catch (e) { toast.error(`加载工作流失败：${(e as Error).message}`) }
   }, [])
-  useEffect(() => { loadSkills(); loadPrompts(); loadFlows() }, [loadSkills, loadPrompts, loadFlows])
+  useEffect(() => {
+    Promise.allSettled([loadSkills(), loadPrompts(), loadFlows()])
+      .then(() => setLoading(false))
+  }, [loadSkills, loadPrompts, loadFlows])
 
-  const skillsTab = <SkillsPanel list={skills} reload={loadSkills} />
-  const promptsTab = <PromptsPanel list={prompts} reload={loadPrompts} />
+  const skillsTab = <SkillsPanel list={skills} loading={loading} reload={loadSkills} />
+  const promptsTab = <PromptsPanel list={prompts} loading={loading} reload={loadPrompts} />
   const flowsTab = (
     <div className="rounded-[--radius-card] border border-line bg-surface">
       <Table<Flow>
         rowKey={f => f.name}
         data={flows}
+        loading={loading}
         columns={[
           { key: 'name', title: '名称', render: f => <span className="font-medium">{f.name}</span> },
           { key: 'version', title: '版本' },
@@ -58,7 +67,7 @@ export default function AssetsPage() {
   )
 }
 
-function SkillsPanel({ list, reload }: { list: Skill[]; reload: () => void }) {
+function SkillsPanel({ list, loading, reload }: { list: Skill[]; loading: boolean; reload: () => void }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', desc: '', ins: '' })
   const [saving, setSaving] = useState(false)
@@ -89,6 +98,7 @@ function SkillsPanel({ list, reload }: { list: Skill[]; reload: () => void }) {
         <Table<Skill>
           rowKey={s => s.name}
           data={list}
+          loading={loading}
           columns={[
             { key: 'name', title: '名称', render: s => <span className="font-medium">{s.name}</span> },
             { key: 'version', title: '版本' },
@@ -122,7 +132,7 @@ function SkillsPanel({ list, reload }: { list: Skill[]; reload: () => void }) {
   )
 }
 
-function PromptsPanel({ list, reload }: { list: Prompt[]; reload: () => void }) {
+function PromptsPanel({ list, loading, reload }: { list: Prompt[]; loading: boolean; reload: () => void }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', tpl: '' })
   const [saving, setSaving] = useState(false)
@@ -164,6 +174,7 @@ function PromptsPanel({ list, reload }: { list: Prompt[]; reload: () => void }) 
         <Table<Prompt>
           rowKey={p => p.name}
           data={list}
+          loading={loading}
           columns={[
             { key: 'name', title: '名称', render: p => <span className="font-medium">{p.name}</span> },
             { key: 'version', title: '版本' },

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { FlaskConical, GitCompareArrows, Play, Plus, Users } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
+  Badge, Button, ConfirmDialog, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import { agentsApi, api, kbApi, tasksApi } from '@/lib/api'
@@ -54,6 +54,8 @@ export default function EvalsPage() {
 
 function EvalRunTab() {
   const [datasets, setDatasets] = useState<DS[]>([])
+  const [dsLoading, setDsLoading] = useState(true)
+  const [histLoading, setHistLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
   const [dsKind, setDsKind] = useState('agent')
@@ -80,6 +82,8 @@ function EvalRunTab() {
       setDataset(prev => prev || list[0]?.name || '')
     } catch (e) {
       toast.error(`加载数据集失败：${(e as Error).message}`)
+    } finally {
+      setDsLoading(false)
     }
   }, [])
   useEffect(() => { load() }, [load])
@@ -130,6 +134,7 @@ function EvalRunTab() {
     try {
       setHistory(await api<RunResult[]>('GET', '/api/v1/evals/runs?limit=20'))
     } catch { /* 历史加载失败静默 */ }
+    finally { setHistLoading(false) }
   }, [])
   useEffect(() => { loadHistory() }, [loadHistory])
 
@@ -148,6 +153,7 @@ function EvalRunTab() {
           <Table<DS>
             rowKey={d => d.name}
             data={datasets}
+            loading={dsLoading}
             onRowClick={d => { setDataset(d.name); setAgent(d.kind === 'rag' ? '' : agent) }}
             columns={[
               { key: 'name', title: '数据集', render: d => (
@@ -204,6 +210,7 @@ function EvalRunTab() {
           <Table<RunResult>
             rowKey={r => r.run_id}
             data={history}
+            loading={histLoading}
             onRowClick={r => setResult(r)}
             columns={[
               { key: 'run_id', title: '运行', render: r => <code className="text-[11px]">{r.run_id.slice(0, 8)}</code> },
@@ -310,6 +317,8 @@ function EvalRunTab() {
 
 function ShadowTab() {
   const [configs, setConfigs] = useState<ShadowConfig[]>([])
+  const [cfgLoading, setCfgLoading] = useState(true)
+  const [runsLoading, setRunsLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [form, setForm] = useState({ name: '', source_agent: '', shadow_agent: '', sample_rate: '1', judge_criteria: '', note: '' })
   const [selected, setSelected] = useState('')
@@ -324,13 +333,16 @@ function ShadowTab() {
 
   const loadConfigs = useCallback(async () => {
     try { setConfigs(await shadowApi.configs()) } catch (e) { toast.error(`加载影子配置失败：${(e as Error).message}`) }
+    finally { setCfgLoading(false) }
   }, [])
   useEffect(() => { loadConfigs() }, [loadConfigs])
 
   const selectConfig = useCallback(async (name: string) => {
     setSelected(name)
     setReport(null)
+    setRunsLoading(true)
     try { setRuns(await shadowApi.runs(name)) } catch (e) { toast.error(`加载影子运行失败：${(e as Error).message}`) }
+    finally { setRunsLoading(false) }
   }, [])
 
   const createConfig = async () => {
@@ -355,13 +367,19 @@ function ShadowTab() {
     } catch (e) { toast.error(`操作失败：${(e as Error).message}`) }
   }
 
-  const remove = async (c: ShadowConfig) => {
-    if (!window.confirm(`删除影子配置 ${c.name}？（历史配对运行保留）`)) return
+  // 破坏性删除需确认（M51-B）：window.confirm → ConfirmDialog，删除按钮只置目标
+  const [removeCfg, setRemoveCfg] = useState<ShadowConfig | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const doRemove = async () => {
+    if (!removeCfg) return
+    setRemoving(true)
     try {
-      await shadowApi.remove(c.name)
-      if (selected === c.name) { setSelected(''); setRuns([]); setReport(null) }
+      await shadowApi.remove(removeCfg.name)
+      if (selected === removeCfg.name) { setSelected(''); setRuns([]); setReport(null) }
+      setRemoveCfg(null)
       loadConfigs()
     } catch (e) { toast.error(`删除失败：${(e as Error).message}`) }
+    finally { setRemoving(false) }
   }
 
   const loadReport = async (withJudge: boolean) => {
@@ -388,6 +406,7 @@ function ShadowTab() {
         <Table<ShadowConfig>
           rowKey={c => c.name}
           data={configs}
+          loading={cfgLoading}
           onRowClick={c => void selectConfig(c.name)}
           columns={[
             { key: 'name', title: '配置', render: c => (
@@ -399,8 +418,8 @@ function ShadowTab() {
             { key: 'enabled', title: '状态', render: c => <Badge tone={c.enabled ? 'green' : 'gray'}>{c.enabled ? '启用' : '停用'}</Badge> },
             { key: 'ops', title: '操作', render: c => (
               <span className="flex gap-1.5" onClick={e => e.stopPropagation()}>
-                <Button variant="ghost" onClick={() => void toggle(c)}>{c.enabled ? '停用' : '启用'}</Button>
-                <Button variant="ghost" className="text-red-500" onClick={() => void remove(c)}>删除</Button>
+                <Button size="xs" variant="secondary" onClick={() => void toggle(c)}>{c.enabled ? '停用' : '启用'}</Button>
+                <Button size="xs" variant="danger" onClick={() => setRemoveCfg(c)}>删除</Button>
               </span>
             ) },
           ]}
@@ -465,6 +484,7 @@ function ShadowTab() {
             <Table<ShadowRun>
               rowKey={r => String(r.id)}
               data={runs}
+              loading={runsLoading}
               onRowClick={r => void openRunDetail(r.id)}
               columns={[
                 { key: 'id', title: '运行', render: r => <code className="text-[11px]">#{r.id}</code> },
@@ -551,6 +571,11 @@ function ShadowTab() {
           </div>
         )}
       </DialogContent>
+
+      <ConfirmDialog open={!!removeCfg} onCancel={() => setRemoveCfg(null)}
+        title={`删除影子配置「${removeCfg?.name ?? ''}」？`}
+        description="删除后生产调用不再分流到影子 agent；历史配对运行保留。"
+        confirmLabel="删除" busy={removing} onConfirm={doRemove} />
     </div>
   )
 }
@@ -562,6 +587,7 @@ const DIM_LABEL: Record<string, string> = { correctness: '正确性', relevance:
 
 function ReviewTab() {
   const [samples, setSamples] = useState<ReviewSample[]>([])
+  const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('')
   const [agentFilter, setAgentFilter] = useState('')
   const [taskId, setTaskId] = useState('')
@@ -595,6 +621,7 @@ function ReviewTab() {
         status: statusFilter || undefined, agent: agentFilter || undefined,
       }))
     } catch (e) { toast.error(`加载抽检队列失败：${(e as Error).message}`) }
+    finally { setLoading(false) }
   }, [statusFilter, agentFilter])
   useEffect(() => { load() }, [load])
 
@@ -699,6 +726,7 @@ function ReviewTab() {
         <Table<ReviewSample>
           rowKey={r => String(r.id)}
           data={samples}
+          loading={loading}
           onRowClick={r => void openDetail(r.id)}
           columns={[
             { key: 'id', title: '样本', render: r => <code className="text-[11px]">#{r.id}</code> },
@@ -720,7 +748,13 @@ function ReviewTab() {
 
       <DialogContent open={detail !== null} onOpenChange={open => { if (!open) setDetail(null) }}
         title={`抽检样本 #${detail?.id ?? ''}`}
-        description={detail ? `${detail.agent} · 任务 ${detail.source_id.slice(0, 16)}` : ''}>
+        description={detail ? `${detail.agent} · 任务 ${detail.source_id.slice(0, 16)}` : ''}
+        footer={detail && detail.status !== 'reviewed' ? (
+          <>
+            <Button variant="ghost" onClick={() => setDetail(null)}>取消</Button>
+            <Button variant="primary" onClick={submit}>提交评审</Button>
+          </>
+        ) : undefined}>
         {detail && (
           <div className="space-y-3 text-xs">
             <div>
@@ -762,7 +796,6 @@ function ReviewTab() {
                   <Textarea rows={2} value={note} onChange={e => setNote(e.target.value)}
                     placeholder="评审备注（可选）" />
                 </div>
-                <Button variant="primary" className="w-full" onClick={submit}>提交评审</Button>
               </>
             )}
           </div>

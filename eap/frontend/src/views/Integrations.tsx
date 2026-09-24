@@ -3,14 +3,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
+  Badge, Button, Checkbox, ChipPicker, ConfirmDialog, DegradeNote, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import {
   agentsApi, api, connectorsApi, triggersApi, webhooksApi, workflowsApi,
   type TriggerRule, type WebhookDelivery, type WebhookEndpoint,
 } from '@/lib/api'
-import { cn } from '@/lib/cn'
 
 type Connector = {
   name: string
@@ -33,35 +32,6 @@ const WH_STATUS_TONE: Record<string, BadgeTone> = {
 
 const TRIGGER_SOURCE_TONE: Record<string, BadgeTone> = {
   event: 'purple', cron: 'amber', webhook: 'blue',
-}
-
-/** 多选 chips（照抄 components/agents/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
-function ChipPicker({ options, values, onChange }: {
-  options: string[]
-  values: string[]
-  onChange: (next: string[]) => void
-}) {
-  const all = [...new Set([...options, ...values])]
-  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {all.map(name => {
-        const on = values.includes(name)
-        return (
-          <button
-            key={name}
-            type="button"
-            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
-              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
-            )}
-          >{name}</button>
-        )
-      })}
-    </div>
-  )
 }
 
 /* ---------- 连接器 endpoints 轻量行编辑（M49-E1，替代裸 JSON textarea） ---------- */
@@ -367,11 +337,9 @@ function ConnectorsTab() {
                         className="font-mono !text-[11px]"
                         onChange={e => updateRow(i, { query: e.target.value })} />
                     )}
-                    <label className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-3">
-                      <input type="checkbox" checked={r.requires_approval} className="cursor-pointer"
-                        onChange={e => updateRow(i, { requires_approval: e.target.checked })} />
-                      requires_approval（出站调用需人工审批）
-                    </label>
+                    <Checkbox checked={r.requires_approval}
+                      onChange={e => updateRow(i, { requires_approval: e.target.checked })}
+                      label="requires_approval（出站调用需人工审批）" />
                   </div>
                 ))}
                 <Button size="xs" variant="secondary"
@@ -382,10 +350,10 @@ function ConnectorsTab() {
               </div>
             ) : (
               <div>
-                <textarea rows={5} value={epRaw}
+                <Textarea rows={5} value={epRaw}
                   onChange={e => setEpRaw(e.target.value)}
-                  className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[11px] text-ink focus:border-brand-500 focus:outline-none" />
-                {epNote && <p className="mt-1 text-xs text-amber-500">{epNote}</p>}
+                  className="font-mono !text-[12px] resize-none" />
+                {epNote && <DegradeNote>{epNote}</DegradeNote>}
               </div>
             )}
             {form.kind === 'sql' && (
@@ -609,14 +577,22 @@ function WebhooksTab() {
       toast.error(`操作失败：${(e as Error).message}`)
     }
   }
-  const remove = async (ep: WebhookEndpoint) => {
+  // 破坏性删除需确认（M51-B）：删除按钮只置目标，ConfirmDialog 确认后执行
+  const [removeEp, setRemoveEp] = useState<WebhookEndpoint | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const doRemove = async () => {
+    if (!removeEp) return
+    setRemoving(true)
     try {
-      await webhooksApi.remove(ep.id)
-      if (sel === ep.id) setSel(null)
+      await webhooksApi.remove(removeEp.id)
+      if (sel === removeEp.id) setSel(null)
       toast.success('端点已删除')
+      setRemoveEp(null)
       load()
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setRemoving(false)
     }
   }
   const test = async (ep: WebhookEndpoint) => {
@@ -672,7 +648,7 @@ function WebhooksTab() {
                 </Button>
                 <Button size="xs" variant="secondary" loading={busy === `test-${ep.id}`} onClick={() => test(ep)}>测试</Button>
                 <Button size="xs" variant="secondary" onClick={() => openEdit(ep)}>编辑</Button>
-                <Button size="xs" variant="ghost" onClick={() => remove(ep)}>删除</Button>
+                <Button size="xs" variant="ghost" onClick={() => setRemoveEp(ep)}>删除</Button>
               </span>
             ) },
           ]}
@@ -700,15 +676,16 @@ function WebhooksTab() {
         <Table<WebhookDelivery>
           rowKey={d => String(d.id)}
           data={deliveries ?? []}
+          loading={deliveries === null}
           columns={[
-            { key: 'id', title: '#', render: d => <span className="text-[11px] text-ink-500">{d.id}</span> },
+            { key: 'id', title: '#', render: d => <span className="text-[11px] text-ink-3">{d.id}</span> },
             { key: 'endpoint_id', title: '端点', render: d => `#${d.endpoint_id}` },
             { key: 'event_type', title: '事件', render: d => <code className="text-[11px]">{d.event_type}</code> },
             { key: 'status', title: '状态', render: d => <Badge tone={WH_STATUS_TONE[d.status] ?? 'gray'}>{d.status}</Badge> },
             { key: 'attempts', title: '次数' },
             { key: 'response_status', title: 'HTTP', render: d => d.response_status ?? '—' },
             { key: 'error', title: '错误', render: d => (
-              <span className={`text-[11px] ${d.status === 'done' ? 'text-ink-500' : 'text-red-600'}`}>{d.error || '—'}</span>
+              <span className={`text-[11px] ${d.status === 'done' ? 'text-ink-3' : 'text-red-600'}`}>{d.error || '—'}</span>
             ) },
             { key: 'actions', title: '操作', render: d => (
               (d.status === 'dead' || d.status === 'pending')
@@ -716,7 +693,7 @@ function WebhooksTab() {
                 : null
             ) },
           ]}
-          empty={deliveries === null ? '加载中…' : '暂无投递记录（事件触发后在此查看推送结果与重试）'}
+          empty="暂无投递记录（事件触发后在此查看推送结果与重试）"
         />
       </div>
 
@@ -760,6 +737,11 @@ function WebhooksTab() {
           </div>
         </div>
       </DialogContent>
+
+      <ConfirmDialog open={!!removeEp} onCancel={() => setRemoveEp(null)}
+        title={`删除端点「${removeEp?.name ?? ''}」？`}
+        description="删除后订阅事件不再向该端点推送，不可恢复。"
+        confirmLabel="删除" busy={removing} onConfirm={doRemove} />
     </div>
   )
 }
@@ -875,12 +857,15 @@ function TriggersTab() {
       setBusy('')
     }
   }
-  const remove = async (r: TriggerRule) => {
-    if (!window.confirm(`确认删除触发器「${r.name}」？删除后事件/cron/webhook 将不再触发该规则。`)) return
-    setBusy(`del-${r.id}`)
+  // 破坏性删除需确认（M51-B）：window.confirm → ConfirmDialog，删除按钮只置目标
+  const [removeRule, setRemoveRule] = useState<TriggerRule | null>(null)
+  const doRemove = async () => {
+    if (!removeRule) return
+    setBusy(`del-${removeRule.id}`)
     try {
-      await triggersApi.remove(r.id)
+      await triggersApi.remove(removeRule.id)
       toast.success('触发器已删除')
+      setRemoveRule(null)
       load()
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`)
@@ -931,7 +916,7 @@ function TriggersTab() {
                   onClick={() => testFire(r)}>试触发</Button>
                 <Button size="xs" variant="secondary" onClick={() => openEdit(r)}>编辑</Button>
                 <Button size="xs" variant="ghost" loading={busy === `del-${r.id}`}
-                  onClick={() => remove(r)}>删除</Button>
+                  onClick={() => setRemoveRule(r)}>删除</Button>
               </span>
             ) },
           ]}
@@ -1008,8 +993,11 @@ function TriggersTab() {
             <div>
               <Label>目标名称</Label>
               {targetsFailed ? (
-                <Input value={form.targetName} placeholder="faq-agent（目标列表加载失败，手动输入）"
-                  onChange={e => setForm({ ...form, targetName: e.target.value })} />
+                <>
+                  <Input value={form.targetName} placeholder="faq-agent"
+                    onChange={e => setForm({ ...form, targetName: e.target.value })} />
+                  <DegradeNote mode="手动输入" reason="目标列表加载失败" />
+                </>
               ) : (
                 <Select value={form.targetName}
                   onChange={e => setForm({ ...form, targetName: e.target.value })}>
@@ -1028,6 +1016,11 @@ function TriggersTab() {
           </div>
         </div>
       </DialogContent>
+
+      <ConfirmDialog open={!!removeRule} onCancel={() => setRemoveRule(null)}
+        title={`删除触发器「${removeRule?.name ?? ''}」？`}
+        description="删除后事件 / cron / 入站 webhook 将不再触发该规则，不可恢复。"
+        confirmLabel="删除" busy={!!removeRule && busy === `del-${removeRule.id}`} onConfirm={doRemove} />
     </div>
   )
 }

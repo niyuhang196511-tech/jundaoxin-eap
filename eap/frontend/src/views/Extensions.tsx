@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Braces, CircleCheck, CircleX, Plug, RefreshCw, Server, Wrench,
 } from 'lucide-react'
-import { Badge, Button, DialogContent, Input, Label, PageHeader, Select, TabBar, Table, toast,
+import { Badge, Button, Checkbox, ChipPicker, DegradeNote, DialogContent, Input, Label, PageHeader, Select, TabBar, Table, Textarea, toast,
   type BadgeTone } from '@/components/ui'
 import { api } from '@/lib/api'
 
@@ -72,6 +72,8 @@ export default function ExtensionsPage() {
   const [rag, setRag] = useState<RagComponent[]>([])
   const [servers, setServers] = useState<McpServer[]>([])
   const [reloadTick, setReloadTick] = useState(0)
+  // 首屏加载（M51-B）：只置一次 false，热重载/刷新静默更新不闪 spinner
+  const [loading, setLoading] = useState(true)
 
   const loadAll = useCallback(async () => {
     try {
@@ -89,6 +91,8 @@ export default function ExtensionsPage() {
       setExtensions(ext)
     } catch (e) {
       toast.error(`加载扩展数据失败：${(e as Error).message}`)
+    } finally {
+      setLoading(false)
     }
   }, [])
   useEffect(() => { loadAll() }, [loadAll, reloadTick])
@@ -104,14 +108,15 @@ export default function ExtensionsPage() {
   }
 
   const reloadAll = () => setReloadTick(v => v + 1)
-  const registryTab = <RegistryPanel extensions={extensions} onChanged={reloadAll} />
-  const toolsTab = <ToolsPanel tools={tools} />
+  const registryTab = <RegistryPanel extensions={extensions} loading={loading} onChanged={reloadAll} />
+  const toolsTab = <ToolsPanel tools={tools} loading={loading} />
   const pluginsTab = <PluginsPanel plugins={plugins} onReload={reloadPlugins} />
   const ragTab = (
     <div className="rounded-[--radius-card] border border-line bg-surface">
       <Table<RagComponent>
         rowKey={c => `${c.kind}-${c.name}`}
         data={rag}
+        loading={loading}
         columns={[
           { key: 'kind', title: '类型', render: c => <Badge tone={c.kind === 'chunker' ? 'green' : 'purple'}>{c.kind}</Badge> },
           { key: 'name', title: '名称', render: c => <span className="font-medium">{c.name}</span> },
@@ -122,7 +127,7 @@ export default function ExtensionsPage() {
       />
     </div>
   )
-  const mcpTab = <McpPanel servers={servers} onChanged={() => setReloadTick(v => v + 1)} />
+  const mcpTab = <McpPanel servers={servers} loading={loading} onChanged={() => setReloadTick(v => v + 1)} />
 
   return (
     <div>
@@ -282,32 +287,17 @@ function SchemaFieldControl({ field, value, onChange }: {
   }
   if (field.kind === 'boolean') {
     return (
-      <label className="flex h-9 cursor-pointer items-center gap-2 text-[13px] text-ink-2">
-        <input type="checkbox" className="size-4 accent-brand-500" checked={value === true}
-          onChange={e => onChange(e.target.checked)} />
-        {value === true ? '是' : '否'}
-      </label>
+      <Checkbox checked={value === true}
+        onChange={e => onChange(e.target.checked)}
+        label={value === true ? '是' : '否'}
+        labelClassName="h-9 gap-2 text-[13px] text-ink-2" />
     )
   }
   if (field.kind === 'array' && field.itemEnum) {
     const selected = Array.isArray(value) ? value.map(String) : []
     return (
-      <div className="flex flex-wrap gap-1.5">
-        {field.itemEnum.map(opt => {
-          const on = selected.includes(opt)
-          return (
-            <button key={opt} type="button"
-              onClick={() => {
-                const next = on ? selected.filter(v => v !== opt) : [...selected, opt]
-                onChange(next.length ? next : undefined)
-              }}
-              className={`cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors ${
-                on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                   : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink'}`}
-            >{opt}</button>
-          )
-        })}
-      </div>
+      <ChipPicker options={field.itemEnum} values={selected}
+        onChange={next => onChange(next.length ? next : undefined)} />
     )
   }
   if (field.kind === 'array') {
@@ -374,7 +364,7 @@ function ToolArgsSchemaForm({ fields, args, onArgs }: {
 
 /* ---------- 工具：清单 + 试运行 ---------- */
 
-function ToolsPanel({ tools }: { tools: ToolItem[] }) {
+function ToolsPanel({ tools, loading }: { tools: ToolItem[]; loading: boolean }) {
   const [target, setTarget] = useState<ToolItem | null>(null)
   const [argsText, setArgsText] = useState('{}')
   const [output, setOutput] = useState('')
@@ -415,6 +405,7 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
         <Table<ToolItem>
           rowKey={t => t.name}
           data={tools}
+          loading={loading}
           onRowClick={t => { setTarget(t); setOutput(''); setArgsText('{}'); setJsonMode(false) }}
           columns={[
             { key: 'name', title: '工具名', render: t => (
@@ -449,10 +440,9 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
               <div className="mb-1.5 flex items-center justify-between">
                 <Label className="mb-0">{showForm ? '参数' : '参数（JSON）'}</Label>
                 {formUsable && (
-                  <button type="button" className="cursor-pointer text-[11px] text-ink-3 hover:text-brand-500"
-                    onClick={() => setJsonMode(m => !m)}>
+                  <Button size="xs" variant="ghost" onClick={() => setJsonMode(m => !m)}>
                     {showForm ? '切换 JSON 编辑' : '切换表单编辑'}
-                  </button>
+                  </Button>
                 )}
               </div>
               {showForm ? (
@@ -460,28 +450,29 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
                   onArgs={next => setArgsText(JSON.stringify(next, null, 2))} />
               ) : (
                 <>
-                  <textarea
+                  <Textarea
                     value={argsText}
                     onChange={e => setArgsText(e.target.value)}
                     rows={4}
-                    className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink focus:border-brand-500 focus:outline-none"
+                    className="font-mono !text-[12px] resize-none"
                   />
+                  {/* 降级必 amber（M51-B 单规则）：无 schema / 不支持结构 / 类型不匹配统一 DegradeNote */}
                   {analysis && !analysis.ok && (
-                    <p className="mt-1 text-[11px] text-ink-3">
+                    <DegradeNote>
                       {analysis.reason === 'no-schema'
-                        ? '该工具未提供参数 schema，直接编辑 JSON 传参'
-                        : '参数 schema 含不支持的结构（嵌套 object / anyOf / 非标量数组等），已降级为 JSON 编辑'}
-                    </p>
+                        ? '该工具未提供参数 schema，已降级为 JSON 直接编辑传参'
+                        : '参数 schema 含不支持的结构（嵌套 object / anyOf / 非标量数组等），已降级为 JSON 编辑（已填内容不丢失）'}
+                    </DegradeNote>
                   )}
                   {analysis?.ok && parsedArgs === null && (
-                    <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
-                      当前 JSON 暂不可解析——修正后可切回表单编辑（内容不会丢失）
-                    </p>
+                    <DegradeNote>
+                      当前 JSON 暂不可解析——修正后可切回表单编辑（已填内容不丢失）
+                    </DegradeNote>
                   )}
                   {analysis?.ok && parsedArgs !== null && !valuesFillable(analysis.fields, parsedArgs) && (
-                    <p className="mt-1 text-[11px] text-ink-3">
-                      已有值与 schema 字段类型不匹配，保持 JSON 编辑（内容不丢失）
-                    </p>
+                    <DegradeNote>
+                      已有值与 schema 字段类型不匹配，保持 JSON 编辑（已填内容不丢失）
+                    </DegradeNote>
                   )}
                 </>
               )}
@@ -545,7 +536,7 @@ function PluginsPanel({ plugins, onReload }: { plugins: PluginItem[]; onReload: 
 
 /* ---------- MCP Server ---------- */
 
-function McpPanel({ servers, onChanged }: { servers: McpServer[]; onChanged: () => void }) {
+function McpPanel({ servers, loading, onChanged }: { servers: McpServer[]; loading: boolean; onChanged: () => void }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', transport: 'stdio', command: '', argsText: '', url: '' })
   const [validating, setValidating] = useState('')
@@ -582,6 +573,9 @@ function McpPanel({ servers, onChanged }: { servers: McpServer[]; onChanged: () 
         toast.error(`不可达：${r.error ?? '未知错误'}`)
       }
       onChanged()
+    } catch (e) {
+      // bug 修复（M51-B）：原 try/finally 无 catch，网络/5xx 异常直接 unhandled rejection
+      toast.error(`验证失败：${(e as Error).message}`)
     } finally {
       setValidating('')
     }
@@ -598,6 +592,7 @@ function McpPanel({ servers, onChanged }: { servers: McpServer[]; onChanged: () 
         <Table<McpServer>
           rowKey={s => s.name}
           data={servers}
+          loading={loading}
           columns={[
             { key: 'name', title: '名称', render: s => <span className="font-medium">{s.name}</span> },
             { key: 'transport', title: '传输', render: s => (
@@ -628,58 +623,59 @@ function McpPanel({ servers, onChanged }: { servers: McpServer[]; onChanged: () 
         </div>
       )}
 
-              <DialogContent open={open} onOpenChange={setOpen} title="添加 MCP Server" description="stdio：本地手写 server 子进程；http：streamable HTTP 端点"
-          footer={<>
-            <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
-            <Button variant="primary" onClick={create} disabled={!form.name || (form.transport === 'stdio' ? !form.command : !form.url)}>
-              注册
-            </Button>
-          </>}>
-          <div className="space-y-3">
-            <div>
-              <Label>名称（小写字母/数字/连字符）</Label>
-              <Input value={form.name} placeholder="my-mcp-server"
-                onChange={e => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div>
-              <Label>传输</Label>
-              <select value={form.transport}
-                onChange={e => setForm({ ...form, transport: e.target.value })}
-                className="h-9 w-full rounded-lg border border-line bg-surface px-3 text-[13px] text-ink">
-                <option value="stdio">stdio（本地子进程）</option>
-                <option value="http">http（streamable HTTP）</option>
-              </select>
-            </div>
-            {form.transport === 'stdio' ? (
-              <>
-                <div>
-                  <Label>启动命令</Label>
-                  <Input value={form.command} placeholder="python"
-                    onChange={e => setForm({ ...form, command: e.target.value })} />
-                </div>
-                <div>
-                  <Label>参数（空格分隔）</Label>
-                  <Input value={form.argsText} placeholder="server.py --port 9000"
-                    onChange={e => setForm({ ...form, argsText: e.target.value })} />
-                </div>
-              </>
-            ) : (
+      <DialogContent open={open} onOpenChange={setOpen} title="添加 MCP Server" description="stdio：本地手写 server 子进程；http：streamable HTTP 端点"
+        footer={<>
+          <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={create} disabled={!form.name || (form.transport === 'stdio' ? !form.command : !form.url)}>
+            注册
+          </Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>名称（小写字母/数字/连字符）</Label>
+            <Input value={form.name} placeholder="my-mcp-server"
+              onChange={e => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <Label>传输</Label>
+            {/* 裸 select 清零（M51-B）：全仓最后一处 → 统一 Select 组件 */}
+            <Select value={form.transport}
+              onChange={e => setForm({ ...form, transport: e.target.value })}>
+              <option value="stdio">stdio（本地子进程）</option>
+              <option value="http">http（streamable HTTP）</option>
+            </Select>
+          </div>
+          {form.transport === 'stdio' ? (
+            <>
               <div>
-                <Label>URL</Label>
-                <Input value={form.url} placeholder="http://localhost:9000"
-                  onChange={e => setForm({ ...form, url: e.target.value })} />
+                <Label>启动命令</Label>
+                <Input value={form.command} placeholder="python"
+                  onChange={e => setForm({ ...form, command: e.target.value })} />
               </div>
-            )}
-          </div>
-        </DialogContent>
-          </div>
+              <div>
+                <Label>参数（空格分隔）</Label>
+                <Input value={form.argsText} placeholder="server.py --port 9000"
+                  onChange={e => setForm({ ...form, argsText: e.target.value })} />
+              </div>
+            </>
+          ) : (
+            <div>
+              <Label>URL</Label>
+              <Input value={form.url} placeholder="http://localhost:9000"
+                onChange={e => setForm({ ...form, url: e.target.value })} />
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </div>
   )
 }
 
 
 /** 扩展目录（v0.7-⑨）：统一注册表，按类型展示 + 启用/停用 */
-function RegistryPanel({ extensions, onChanged }: {
+function RegistryPanel({ extensions, loading, onChanged }: {
   extensions: ExtensionItem[]
+  loading: boolean
   onChanged: () => void
 }) {
   const [busy, setBusy] = useState('')
@@ -704,6 +700,7 @@ function RegistryPanel({ extensions, onChanged }: {
       <Table<ExtensionItem>
         rowKey={e => e.name}
         data={extensions}
+        loading={loading}
         columns={[
           { key: 'name', title: '名称', render: e => (
             <div className="min-w-0">

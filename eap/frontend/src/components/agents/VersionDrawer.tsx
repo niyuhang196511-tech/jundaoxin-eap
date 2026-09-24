@@ -3,10 +3,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, RotateCcw } from 'lucide-react'
 import {
-  Badge, Button, DrawerContent, Input, Label, Select, Textarea, toast,
+  Badge, Button, ChipPicker, DrawerContent, Input, Label, Select, Textarea, toast,
 } from '@/components/ui'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/cn'
 
 interface VersionRow {
   version: string
@@ -40,35 +39,6 @@ interface DraftConfig {
   skills?: string[]
   output_schema?: Record<string, unknown>
   [key: string]: unknown
-}
-
-/** 多选 chips：候选清单 ∪ 当前已选值，点击切换 */
-function ChipPicker({ options, values, onChange }: {
-  options: string[]
-  values: string[]
-  onChange: (next: string[]) => void
-}) {
-  const all = [...new Set([...options, ...values])]
-  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {all.map(name => {
-        const on = values.includes(name)
-        return (
-          <button
-            key={name}
-            type="button"
-            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
-              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
-            )}
-          >{name}</button>
-        )
-      })}
-    </div>
-  )
 }
 
 /** 智能体配置版本抽屉：版本流水线（草稿→发布→归档）+ 运行配置覆盖层编辑（v0.5-①） */

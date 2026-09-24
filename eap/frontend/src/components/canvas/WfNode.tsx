@@ -77,17 +77,17 @@ export function WfNode({ data, selected }: NodeProps) {
           <StatusBadge status={d.status} />
         </div>
       </div>
-      <Handle type="target" position={Position.Top} className="!size-2.5 !border-2 !border-white !bg-slate-400" />
+      <Handle type="target" position={Position.Top} className="!size-2.5 !border-2 !border-surface !bg-slate-400" />
       {isBranch ? (
         <>
           {/* 是/否 双出口（handle id = then/else，即 DSL source_handle） */}
           <Handle id="then" type="source" position={Position.Right} style={{ top: 24 }}
-            className="!size-2.5 !border-2 !border-white !bg-emerald-500" />
+            className="!size-2.5 !border-2 !border-surface !bg-emerald-500" />
           <Handle id="else" type="source" position={Position.Right} style={{ top: 54 }}
-            className="!size-2.5 !border-2 !border-white !bg-amber-500" />
+            className="!size-2.5 !border-2 !border-surface !bg-amber-500" />
         </>
       ) : (
-        <Handle type="source" position={Position.Bottom} className="!size-2.5 !border-2 !border-white !bg-brand-500" />
+        <Handle type="source" position={Position.Bottom} className="!size-2.5 !border-2 !border-surface !bg-brand-500" />
       )}
     </div>
   )

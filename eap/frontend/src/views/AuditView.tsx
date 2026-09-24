@@ -134,6 +134,7 @@ export default function AuditPage() {
         <Table<AuditRow>
           rowKey={r => String(r.id)}
           data={rows}
+          loading={loading}
           columns={[
             { key: 'created_at', title: '时间', render: r => (
               <span className="text-[11px] text-ink-3">{r.created_at.slice(0, 19).replace('T', ' ')}</span>

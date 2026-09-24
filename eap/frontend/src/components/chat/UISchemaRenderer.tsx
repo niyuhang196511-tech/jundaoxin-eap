@@ -95,6 +95,9 @@ function FieldInput({ field, value, onChange, disabled }: {
     return (
       <div>
         {label}
+        {/* M51-B 说明：此处不复用 ui/ChipPicker——选项模型为 {label, value} 分离
+            （显示文案 ≠ 提交值，value 为 unknown），且有逐字段 disabled 语义；
+            string 选项的 ChipPicker 无法无损覆盖，保留专用实现（样式与 ChipPicker 逐字一致） */}
         <div className="flex flex-wrap gap-1.5">
           {(field.options ?? []).map(o => {
             const on = selected.includes(String(o.value))

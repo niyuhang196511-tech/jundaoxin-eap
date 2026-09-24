@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useId, useRef, useState } from 'react'
-import { DrawerContent, FieldError, Input, Label, Select, Textarea, Button, Badge } from '@/components/ui'
+import { DrawerContent, Input, Label, Select, Textarea, Button, Badge, Checkbox, ChipPicker, DegradeNote } from '@/components/ui'
 import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/cn'
 import { genStepId, type BodyStep, type Step } from './dsl'
 
 /* ---------- 候选目录（M49-E2 输入改选择）：模型 / 知识库 / 工具 / 工作流 ----------
@@ -96,35 +95,6 @@ function CatalogSelect({ slot, value, onChange, fixedOptions, emptyLabel, fallba
       {value !== '' && !known.has(value) && <option value={value}>{value}（当前值）</option>}
       {items.map(m => <option key={m} value={m}>{m}</option>)}
     </Select>
-  )
-}
-
-/** 多选 chips：候选清单 ∪ 当前已选值，点击切换（范本 VersionDrawer ChipPicker） */
-function ChipPicker({ options, values, onChange }: {
-  options: string[]
-  values: string[]
-  onChange: (next: string[]) => void
-}) {
-  const all = [...new Set([...options, ...values])]
-  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {all.map(name => {
-        const on = values.includes(name)
-        return (
-          <button
-            key={name}
-            type="button"
-            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
-              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
-            )}
-          >{name}</button>
-        )
-      })}
-    </div>
   )
 }
 
@@ -592,10 +562,8 @@ function InteractionSchemaEditor({ step, onChange }: {
                 writeFields(parsed)
               } catch { /* 编辑中允许暂态非法 JSON */ }
             }} />
-          <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
-            字段形状未知（非数组 / 缺 id / 未知控件类型），已降级 JSON 编辑——内容不丢失；
-            修正为受支持形状后自动恢复结构化编辑
-          </p>
+          <DegradeNote mode="JSON 编辑"
+            reason="字段形状未知（非数组 / 缺 id / 未知控件类型）；修正为受支持形状后自动恢复结构化编辑" />
         </div>
       )}
       <div>
@@ -639,11 +607,10 @@ function UiFieldRow({ field, index, total, onPatch, onRemove, onMove }: {
           onChange={e => onPatch({ type: e.target.value })}>
           {UI_FIELD_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
         </Select>
-        <label className="flex cursor-pointer items-center gap-1 whitespace-nowrap text-[11px] text-ink-3"
-          title="必填（提交前校验非空）">
-          <input type="checkbox" className="size-3.5 accent-brand-500" checked={field.required === true}
-            onChange={e => onPatch({ required: e.target.checked })} />必填
-        </label>
+        <Checkbox size="sm" checked={field.required === true}
+          onChange={e => onPatch({ required: e.target.checked })}
+          label="必填" labelTitle="必填（提交前校验非空）"
+          labelClassName="gap-1 whitespace-nowrap text-[11px]" />
         <div className="flex shrink-0">
           <Button size="xs" variant="ghost" disabled={index === 0} title="上移" onClick={() => onMove(-1)}>
             <ChevronUp className="size-3.5" />

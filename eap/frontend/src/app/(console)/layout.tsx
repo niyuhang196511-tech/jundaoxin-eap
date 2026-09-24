@@ -15,8 +15,10 @@ const TITLES: Record<string, string> = {
   extensions: '扩展中心',
   evals: '评测',
   gov: '治理 · 成本',
-  conn: '连接器 · IM',
+  conn: '连接器 · IM · Webhooks · 触发器',
   canvas: 'Workflow 画布',
+  // bug 修复（M51-B）：/audit 此前缺键，顶栏回落显示原始 key "audit"
+  audit: '审计日志',
 }
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { err: Error | null }> {

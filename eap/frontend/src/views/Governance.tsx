@@ -3,14 +3,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Download, Plus, RefreshCw } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
+  Badge, Button, Checkbox, ChipPicker, ConfirmDialog, DegradeNote, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import {
   agentsApi, api, evalsApi, exportBudgetReport, kbApi, memoryOpsApi, modelsApi, tenantsApi, toolsApi,
   type MemoryItem,
 } from '@/lib/api'
-import { cn } from '@/lib/cn'
 
 type Release = {
   id: string
@@ -109,8 +108,12 @@ function ReleasesTab() {
         </Button>
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-ink-3">灰度比例</span>
-          <Input className="!w-20" type="number" min={0} max={100} value={canaryPct}
-            onChange={e => setCanaryPct(parseInt(e.target.value) || 0)} />
+          {/* M51-B（M49 登记 ★）：预设档位收敛——灰度步进为发布治理常规档位（5/10/20/50/100），
+              Select 免除手输越界/负值；档位外精确值属罕见诉求，可在「进灰度」前经 API 直调 */}
+          <Select className="!w-20" value={String(canaryPct)} title="灰度比例（canary percent）"
+            onChange={e => setCanaryPct(parseInt(e.target.value) || 0)}>
+            {[5, 10, 20, 50, 100].map(p => <option key={p} value={p}>{p}%</option>)}
+          </Select>
           <span className="text-xs text-ink-3">灰度模型</span>
           <Select className="!w-36" value={canaryModel} title="灰度 overrides.model"
             onChange={e => setCanaryModel(e.target.value)}>
@@ -220,9 +223,7 @@ function BudgetsTab() {
             <>
               <Input type="number" value={tenant} onChange={e => setTenant(parseInt(e.target.value) || 1)} />
               {tenantsFailed && (
-                <p className="mt-1 text-[11px] text-amber-500">
-                  租户列表加载失败（该端点需 admin 权限），已降级为手输租户 ID
-                </p>
+                <DegradeNote mode="手输租户 ID" reason="租户列表加载失败（该端点需 admin 权限）" />
               )}
             </>
           )}
@@ -236,9 +237,11 @@ function BudgetsTab() {
         <div className="border-t border-line pt-3">
           <Label>成本报表导出（CSV，admin）</Label>
           <div className="flex items-center gap-2">
-            <Input className="!w-24" type="number" min={1} max={365} value={days}
-              onChange={e => setDays(parseInt(e.target.value) || 30)} />
-            <span className="text-xs text-ink-3">天</span>
+            {/* M51-B（M49 登记 ★）：导出时间范围收敛为常用预设档位（与灰度比例同款处理） */}
+            <Select className="!w-28" value={String(days)} title="导出时间范围（天）"
+              onChange={e => setDays(parseInt(e.target.value) || 30)}>
+              {[7, 30, 90, 180, 365].map(d => <option key={d} value={d}>近 {d} 天</option>)}
+            </Select>
             <Button variant="secondary" className="ml-auto" loading={exporting} onClick={doExport}>
               <Download className="size-3.5" />导出 CSV
             </Button>
@@ -378,33 +381,7 @@ const POLICY_KIND_LABELS: Record<string, string> = {
   'eval-gate': '评测门禁',
 }
 
-/** 多选 chips（照抄 Integrations/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
-function ChipPicker({ options, values, onChange }: {
-  options: string[]
-  values: string[]
-  onChange: (next: string[]) => void
-}) {
-  const all = [...new Set([...options, ...values])]
-  if (!all.length) return <p className="text-xs text-ink-3">（无可选项，可在下方自由输入）</p>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {all.map(name => {
-        const on = values.includes(name)
-        return (
-          <button key={name} type="button"
-            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
-              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
-            )}>{name}</button>
-        )
-      })}
-    </div>
-  )
-}
-
-/** chips 字段：ChipPicker + 自由输入（数据源列表拉取失败/为空时天然退化为纯手输） */
+/** chips 字段：ChipPicker（ui 收敛版，M51-B）+ 自由输入（数据源列表拉取失败/为空时天然退化为纯手输） */
 function ChipsField({ def, values, options, onChange }: {
   def: ChipsFieldDef
   values: string[]
@@ -421,7 +398,8 @@ function ChipsField({ def, values, options, onChange }: {
   return (
     <div>
       <Label>{def.label}</Label>
-      <ChipPicker options={[...options, ...(def.presets ?? [])]} values={values} onChange={onChange} />
+      <ChipPicker options={[...options, ...(def.presets ?? [])]} values={values} onChange={onChange}
+        emptyHint="（无可选项，可在下方自由输入）" />
       <div className="mt-2 flex gap-2">
         <Input placeholder={`自定义 ${def.key}，回车添加`} value={custom}
           onChange={e => setCustom(e.target.value)}
@@ -656,11 +634,9 @@ function PoliciesTab() {
     }
     if (f.type === 'bool') {
       return (
-        <label key={f.key} className="flex cursor-pointer items-center gap-2 text-xs text-ink-2">
-          <input type="checkbox" className="cursor-pointer" checked={Boolean(cfgDraft[f.key])}
-            onChange={e => setCfgDraft(d => ({ ...d, [f.key]: e.target.checked }))} />
-          {f.label}
-        </label>
+        <Checkbox key={f.key} checked={Boolean(cfgDraft[f.key])}
+          onChange={e => setCfgDraft(d => ({ ...d, [f.key]: e.target.checked }))}
+          label={f.label} labelClassName="gap-2 text-ink-2" />
       )
     }
     return (
@@ -708,7 +684,7 @@ function PoliciesTab() {
               </span>
             ) },
           ]}
-          empty="策略类型：模型 / 供应商 / 工具 / 智能体白名单 / 风险审批阈值 / prompt token 上限 / 工具沙箱 / A2A 委派白名单 / 评测门禁（违规 403 EAP-7101）"
+          empty="暂无策略。点击「创建策略」按九种类型配置白名单、门禁与沙箱。"
         />
       </div>
       <DialogContent open={open} onOpenChange={setOpen} title="创建策略"
@@ -759,7 +735,7 @@ function PoliciesTab() {
               <div>
                 <Textarea rows={6} value={cfgRaw} onChange={e => setCfgRaw(e.target.value)}
                   className="font-mono !text-[11px]" />
-                {cfgNote && <p className="mt-1 text-xs text-amber-500">已降级 JSON 编辑：{cfgNote}</p>}
+                {cfgNote && <DegradeNote mode="JSON 编辑" reason={cfgNote} />}
               </div>
             )}
           </div>
@@ -796,12 +772,14 @@ function MemoryTab() {
   }, [])
   useEffect(() => { load() }, [load])
 
+  // 破坏性操作需确认（M51-B）：window.confirm → ConfirmDialog，按钮只置目标
+  const [purgeOpen, setPurgeOpen] = useState(false)
   const purge = async () => {
-    if (!window.confirm('确认执行保留期清理？将删除超过保留期（EAP_MEMORY_RETENTION_DAYS，默认 180 天）及 TTL 已到期的全部记忆，不可恢复。')) return
     setBusy('purge')
     try {
       const r = await memoryOpsApi.purge()
       toast.success(`清理完成：删除 ${r.deleted} 条（保留期 ${r.retention_days} 天）`)
+      setPurgeOpen(false)
       load()
     } catch (e) {
       toast.error(`清理失败：${(e as Error).message}`)
@@ -810,14 +788,14 @@ function MemoryTab() {
     }
   }
 
+  const [forgetUid, setForgetUid] = useState<string | null>(null)
   const forgetUser = async () => {
-    const uid = userId.trim()
-    if (!uid) return
-    if (!window.confirm(`确认遗忘用户「${uid}」的全部记忆？该操作不可恢复（数据删除，不提供导出回滚）。如需留存请先导出。`)) return
+    if (!forgetUid) return
     setBusy('forget')
     try {
-      const r = await memoryOpsApi.forgetUser(uid)
+      const r = await memoryOpsApi.forgetUser(forgetUid)
       toast.success(`已遗忘用户 ${r.user_id} 的 ${r.deleted} 条记忆`)
+      setForgetUid(null)
       load()
     } catch (e) {
       toast.error(`遗忘失败：${(e as Error).message}`)
@@ -882,7 +860,7 @@ function MemoryTab() {
             删除超过保留期的记忆（天数由环境变量 EAP_MEMORY_RETENTION_DAYS 配置，默认 180），
             同时清理 TTL 已到期的记忆；动作落审计 memory.purge
           </p>
-          <Button variant="danger" size="sm" loading={busy === 'purge'} onClick={purge}>执行清理</Button>
+          <Button variant="danger" size="sm" loading={busy === 'purge'} onClick={() => setPurgeOpen(true)}>执行清理</Button>
         </div>
         <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
           <div className="text-sm font-medium">按用户遗忘 / 导出</div>
@@ -895,7 +873,7 @@ function MemoryTab() {
             <Button variant="secondary" size="sm" loading={busy === 'export'}
               disabled={!userId.trim()} onClick={exportUser}>导出 JSON</Button>
             <Button variant="danger" size="sm" loading={busy === 'forget'}
-              disabled={!userId.trim()} onClick={forgetUser}>遗忘</Button>
+              disabled={!userId.trim()} onClick={() => setForgetUid(userId.trim())}>遗忘</Button>
           </div>
         </div>
         <div className="space-y-2 rounded-[--radius-card] border border-line bg-surface p-3">
@@ -937,8 +915,9 @@ function MemoryTab() {
         <Table<MemoryItem>
           rowKey={m => String(m.id)}
           data={memories}
+          loading={loading}
           columns={[
-            { key: 'id', title: '#', render: m => <span className="text-[11px] text-ink-500">{m.id}</span> },
+            { key: 'id', title: '#', render: m => <span className="text-[11px] text-ink-3">{m.id}</span> },
             { key: 'kind', title: '类型', render: m => <Badge tone="brand">{m.kind}</Badge> },
             { key: 'content', title: '内容', className: 'max-w-lg truncate' },
             { key: 'importance', title: '重要性', render: m => m.importance.toFixed(2) },
@@ -947,10 +926,19 @@ function MemoryTab() {
               <span className="text-[11px] text-ink-3">{m.created_at.slice(0, 19).replace('T', ' ')}</span>
             ) },
           ]}
-          empty={loading ? '加载中…'
-            : '暂无组织级记忆：智能体经记忆 API 写入 scope=org 的共享记忆后在此查看，达到重要性阈值的可沉淀进知识库'}
+          empty="暂无组织级记忆：智能体经记忆 API 写入 scope=org 的共享记忆后在此查看，达到重要性阈值的可沉淀进知识库"
         />
       </div>
+
+      <ConfirmDialog open={purgeOpen} onCancel={() => setPurgeOpen(false)}
+        title="执行保留期清理？"
+        description="将删除超过保留期（EAP_MEMORY_RETENTION_DAYS，默认 180 天）及 TTL 已到期的全部记忆，不可恢复。"
+        confirmLabel="执行清理" busy={busy === 'purge'} onConfirm={purge} />
+
+      <ConfirmDialog open={!!forgetUid} onCancel={() => setForgetUid(null)}
+        title={`遗忘用户「${forgetUid ?? ''}」的全部记忆？`}
+        description="该操作不可恢复（数据删除，不提供导出回滚）。如需留存请先导出。"
+        confirmLabel="遗忘" busy={busy === 'forget'} onConfirm={forgetUser} />
     </div>
   )
 }

@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
-import { Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast, type BadgeTone } from '@/components/ui'
+import { Badge, Button, ChipPicker, ConfirmDialog, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast, type BadgeTone } from '@/components/ui'
 import { api, loraApi, modelsApi, type LoraAdapter } from '@/lib/api'
-import { cn } from '@/lib/cn'
 
 type Model = {
   name: string
@@ -25,35 +24,6 @@ const ALL_CAPABILITIES = [
   'extraction', 'stt', 'tts', 'image_gen', 'moderation',
 ] as const
 
-/** 多选 chips（照抄 components/agents/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
-function ChipPicker({ options, values, onChange }: {
-  options: string[]
-  values: string[]
-  onChange: (next: string[]) => void
-}) {
-  const all = [...new Set([...options, ...values])]
-  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {all.map(name => {
-        const on = values.includes(name)
-        return (
-          <button
-            key={name}
-            type="button"
-            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
-              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
-                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
-            )}
-          >{name}</button>
-        )
-      })}
-    </div>
-  )
-}
-
 /** 模型中心：能力路由 + 优先级降级链（priority 小者优先）+ LoRA adapter 托管（M42-A） */
 export default function ModelsPage() {
   return (
@@ -69,6 +39,7 @@ export default function ModelsPage() {
 
 function ModelsTab() {
   const [models, setModels] = useState<Model[]>([])
+  const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', caps: ['chat', 'reasoning'] as string[], provider: 'mock', url: '', priority: '50' })
   const [saving, setSaving] = useState(false)
@@ -78,6 +49,8 @@ function ModelsTab() {
       setModels(await api<Model[]>('GET', '/api/v1/models'))
     } catch (e) {
       toast.error(`加载模型失败：${(e as Error).message}`)
+    } finally {
+      setLoading(false)
     }
   }, [])
   useEffect(() => { load() }, [load])
@@ -114,7 +87,7 @@ function ModelsTab() {
 
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
         <Button variant="secondary" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>
         <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />注册模型</Button>
       </div>
@@ -123,6 +96,7 @@ function ModelsTab() {
         <Table<Model>
           rowKey={m => m.name}
           data={models}
+          loading={loading}
           columns={[
             { key: 'name', title: '名称', render: m => <span className="font-medium">{m.name}</span> },
             { key: 'capabilities', title: '能力', render: m => (
@@ -140,7 +114,7 @@ function ModelsTab() {
               </Button>
             ) },
           ]}
-          empty="暂无模型，注册后即可参与能力路由；vLLM 部署的基座模型请注册为 provider=vllm 并填 base_url（LoRA 适配器经它解析 vLLM 地址）"
+          empty="暂无模型。注册后即可参与能力路由与优先级降级链。"
         />
       </div>
 
@@ -191,6 +165,7 @@ function ModelsTab() {
  * vLLM 地址解析：模型中心 provider=vllm 且模型名匹配 served 名的记录，或加载时显式指定 */
 function LoraTab() {
   const [list, setList] = useState<LoraAdapter[]>([])
+  const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', baseModel: '', sourcePath: '', servedAs: '', note: '' })
   const [saving, setSaving] = useState(false)
@@ -209,6 +184,8 @@ function LoraTab() {
       setList(await loraApi.list())
     } catch (e) {
       toast.error(`加载 LoRA 适配器失败：${(e as Error).message}`)
+    } finally {
+      setLoading(false)
     }
   }, [])
   useEffect(() => { load() }, [load])
@@ -233,17 +210,12 @@ function LoraTab() {
     }
   }
 
-  const act = async (name: string, op: 'load' | 'unload' | 'remove' | 'health') => {
-    if (op === 'remove' && !window.confirm(`确认删除 adapter「${name}」？仅移除注册表记录，不影响 GPU 上的文件。`)) return
+  const act = async (name: string, op: 'load' | 'unload' | 'health') => {
     setBusy(`${op}-${name}`)
     try {
       if (op === 'load' || op === 'unload') {
         await (op === 'load' ? loraApi.load(name) : loraApi.unload(name))
         toast.success(op === 'load' ? `adapter ${name} 已加载到 vLLM` : `adapter ${name} 已从 vLLM 卸载`)
-        load()
-      } else if (op === 'remove') {
-        await loraApi.remove(name)
-        toast.success(`adapter ${name} 已删除`)
         load()
       } else {
         const h = await loraApi.health(name)
@@ -258,9 +230,26 @@ function LoraTab() {
     }
   }
 
+  // 破坏性删除需确认（M51-B）：window.confirm → ConfirmDialog，删除按钮只置目标
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null)
+  const doRemove = async () => {
+    if (!removeTarget) return
+    setBusy(`remove-${removeTarget}`)
+    try {
+      await loraApi.remove(removeTarget)
+      toast.success(`adapter ${removeTarget} 已删除`)
+      setRemoveTarget(null)
+      load()
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
         <Button variant="secondary" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>
         <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />注册 adapter</Button>
       </div>
@@ -268,6 +257,7 @@ function LoraTab() {
         <Table<LoraAdapter>
           rowKey={r => r.name}
           data={list}
+          loading={loading}
           columns={[
             { key: 'name', title: '名称', render: r => <span className="font-medium">{r.name}</span> },
             { key: 'base_model', title: '基座模型' },
@@ -290,11 +280,11 @@ function LoraTab() {
                 <Button size="xs" variant="secondary" loading={busy === `health-${r.name}`}
                   onClick={() => act(r.name, 'health')}>健康</Button>
                 <Button size="xs" variant="ghost" loading={busy === `remove-${r.name}`}
-                  onClick={() => act(r.name, 'remove')}>删除</Button>
+                  onClick={() => setRemoveTarget(r.name)}>删除</Button>
               </span>
             ) },
           ]}
-          empty="暂无 LoRA 适配器：先注册（名称即 vLLM 上的模型名，source_path 为 GPU 宿主机上的 adapter 目录），再「加载」到 vLLM；vLLM 地址默认从模型中心 provider=vllm 的记录解析"
+          empty="暂无 LoRA 适配器。先注册（source_path 指向 GPU 宿主机 adapter 目录），再「加载」到 vLLM。"
         />
       </div>
 
@@ -336,6 +326,11 @@ function LoraTab() {
           </div>
         </div>
       </DialogContent>
+
+      <ConfirmDialog open={!!removeTarget} onCancel={() => setRemoveTarget(null)}
+        title={`删除 adapter「${removeTarget ?? ''}」？`}
+        description="仅移除注册表记录，不影响 GPU 宿主机上的文件。"
+        confirmLabel="删除" busy={busy === `remove-${removeTarget}`} onConfirm={doRemove} />
     </div>
   )
 }
