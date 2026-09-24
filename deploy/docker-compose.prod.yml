@@ -1,0 +1,197 @@
+# EAP 生产部署栈（M47-C，deploy 资产化）：PG16 + Redis + 后端 + 控制台 + Worker + Nginx
+# 与 eap/docker-compose.yml（单机开发形态）的区别：
+#   1. 镜像来自 ghcr（不本地 build；控制台镜像发布见 .github/workflows/release.yml console-image job）
+#   2. EAP_STRICT_CONFIG=1 fail-fast——开发默认密钥/缺密钥直接拒绝启动（__main__.py）
+#   3. Redis/PG 不暴露宿主端口；边缘统一走 nginx（TLS 终结在宿主/上层 LB，见 nginx.conf 注释）
+#   4. Milvus 向量栈为可选 profile（--profile milvus 启用）
+# 启动：
+#   cp deploy/.env.example.prod .env.prod   # 逐项填写（* 为必改）
+#   EAP_VERSION=v1.0.0 docker compose -f deploy/docker-compose.prod.yml --env-file .env.prod up -d
+# 前置：docker compose 先跑一次 alembic 迁移（eap-migrate 服务自动执行）
+
+name: eap-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.prod 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-eap}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eap} -d ${POSTGRES_DB:-eap}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    # 生产加固：不暴露宿主端口（库访问走 docker exec / 堡垒机）
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  # 启动前迁移：执行完 alembic upgrade head 即退出（后续服务等它健康）
+  eap-migrate:
+    image: ${EAP_IMAGE:-ghcr.io/example/eap:${EAP_VERSION:-latest}}
+    env_file: .env.prod
+    environment:
+      EAP_DB_URL: postgresql+psycopg://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eap}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  eap:
+    image: ${EAP_IMAGE:-ghcr.io/example/eap:${EAP_VERSION:-latest}}
+    env_file: .env.prod
+    environment:
+      EAP_DB_URL: postgresql+psycopg://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eap}
+      EAP_REDIS_URL: redis://redis:6379/0
+      EAP_HOST: 0.0.0.0
+      EAP_STRICT_CONFIG: "1"          # fail-fast：开发默认密钥/缺密钥拒绝启动（M47-C）
+      EAP_WORKER_COUNT: ${EAP_WORKER_COUNT:-2}
+      EAP_MEDIA_DIR: /data/media
+    volumes:
+      - eap-media:/data/media         # 文档图片/产物媒体（纳入 drill_restore --media-dir 备份）
+    depends_on:
+      eap-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8300/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    expose:
+      - "8300"                        # 仅供 nginx 内网访问，不暴露宿主
+
+  # 独立 Worker（分布式任务引擎，P1）：与 API 同镜像不同命令，可 scale
+  eap-worker:
+    image: ${EAP_IMAGE:-ghcr.io/example/eap:${EAP_VERSION:-latest}}
+    env_file: .env.prod
+    environment:
+      EAP_DB_URL: postgresql+psycopg://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eap}
+      EAP_REDIS_URL: redis://redis:6379/0
+      EAP_STRICT_CONFIG: "1"
+      EAP_MEDIA_DIR: /data/media
+    entrypoint: [".venv/bin/python", "-m", "eap.worker"]
+    depends_on:
+      eap-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - eap-media:/data/media
+    restart: unless-stopped
+
+  console:
+    image: ${EAP_CONSOLE_IMAGE:-ghcr.io/example/eap-console:${EAP_VERSION:-latest}}
+    # 本地构建替代（镜像未发布到 ghcr 时）：
+    # build:
+    #   context: ../eap/frontend
+    #   args:
+    #     NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://api.example.com}
+    depends_on:
+      - eap
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # TLS 证书挂载（生产必须 TLS；示例路径按实际证书托管方式调整）：
+      # - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "${EDGE_HTTP_PORT:-80}:80"
+      # - "443:443"
+    depends_on:
+      - eap
+      - console
+    restart: unless-stopped
+
+  # 数据库定时备份（复用 eap 镜像内 scripts/drill_restore.py；M47-C 扩展 --media-dir 一并备份媒体卷）
+  backup:
+    image: ${EAP_IMAGE:-ghcr.io/example/eap:${EAP_VERSION:-latest}}
+    env_file: .env.prod
+    environment:
+      EAP_DB_URL: postgresql+psycopg://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eap}
+      EAP_MEDIA_DIR: /data/media
+    entrypoint: [".venv/bin/python", "scripts/drill_restore.py", "backup",
+                 "--out", "/backups", "--media-dir", "/data/media"]
+    volumes:
+      - ./backups:/backups
+      - eap-media:/data/media:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---- Milvus 向量栈（可选：.env.prod 设 COMPOSE_PROFILES=milvus 或 --profile milvus 启用）----
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    profiles: ["milvus"]
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd-data:/etcd
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:latest
+    profiles: ["milvus"]
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?请在 .env.prod 设置}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?请在 .env.prod 设置}
+    command: minio server /minio_data
+    volumes:
+      - minio-data:/minio_data
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    profiles: ["milvus"]
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  eap-media:
+  etcd-data:
+  minio-data:
+  milvus-data:

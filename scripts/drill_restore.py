@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import tarfile
 import importlib.util
 import json
 import os
@@ -173,6 +175,58 @@ def resolve_db_url(cli_value: str | None) -> str:
 
 # ---------------------------------------------------------------- backup 子命令
 
+
+# ---------------------------------------------------------------- 媒体目录（M47-C）
+
+MEDIA_MANIFEST = "MANIFEST.sha256"
+
+
+def _media_tar(media_dir: str, out_path: Path) -> Path:
+    """把 EAP_MEDIA_DIR 打包为 tar.gz + sha256 清单（MANIFEST.sha256 记录每个文件的哈希）。
+
+    还原时以清单复核完整性——消除「库恢复成功但媒体文件丢失/漂移」的版本错位。
+    """
+    src = Path(media_dir)
+    if not src.is_dir():
+        raise NotADirectoryError(f"媒体目录不存在：{src}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    files = sorted(p for p in src.rglob("*") if p.is_file())
+    with tarfile.open(out_path, "w:gz") as tar:
+        for f in files:
+            tar.add(f, arcname=f.relative_to(src).as_posix())
+    lines = []
+    for f in files:
+        h = hashlib.sha256(f.read_bytes()).hexdigest()
+        lines.append(f"{h}  {f.relative_to(src).as_posix()}")
+    sidecar = out_path.with_suffix(out_path.suffix + ".sha256")
+    sidecar.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    _log(f"[media] 打包 {len(files)} 个文件 → {out_path}（清单 {sidecar.name}）")
+    return out_path
+
+
+def _verify_media_tar(tar_path: Path, dest: Path) -> str:
+    """解包媒体备份到 dest 并按 sha256 sidecar（tar 同名 + .sha256）复核完整性；返回摘要文本。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "r:gz") as tar:
+        tar.extractall(dest, filter="data")  # 成员路径校验交给标准库 data filter（防路径穿越）
+    manifest = Path(str(tar_path) + ".sha256")  # 清单是 tar 旁的 sidecar 文件（backup 时写在其旁）
+    if not manifest.is_file():
+        raise RuntimeError(f"媒体备份缺少清单 {manifest.name}，无法校验完整性")
+    checked = 0
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        h, rel = line.split("  ", 1)
+        f = dest / rel
+        if not f.is_file():
+            raise RuntimeError(f"媒体备份缺文件：{rel}")
+        actual = hashlib.sha256(f.read_bytes()).hexdigest()
+        if actual != h:
+            raise RuntimeError(f"媒体文件哈希不符：{rel}")
+        checked += 1
+    return f"{checked} 个媒体文件完整性校验通过"
+
+
 def cmd_backup(args: argparse.Namespace) -> int:
     db_url = resolve_db_url(args.db_url)
     kind = _db_kind(db_url)
@@ -215,6 +269,10 @@ def cmd_backup(args: argparse.Namespace) -> int:
         _log(f"[失败] 备份产物为空：{target}")
         return 1
     _log(f"[backup] 写出：{target}（{size} 字节，耗时 {time.monotonic() - t0:.1f}s）")
+    if args.media_dir:
+        m0 = time.monotonic()
+        _media_tar(args.media_dir, out / f"eap-media-{stamp}.tar.gz")
+        _log(f"[media] 耗时 {time.monotonic() - m0:.1f}s")
     print(str(target))  # 末行单独输出产物路径，供脚本/CI 消费
     return 0
 
@@ -330,6 +388,16 @@ def cmd_drill(args: argparse.Namespace) -> int:
         return str(tmp)
     if not drill.run("创建临时演练目录", _tmp):
         return _finish(drill, args, tmp, kind, backup)
+    # 步骤 2.5（M47-C）：媒体备份包完整性校验（--media 提供时；与库还原演练解耦为独立步骤）
+    if getattr(args, "media", None):
+        def _media() -> str:
+            media_dest = tmp / "media"  # type: union-attr —— 步骤 2 已保证非空
+            summary = _verify_media_tar(Path(args.media), media_dest)
+            ctx["media_verified"] = summary
+            return f"{args.media}：{summary}"
+        if not drill.run("媒体备份完整性校验", _media):
+            return _finish(drill, args, tmp, kind, backup)
+
 
     # 步骤 3：还原（SQLite 直接还原副本；PostgreSQL pg_restore 到演练库）
     if kind == "sqlite":
@@ -447,6 +515,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="输出目录（默认 ./backups）或完整文件路径；目录内命名 eap-backup-<时间戳>.db|.dump")
     pb.add_argument("--db-url", default=None,
                     help="覆盖源库连接串（默认取 EAP_DB_URL；未配置且为仓库布局时自动用 eap/eap.db）")
+    pb.add_argument("--media-dir", default=None,
+                    help="M47-C：一并打包 EAP_MEDIA_DIR 媒体目录（tar.gz + sha256 清单，与库备份同时间戳）")
     pb.set_defaults(fn=cmd_backup)
 
     pd = sub.add_parser("drill", help="恢复演练：还原 → 迁移 → 冒烟断言 → 报告 → 清理",
@@ -459,6 +529,8 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--eap-dir", default=str(DEFAULT_EAP_DIR),
                     help=f"eap 项目根（含 alembic.ini，默认 {DEFAULT_EAP_DIR}）")
     pd.add_argument("--keep", action="store_true", help="保留临时演练目录（默认成功后清理；失败时总是保留）")
+    pd.add_argument("--media", default=None,
+                    help="M47-C：媒体备份包路径（backup --media-dir 产物）——演练增加完整性校验步骤")
     pd.add_argument("--report-json", default=None, help="将结构化报告写入 JSON 文件")
     pd.set_defaults(fn=cmd_drill)
     return p

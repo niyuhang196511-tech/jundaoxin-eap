@@ -1,0 +1,92 @@
+{
+  "title": "EAP 平台运行概览",
+  "uid": "eap-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "请求速率（by status）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum(rate(eap_requests_total[5m])) by (status)", "legendFormat": "{{status}}" }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "请求延迟 p95（histogram_quantile，M44-C）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(eap_request_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Agent 调用（by status：ok/error/interaction）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "sum(rate(eap_agent_invocations_total[5m])) by (status)", "legendFormat": "{{status}}" }]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Token 用量速率（in/out）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "sum(rate(eap_tokens_total[5m])) by (direction)", "legendFormat": "{{direction}}" }]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "任务队列深度 PENDING（抓取时 DB 真值）",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 16 },
+      "targets": [{ "expr": "max(eap_task_queue_depth{state=\"PENDING\"})", "legendFormat": "PENDING" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 50 }, { "color": "red", "value": 100 }
+      ] } } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "网关在途请求",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 16 },
+      "targets": [{ "expr": "eap_gateway_inflight", "legendFormat": "inflight" }]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "熔断器状态（0 closed / 1 open / 2 half-open）",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 16 },
+      "targets": [{ "expr": "max by (model) (eap_circuit_state)", "legendFormat": "{{model}}" }],
+      "fieldConfig": { "defaults": { "mappings": [
+        { "type": "value", "options": { "0": { "text": "closed", "color": "green" }, "1": { "text": "open", "color": "red" }, "2": { "text": "half-open", "color": "orange" } } }
+      ] } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "沙箱执行（ok/timeout/error）与违规",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(eap_sandbox_exec_total[5m])) by (result)", "legendFormat": "exec {{result}}" },
+        { "expr": "sum(rate(eap_sandbox_violations_total[5m])) by (mode)", "legendFormat": "violation {{mode}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "任务执行（by type/state）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [{ "expr": "sum(rate(eap_tasks_total[5m])) by (type, state)", "legendFormat": "{{type}}·{{state}}" }]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "网关拒绝（concurrency/body_size/timeout）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [{ "expr": "sum(rate(eap_gateway_rejected_total[5m])) by (reason)", "legendFormat": "{{reason}}" }]
+    }
+  ]
+}

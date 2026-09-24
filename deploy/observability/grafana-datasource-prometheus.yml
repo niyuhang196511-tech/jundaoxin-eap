@@ -1,0 +1,9 @@
+# Grafana 数据源预置（provisioning）：容器启动即自动挂 Prometheus
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Prometheus 与本栈同网时填服务名；独立部署改为实际地址
+    url: http://prometheus:9090
+    isDefault: true

@@ -1,0 +1,56 @@
+# EAP 可观测栈样例（M47-C，P1 #23 日志聚合 + #24 仪表盘资产）：
+# Loki（日志聚合）+ Promtail（采 Docker 容器日志）+ Grafana（仪表盘，含 eap-dashboard.json）
+# + Alertmanager（prometheus-alerts.yml 告警的路由/静默）。
+#
+# 用法（与 docker-compose.prod.yml 同网或独立栈均可；独立栈示例）：
+#   docker compose -f docker-compose.observability.yml up -d
+#   Grafana http://localhost:3300 （admin/admin，首次登录改密）→ 导入 grafana-dashboard-eap.json
+# Prometheus 抓取后端 /metrics（deploy/docker-compose.prod.yml 的 eap 服务已暴露 8300）——
+# 若 Prometheus 不在本栈，需在其 scrape_configs 指向 eap:8300。
+# 诚实说明：这是最小可用样例（单副本、本地卷），生产需按规模调保留期（Loki 默认 15d）与存储。
+
+services:
+  loki:
+    image: grafana/loki:3.2.0
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    volumes:
+      # 采 Docker 容器日志（json-file driver；prod compose 各服务默认即此格式）
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin   # 首次登录后修改；生产接 OIDC/LDAP
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-dashboard-eap.json:/var/lib/grafana/dashboards/eap.json:ro
+      - ./grafana-datasource-prometheus.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+  grafana-data:

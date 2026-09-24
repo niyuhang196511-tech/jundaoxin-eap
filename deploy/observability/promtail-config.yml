@@ -1,0 +1,39 @@
+# Promtail：采 Docker 容器日志（json-file）→ Loki
+# relabel 提炼容器名/服务名/compose 项目作为 Loki 标签，便于按服务检索
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project"]   # 仅采 compose 管理的容器
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        target_label: compose_project
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: service
+    pipeline_stages:
+      # EAP 结构化日志为 JSON 行（observability/middleware）：解析后 level/trace_id 可作标签查询
+      - json:
+          expressions:
+            level: level
+            trace_id: trace_id
+            event: event
+      - labels:
+          level:
+      - labels:
+          trace_id:

@@ -151,3 +151,54 @@ EAP_DB_URL=postgresql+psycopg://eap:pass@pg:5432/eap \
 API 实例（`job="eap"`），`rule_files` 挂载该文件；规则含：实例宕机（`sum(up{job="eap"}) < 2`）、
 5xx 占比 > 5%、平均延迟（histogram 桶导出前为均值代理）、任务失败增速、熔断跳闸、网关在途。
 
+
+## 9. 生产部署栈与运营资产（M47-C）
+
+### 9.1 一键生产栈（[deploy/docker-compose.prod.yml](../deploy/docker-compose.prod.yml)）
+
+与 §8.2 HA 样例的定位区别：本栈面向**首次交付/单机生产**——ghcr 镜像（不本地 build）、
+PG/Redis 不暴露宿主端口、启动前独立 `eap-migrate` 服务执行 Alembic、控制台镜像由
+release.yml `release-console` job 同 tag 发布。可选 Milvus 向量栈走 `--profile milvus`。
+
+```bash
+cp deploy/.env.example.prod .env.prod    # 逐项填写，[*] 为必改
+EAP_VERSION=v1.0.0 docker compose -f deploy/docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+### 9.2 启动 fail-fast（`EAP_STRICT_CONFIG=1`）
+
+prod 栈默认开启：存在开发默认密钥（dev api key / session secret）、技能签名或加密密钥
+未配置时，进程以退出码 78（EX_CONFIG）拒绝启动——判定清单与警告同源
+（`eap/__main__.py::insecure_config_problems`）。开发环境勿开此开关。
+
+### 9.3 备份纳入媒体目录（消除 DB 与媒体版本漂移）
+
+`drill_restore.py backup --media-dir $EAP_MEDIA_DIR`：库备份之外把媒体目录打包为
+`eap-media-<时间戳>.tar.gz` + sha256 清单（sidecar）。演练侧
+`drill --media <包路径>` 增加完整性校验步骤（解包后逐文件复核哈希）。prod 栈的
+`backup` 服务已带 `--media-dir`（媒体卷只读挂载）。注意 `--media-dir` 不要与 `--out`
+指向同一目录。
+
+### 9.4 审计日志治理（M47-B）
+
+- 导出：`GET /api/v1/audit/export?format=csv|json&...过滤条件`（admin；控制台审计页
+  「导出 CSV」按钮所见即所导）；行数硬上限 `EAP_AUDIT_EXPORT_LIMIT`（默认 50000，防拖库）。
+- 保留期：`EAP_AUDIT_RETENTION_DAYS`（默认 365，0=永久）+ `POST /api/v1/audit/purge`
+  （admin，可单次覆盖天数）显式触发；动作落审计仅条数。如需自动化，调度器直接调
+  `observability/audit.purge_expired` 即可。
+
+### 9.5 可观测栈样例（deploy/observability/）
+
+Loki + Promtail（采 Docker 容器日志，EAP 结构化日志的 level/trace_id 提炼为标签）+
+Grafana（预置数据源与 `grafana-dashboard-eap.json` 仪表盘：请求速率/p95 延迟/Agent 调用/
+Token 用量/队列深度/熔断状态/沙箱违规/网关拒绝）+ Alertmanager 路由样例。
+
+```bash
+docker compose -f deploy/observability/docker-compose.observability.yml up -d
+# Grafana http://localhost:3300 → Dashboards → EAP 平台运行概览
+```
+
+### 9.6 依赖漏洞扫描
+
+CI `dependency-scan` job（[.github/workflows/ci.yml](../.github/workflows/ci.yml)）：
+`pip-audit`（后端锁文件）+ `pnpm audit --prod --audit-level=high`（控制台），高危即红。

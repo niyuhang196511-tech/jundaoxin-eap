@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     port: int = 8300
     db_url: str = "sqlite:///./eap.db"
 
+    # M47-C 启动 fail-fast：置 1 时存在开发默认密钥 / 必配密钥缺失即拒绝启动
+    # （deploy/docker-compose.prod.yml 默认开启；开发保持 0 走警告不阻断）
+    strict_config: bool = False
+
     # CORS 白名单（逗号分隔 origin）：默认空 = 仅同源；"*" 全放行（仅开发）
     cors_origins: str = ""
 
@@ -85,6 +89,11 @@ class Settings(BaseSettings):
     memory_retention_days: int = 180  # 记忆保留期（天），超期可由 /memory/purge 清理
     # 记忆摘要压缩（M34/L7）：开启后会话消息超预算时经 LLM 生成摘要替换旧消息（默认 off 保持字符截断）
     memory_summary_compress: bool = False
+
+    # 审计日志治理（M47-B）：导出行数上限必须存在（防拖库）——0/负值视为非法配置，回落默认
+    audit_export_limit: int = 50000
+    # 审计保留期（天）：超过保留期的审计行由 POST /audit/purge 清理；0=永久保留（禁用清理）
+    audit_retention_days: int = 365
 
     # MCP 端点鉴权（docs/04 §5）：默认开启（平台 API Key）；内网可信环境可关闭
     mcp_auth: bool = True

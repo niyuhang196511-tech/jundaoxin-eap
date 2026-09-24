@@ -1,0 +1,32 @@
+# Prometheus 告警路由/静默样例（M47-C）：与 deploy/prometheus-alerts.yml 的 10 条规则配套。
+# 挂接方式：prometheus.yml -> alerting: alertmanagers: [static: localhost:9093]
+route:
+  receiver: default
+  group_by: [alertname, agent]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # P1 类（RLS 相关无告警；此处按 severity 分流）
+    - matchers: [ 'severity = "critical"' ]
+      receiver: oncall
+      repeat_interval: 1h
+    - matchers: [ 'severity = "warning"' ]
+      receiver: ops-channel
+
+receivers:
+  - name: default
+    # 占位：接企业 IM/邮件 webhook（如飞书机器人 https://open.feishu.cn/hook/xxx）
+  - name: oncall
+    # 占位：值班通道
+  - name: ops-channel
+    # 占位：运维群通道
+
+# 常用静默样例（生产在 UI 操作，此处留档）：
+#  - 发布窗口静默 EapLatencyP95High / EapLatencyHigh（deploy 期间延迟天然上升）
+#  - 演练静默 EapTaskQueueBacklog（drill 期间积压为预期）
+inhibit_rules:
+  # 实例全宕时抑制其派生告警（延迟/积压在宕机时必然触发，避免告警风暴）
+  - source_matchers: [ 'alertname = EapInstanceDown' ]
+    target_matchers: [ 'alertname =~ "EapLatency.*|EapTaskQueueBacklog"' ]
+    equal: []
