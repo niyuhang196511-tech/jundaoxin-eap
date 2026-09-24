@@ -2,18 +2,35 @@
 
 设计：
 - 迁移（postgres 方言）里对带 tenant_id 的表启用 RLS + 策略：
-    tenant_id = current_setting('eap.tenant_id', true)::int  （NULL = 平台共享，全租户可见）
+    tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int
+  （NULL = 平台共享，全租户可见）
   SQLite 下整个迁移为 no-op（开发形态无 RLS 语义）。
 - 应用侧：JWT 通道请求开始时 SET LOCAL eap.tenant_id=<租户>（deps.resolve_tenant 内），
   API Key 通道为平台运维身份（app role 为表 owner / BYPASSRLS），不受 RLS 约束——
   与"API Key=服务间全量、JWT=租户用户"的凭证模型一致。
 - 表清单与 models.py 的 tenant_id 列保持同步（新增租户表时在此登记）。
 
+M50-A NULLIF 加固（「收敛为非 owner 应用角色」的前置条件，存量库经迁移
+e4a8c2f6b9d1 drop + recreate 全部策略）：
+- M49-C PG 实测：池化连接一旦设置过 eap.tenant_id（SET LOCAL 或 set_config(..., true)），
+  事务结束后该占位 GUC 在连接上**残留为空串 ''** 而非「未设置」（RESET /
+  set_config(NULL) 同样落 ''）。旧谓词 current_setting('eap.tenant_id', true)::int
+  对 '' 抛 InvalidTextRepresentation——连接池复用后租户通道查询整体报错。
+  当前部署形态（应用以表 owner/超级用户连接，RLS 天然豁免不评估谓词）不可达，
+  但收敛为非 owner 应用角色后必踩中。
+- NULLIF(current_setting('eap.tenant_id', true), '')::int：GUC 为 ''（残留）或
+  未设置时一律得 NULL，比较为 NULL → 租户行不可见，与既有 fail-closed 语义
+  （GUC 未设置只见平台/共享行）一致；policies 特例（tenant_id = 0 OR
+  tenant_id = current）在 NULL 时仍见平台默认行，回退语义不变。
+- 运行时启用路径（enable_rls / enable_rls_m47a）与迁移 e4a8c2f6b9d1
+  （recreate_policies_m50a 复用前两者）共用同一套字面量谓词，
+  tests/test_rls_coverage.py 设防漂移断言。
+
 安全说明：DDL 全部为逐表静态字面量、内联于 execute 调用（无运行时拼接/格式化/变量传递）——
 PostgreSQL 不支持标识符参数化，静态枚举是 DDL 场景下唯一的零注入面写法。
 
-注意：策略按 `eap.tenant_id` 会话变量生效；未设置该变量且非 BYPASSRLS 角色将看不到任何行
-（fail-closed），避免漏配导致跨租户泄露。
+注意：策略按 `eap.tenant_id` 会话变量生效；该变量未设置（或池化连接残留 ''）且非
+BYPASSRLS 角色将看不到任何租户行（fail-closed），避免漏配导致跨租户泄露。
 """
 
 from __future__ import annotations
@@ -47,42 +64,42 @@ def enable_rls(op) -> None:
     op.execute('ALTER TABLE "users" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "users"')
     op.execute('CREATE POLICY tenant_isolation ON "users" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # api_keys
     op.execute('ALTER TABLE "api_keys" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "api_keys"')
     op.execute('CREATE POLICY tenant_isolation ON "api_keys" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # models
     op.execute('ALTER TABLE "models" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "models"')
     op.execute('CREATE POLICY tenant_isolation ON "models" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # kbs
     op.execute('ALTER TABLE "kbs" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "kbs"')
     op.execute('CREATE POLICY tenant_isolation ON "kbs" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # usage_records
     op.execute('ALTER TABLE "usage_records" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "usage_records"')
     op.execute('CREATE POLICY tenant_isolation ON "usage_records" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # budgets
     op.execute('ALTER TABLE "budgets" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "budgets"')
     op.execute('CREATE POLICY tenant_isolation ON "budgets" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # memories
     op.execute('ALTER TABLE "memories" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "memories"')
     op.execute('CREATE POLICY tenant_isolation ON "memories" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # workflows
     op.execute('ALTER TABLE "workflows" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "workflows"')
     op.execute('CREATE POLICY tenant_isolation ON "workflows" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
 
 
 def disable_rls(op) -> None:
@@ -110,9 +127,10 @@ def disable_rls(op) -> None:
 def enable_rls_m47a(op) -> None:
     """M47-A：补齐 3 张漏配 RLS 的租户表（policies / trigger_rules / webhook_endpoints）。
 
-    与 enable_rls（M9，旧迁移 a1f2c3d4e5f6 引用，勿动）分开维护，DDL 同款静态字面量
-    （无运行时拼接，零注入面）。豁免清单（tasks/revoked_tokens/agent_versions/skills）
-    及理由见迁移 a7c9e1f3b5d7 的 docstring。
+    与 enable_rls（M9，旧迁移 a1f2c3d4e5f6 引用）分开维护；M50-A 起两者的策略谓词
+    已统一为 NULLIF 形态（'' 残留加固，见文件头注释与迁移 e4a8c2f6b9d1）。
+    DDL 同款静态字面量（无运行时拼接，零注入面）。豁免清单（tasks/revoked_tokens/
+    agent_versions/skills）及理由见迁移 a7c9e1f3b5d7 的 docstring。
 
     部署语义与 M9 一致：trigger/webhook 引擎的 reload() 用独立会话全量快照（无
     SET LOCAL），依赖平台身份（表 owner / BYPASSRLS）不受 RLS 约束；JWT 通道的
@@ -126,17 +144,17 @@ def enable_rls_m47a(op) -> None:
     op.execute('ALTER TABLE "policies" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "policies"')
     op.execute('CREATE POLICY tenant_isolation ON "policies" USING ('
-               "tenant_id = 0 OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id = 0 OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # trigger_rules —— 标准式（tenant_id 可空 = 平台共享，与 M9 八表同款）
     op.execute('ALTER TABLE "trigger_rules" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "trigger_rules"')
     op.execute('CREATE POLICY tenant_isolation ON "trigger_rules" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
     # webhook_endpoints —— 标准式
     op.execute('ALTER TABLE "webhook_endpoints" ENABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "webhook_endpoints"')
     op.execute('CREATE POLICY tenant_isolation ON "webhook_endpoints" USING ('
-               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+               "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int)")
 
 
 def disable_rls_m47a(op) -> None:
@@ -147,3 +165,61 @@ def disable_rls_m47a(op) -> None:
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "trigger_rules"')
     op.execute('ALTER TABLE "webhook_endpoints" DISABLE ROW LEVEL SECURITY')
     op.execute('DROP POLICY IF EXISTS tenant_isolation ON "webhook_endpoints"')
+
+
+# ---------- M50-A 谓词加固（迁移 e4a8c2f6b9d1 调用；NULLIF 防 '' 残留抛错） ----------
+
+def recreate_policies_m50a(op) -> None:
+    """M50-A 迁移 upgrade：以 NULLIF 新谓词 drop + recreate 全部 11 张 RLS_TABLES 的策略。
+
+    直接复用 enable_rls（M9 八表）+ enable_rls_m47a（M47-A 三表）——两者已在 M50-A
+    统一为 NULLIF 形态，且 ENABLE ROW LEVEL SECURITY 与 DROP POLICY IF EXISTS 均幂等。
+    复用即从构造上保证「运行时启用路径与迁移产出同一套谓词」（防漂移，
+    tests/test_rls_coverage.py::test_m50a_migration_and_runtime_predicates_in_sync 设防）。
+    """
+    enable_rls(op)
+    enable_rls_m47a(op)
+
+
+def restore_policies_pre_m50a(op) -> None:
+    """M50-A 迁移 downgrade：恢复 M50-A 之前的旧谓词（无 NULLIF，可逆回退）。
+
+    旧谓词对 GUC '' 残留（M49-C 实测，池化连接的常态）抛 InvalidTextRepresentation——
+    本函数仅为迁移可逆性保留，勿用于新部署。表清单与 recreate_policies_m50a
+    （= enable_rls + enable_rls_m47a）严格对应；DDL 同款静态字面量（零注入面）。
+    """
+    # M9 八表 —— 旧标准式
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "users"')
+    op.execute('CREATE POLICY tenant_isolation ON "users" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "api_keys"')
+    op.execute('CREATE POLICY tenant_isolation ON "api_keys" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "models"')
+    op.execute('CREATE POLICY tenant_isolation ON "models" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "kbs"')
+    op.execute('CREATE POLICY tenant_isolation ON "kbs" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "usage_records"')
+    op.execute('CREATE POLICY tenant_isolation ON "usage_records" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "budgets"')
+    op.execute('CREATE POLICY tenant_isolation ON "budgets" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "memories"')
+    op.execute('CREATE POLICY tenant_isolation ON "memories" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "workflows"')
+    op.execute('CREATE POLICY tenant_isolation ON "workflows" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    # M47-A 三表 —— policies 旧特例 + 两表旧标准式
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "policies"')
+    op.execute('CREATE POLICY tenant_isolation ON "policies" USING ('
+               "tenant_id = 0 OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "trigger_rules"')
+    op.execute('CREATE POLICY tenant_isolation ON "trigger_rules" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")
+    op.execute('DROP POLICY IF EXISTS tenant_isolation ON "webhook_endpoints"')
+    op.execute('CREATE POLICY tenant_isolation ON "webhook_endpoints" USING ('
+               "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int)")

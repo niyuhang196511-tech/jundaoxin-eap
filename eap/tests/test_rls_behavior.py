@@ -7,6 +7,8 @@
 - policies 特例：USING tenant_id = 0 OR tenant_id = current——租户会话同时可见
   「本租户策略」与「tenant_id=0 平台默认策略」（runtime/policy.py::_policies_for 回退依据）；
 - fail-closed：未设 eap.tenant_id 的受限会话看不到任何租户行（仅平台共享行可见）；
+- M50-A 回归：池化连接 '' 残留 GUC（M49-C 实测的常态）下查询不抛错（NULLIF 加固）
+  且同样 fail-closed（policies 特例仍见 tenant_id=0 平台默认行）；
 - 豁免表：tasks（RLS_EXEMPT_TABLES，租户上下文在 payload JSON 内）不受影响，仍全见；
 - 平台身份：API Key 通道语义（表 owner / BYPASSRLS，见 rls.py 头注释）不受 RLS 约束。
 
@@ -21,15 +23,16 @@
   eap.tenant_id 用与 deps.resolve_tenant 完全相同的参数化 set_config(..., is_local=true)
   （SET 语句不支持绑定参数，M49-C 修正后生产同款写法）。
 
-会话状态注意事项（M49-C 实测发现的 PG 占位 GUC 行为）：
+会话状态注意事项（M49-C 实测发现的 PG 占位 GUC 行为；M50-A 已加固）：
 - 会话一旦设置过 eap.tenant_id（含事务内 SET LOCAL），事务结束后该自定义占位变量
-  残留为空串 ''（而非「未设置」）：current_setting(..., true) 返回 ''，策略里
-  ::int 对 '' 会抛 InvalidTextRepresentation（set_config(NULL)/RESET 同样落到 ''）。
-  连接池复用的连接因此无法忠实呈现 rls.py 注释的「未设置该变量」fail-closed 语义
-  （那要求 GUC 真未设置 → NULL）。部署形态（owner/BYPASSRLS）不评估策略故不可达；
-  若未来收敛为非 owner 应用角色，建议策略谓词改 NULLIF(current_setting(...), '')::int
-  加固（涉及 rls.py DDL + 迁移 + test_rls_coverage 静态断言同步，超出本线所有权，报告之）。
-- 因此 fail-closed 断言用 NullPool 全新会话（GUC 从未设置 → NULL）+ 已提交探针数据
+  残留为空串 ''（而非「未设置」）：current_setting(..., true) 返回 ''（set_config(NULL)
+  /RESET 同样落到 ''）。旧谓词 ::int 对 '' 抛 InvalidTextRepresentation——连接池复用
+  的连接因此无法忠实呈现「未设置该变量」的 fail-closed 语义（那要求 GUC 真未设置 → NULL）。
+- M50-A（迁移 e4a8c2f6b9d1）已将全部策略谓词改为
+  NULLIF(current_setting('eap.tenant_id', true), '')::int：'' 残留与未设置一律得
+  NULL → 租户行不可见，fail-closed 语义对池化连接同样成立。本文件末两条
+  test_empty_guc_residue_* 为该修复的行为级回归（'' 残留下不抛错 + 只见平台/共享行）。
+- 「GUC 真未设置（NULL）」的 fail-closed 断言仍用 NullPool 全新会话 + 已提交探针数据
   （用后即删）；其余断言全部在事务内完成并回滚，对共享测试库零残留。
 """
 
@@ -64,6 +67,11 @@ _FC_POLICY_A, _FC_POLICY_PLATFORM = "rls-probe-fc-pol-a", "rls-probe-fc-pol-plat
 _FC_TRIG_A, _FC_TRIG_SHARED = "rls-probe-fc-trig-a", "rls-probe-fc-trig-shared"
 _FC_HOOK_A, _FC_HOOK_SHARED = "rls-probe-fc-hook-a", "rls-probe-fc-hook-shared"
 _FC_PREFIX = "rls-probe-fc-%"
+# M50-A '' 残留回归专用（同 fail-closed：须提交才对 NullPool 新连接可见；用后即删）
+_RS_POLICY_A, _RS_POLICY_PLATFORM = "rls-probe-rs-pol-a", "rls-probe-rs-pol-platform"
+_RS_TRIG_A, _RS_TRIG_SHARED = "rls-probe-rs-trig-a", "rls-probe-rs-trig-shared"
+_RS_HOOK_A, _RS_HOOK_SHARED = "rls-probe-rs-hook-a", "rls-probe-rs-hook-shared"
+_RS_PREFIX = "rls-probe-rs-%"
 
 _INSERT_POLICY = sa_text(
     "INSERT INTO policies (name, tenant_id, kind, config, enabled, priority,"
@@ -272,3 +280,60 @@ def test_platform_identity_bypasses_rls(seeded):
     assert _rows(seeded, "policies", "name") == {_POLICY_A, _POLICY_B, _POLICY_PLATFORM}
     assert _rows(seeded, "trigger_rules", "name") == {_TRIG_A, _TRIG_B, _TRIG_SHARED}
     assert _rows(seeded, "webhook_endpoints", "name") == {_HOOK_A, _HOOK_B, _HOOK_SHARED}
+
+
+# ---------- M50-A 回归：'' 残留 GUC（池化连接常态）不抛错且 fail-closed ----------
+
+@pytest.fixture()
+def residue_conn():
+    """已提交探针数据 + 制造 '' 残留 GUC 的 NullPool 连接（yield 后数据即删，零残留）。
+
+    残留制造方式与生产池化连接同路径：事务内 set_config('eap.tenant_id','1',true)
+    （= SET LOCAL，deps.resolve_tenant 同款写法）→ 提交结束事务——M49-C psql 实测：
+    事务结束后该占位 GUC 在连接上残留为 ''（而非「未设置」）。随后 SET ROLE 探针
+    进入受限身份；fixture 内自证断言 current_setting → ''（若 PG 行为变化会先红在这里，
+    而非误判为 NULLIF 修复失效）。旧谓词（无 NULLIF）在此状态下 ::int 抛
+    InvalidTextRepresentation——正是本回归防线守护的场景。
+    """
+    with engine.begin() as conn:  # 平台身份播种（提交，对 NullPool 新连接可见）
+        conn.execute(_INSERT_POLICY, {"n": _RS_POLICY_A, "t": _TENANT_A})
+        conn.execute(_INSERT_POLICY, {"n": _RS_POLICY_PLATFORM, "t": 0})
+        conn.execute(_INSERT_TRIGGER, {"n": _RS_TRIG_A, "t": _TENANT_A,
+                                       "ev": "rls.probe.none"})
+        conn.execute(_INSERT_TRIGGER, {"n": _RS_TRIG_SHARED, "t": None,
+                                       "ev": "rls.probe.none"})
+        conn.execute(_INSERT_HOOK, {"n": _RS_HOOK_A, "t": _TENANT_A,
+                                    "evs": '["rls.probe.none"]'})
+        conn.execute(_INSERT_HOOK, {"n": _RS_HOOK_SHARED, "t": None,
+                                    "evs": '["rls.probe.none"]'})
+    fresh = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with fresh.connect() as c:
+            with c.begin():  # 事务内 SET LOCAL 等价写法 → 提交，制造 '' 残留
+                c.execute(sa_text("SELECT set_config('eap.tenant_id', '1', true)"))
+            assert c.execute(sa_text(
+                "SELECT current_setting('eap.tenant_id', true)")).scalar() == "", \
+                "前置条件失效：事务结束后 GUC 应残留为 ''（M49-C 实测行为）"
+            c.execute(sa_text(f"SET ROLE {_PROBE_ROLE}"))  # 会话级，随连接关闭消失
+            yield c
+    finally:
+        fresh.dispose()
+        with engine.begin() as conn:  # 清理已提交探针数据（用后即删，零残留）
+            for table in ("policies", "trigger_rules", "webhook_endpoints"):
+                conn.execute(sa_text(
+                    f'DELETE FROM "{table}" WHERE name LIKE :p'), {"p": _RS_PREFIX})
+
+
+def test_empty_guc_residue_fail_closed_standard_tables(residue_conn):
+    """M50-A 回归：'' 残留 GUC 的受限会话查询标准式 RLS 表**不抛错**（NULLIF 加固，
+    旧谓词此处抛 InvalidTextRepresentation）且 fail-closed——只见 NULL 平台共享行，
+    租户 A 行不可见（'' → NULL → 比较为 NULL，与 GUC 真未设置语义一致）。"""
+    assert _rows(residue_conn, "trigger_rules", "name", _RS_PREFIX) == {_RS_TRIG_SHARED}
+    assert _rows(residue_conn, "webhook_endpoints", "name", _RS_PREFIX) == {_RS_HOOK_SHARED}
+
+
+def test_empty_guc_residue_policies_platform_default(residue_conn):
+    """M50-A 回归：'' 残留下 policies 特例（tenant_id = 0 OR tenant_id = current）
+    不抛错，且仍见 tenant_id=0 平台默认行、不见租户 A 行——平台默认回退语义
+    （runtime/policy.py::_policies_for）在池化连接残留状态下保持不变。"""
+    assert _rows(residue_conn, "policies", "name", _RS_PREFIX) == {_RS_POLICY_PLATFORM}

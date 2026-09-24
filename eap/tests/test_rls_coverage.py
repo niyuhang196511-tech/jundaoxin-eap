@@ -14,6 +14,11 @@
 另覆盖迁移 a7c9e1f3b5d7 在 SQLite 下的 upgrade/downgrade 可执行
 （PG-only DDL 在开发形态必须是无害 no-op，沿用 test_m40_receipt 的
 临时库模式）。
+
+M50-A 增补：策略谓词统一 NULLIF(current_setting('eap.tenant_id', true), '')::int
+（防池化连接 GUC '' 残留抛错，M49-C 实测）；本文件 pin 断言同步为 NULLIF 形态，
+并新增「运行时启用路径与迁移 e4a8c2f6b9d1 产出同一套谓词」的防漂移断言
+（_Recorder 离线执行比对，含 downgrade 旧谓词恢复的表集对应）。
 """
 
 from __future__ import annotations
@@ -112,16 +117,17 @@ def test_enable_disable_rls_m47a_statement_sequence():
         assert f'DROP POLICY IF EXISTS tenant_isolation ON "{t}"' in rec.calls
 
     # policies 特例：本租户 OR 平台默认（tenant_id=0），与 _policies_for 回退语义对齐
+    # （M50-A：NULLIF 形态——池化连接 GUC '' 残留时得 NULL，仍见平台默认行，见 rls.py 头注释）
     policies_using = next(c for c in rec.calls
                           if c.startswith('CREATE POLICY tenant_isolation ON "policies"'))
-    assert "tenant_id = 0 OR tenant_id = current_setting('eap.tenant_id', true)::int" \
+    assert "tenant_id = 0 OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int" \
         in policies_using
 
-    # trigger_rules / webhook_endpoints 标准式：可空列平台共享 + fail-closed
+    # trigger_rules / webhook_endpoints 标准式：可空列平台共享 + fail-closed（NULLIF 形态）
     for t in ("trigger_rules", "webhook_endpoints"):
         using = next(c for c in rec.calls
                      if c.startswith(f'CREATE POLICY tenant_isolation ON "{t}"'))
-        assert "tenant_id IS NULL OR tenant_id = current_setting('eap.tenant_id', true)::int" \
+        assert "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('eap.tenant_id', true), '')::int" \
             in using
 
     # 下线：每表两句（DISABLE + DROP POLICY），与启用严格对应
@@ -131,6 +137,59 @@ def test_enable_disable_rls_m47a_statement_sequence():
     for t in ("policies", "trigger_rules", "webhook_endpoints"):
         assert f'ALTER TABLE "{t}" DISABLE ROW LEVEL SECURITY' in rec2.calls
         assert f'DROP POLICY IF EXISTS tenant_isolation ON "{t}"' in rec2.calls
+
+
+# ---------- M50-A：NULLIF 谓词形态 + 运行时启用路径与迁移防漂移 ----------
+
+_NULLIF_PREDICATE = "NULLIF(current_setting('eap.tenant_id', true), '')::int"
+_LEGACY_PREDICATE = "current_setting('eap.tenant_id', true)::int"
+
+
+def _creates(rec: _Recorder) -> list[str]:
+    return [c for c in rec.calls if c.startswith("CREATE POLICY tenant_isolation ON ")]
+
+
+def _policy_tables(rec: _Recorder) -> set[str]:
+    return {c.split(' ON "')[1].split('"')[0] for c in _creates(rec)}
+
+
+def test_m50a_migration_and_runtime_predicates_in_sync():
+    """M50-A 防漂移：迁移 e4a8c2f6b9d1 的 upgrade 路径（recreate_policies_m50a）
+    与运行时启用路径（enable_rls + enable_rls_m47a）产出的 CREATE POLICY 语句
+    逐条相同，且全部 11 张 RLS_TABLES 均为 NULLIF 新谓词（旧谓词 ::int 对池化
+    连接的 GUC '' 残留抛 InvalidTextRepresentation——M49-C 实测，见 rls.py 头注释）。
+    downgrade 路径（restore_policies_pre_m50a）恢复旧谓词、覆盖同一表集（可逆）。"""
+    from eap.observability.rls import (
+        RLS_TABLES,
+        enable_rls,
+        enable_rls_m47a,
+        recreate_policies_m50a,
+        restore_policies_pre_m50a,
+    )
+
+    runtime = _Recorder()
+    enable_rls(runtime)
+    enable_rls_m47a(runtime)
+    migration = _Recorder()
+    recreate_policies_m50a(migration)
+
+    rt, mg = _creates(runtime), _creates(migration)
+    assert rt == mg, "迁移 e4a8c2f6b9d1 与 rls.py 启用路径的谓词漂移（两处必须同步）"
+    assert _policy_tables(runtime) == set(RLS_TABLES), \
+        "CREATE POLICY 覆盖表集与 RLS_TABLES 不一致"
+    assert all(_NULLIF_PREDICATE in c for c in rt), \
+        "存在未换 NULLIF 形态的策略谓词（'' 残留 GUC 下 ::int 抛错）"
+
+    legacy = _Recorder()
+    restore_policies_pre_m50a(legacy)
+    lg = _creates(legacy)
+    assert _policy_tables(legacy) == set(RLS_TABLES), \
+        "downgrade 恢复的表集与 upgrade 不一致（迁移必须可逆）"
+    assert all("NULLIF" not in c for c in lg), "downgrade 应恢复 M50-A 之前的旧谓词"
+    assert all(_LEGACY_PREDICATE in c for c in lg)
+    # 每表 DROP 与 CREATE 成对（drop + recreate 语义，防旧策略残留）
+    drops = [c for c in legacy.calls if c.startswith("DROP POLICY IF EXISTS tenant_isolation")]
+    assert len(drops) == len(lg) == len(RLS_TABLES)
 
 
 # ---------- 迁移可执行（SQLite no-op 路径，沿用 test_m40_receipt 临时库模式） ----------
