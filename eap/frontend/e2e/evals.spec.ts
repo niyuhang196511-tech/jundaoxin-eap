@@ -3,7 +3,8 @@ import { expect, test } from '@playwright/test'
 /**
  * M46-A 评测中心三页签 E2E：影子流量全链路（配置→API 调用触发→配对运行→报表）
  * 与人工抽检全链路（任务抽样→评分→报表）。
- * 前置：后端 127.0.0.1:8300（dev 库 + mock 模型）+ 前端 dev。
+ * 前置：后端 127.0.0.1:8300 + 前端 dev。对全新种子库自包含（M51 CI 修复：
+ * 只依赖 lifespan 种子的 faq-agent/dev-key-1/mock 模型，不依赖 dev 库存量数据）。
  * 隔离纪律：自建配置/策略用唯一名，用例结束前删除/停用（dev 库共享）。
  */
 
@@ -27,9 +28,12 @@ test.describe.serial('评测中心·影子流量', () => {
     await page.getByRole('button', { name: '新建影子配置' }).click()
     await page.getByPlaceholder('order-shadow-v2').fill(CFG)
     // 输入改选择（M49-E1）：生产/影子 agent 由自由 Input 改为 Select（选项来自 Agent Registry）
+    // M51 CI 修复：影子侧不再依赖 dev 库存量 canvas-demo（CI 全新种子库只有 faq-agent），
+    // 改自影子 faq-agent→faq-agent——后端仅校验存在性不限两侧同名，mock 确定性输出下
+    // 报表断言（一致率 100%）语义不变，spec 对种子库自包含
     const dialog = page.locator('[role="dialog"]')
     await dialog.locator('div:has(> label:text-is("生产 agent")) select').selectOption('faq-agent')
-    await dialog.locator('div:has(> label:text-is("影子 agent（候选）")) select').selectOption('canvas-demo')
+    await dialog.locator('div:has(> label:text-is("影子 agent（候选）")) select').selectOption('faq-agent')
     await page.getByRole('button', { name: '创建' }).click()
     // 表格出现新配置
     await expect(page.getByText(CFG).first()).toBeVisible({ timeout: 10_000 })

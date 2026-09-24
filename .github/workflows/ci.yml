@@ -164,6 +164,9 @@ jobs:
         timeout-minutes: 20
         env:
           NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8300
+          # CORS 必配：本地开发靠 git-ignored 的 eap/.env 放行 3001 跨域，CI 无该文件，
+          # 缺省 cors_origins="" 不挂 CORS 中间件 → 浏览器 3001→8300 全部被拦（M51 实测红因）
+          EAP_CORS_ORIGINS: "http://localhost:3001,http://127.0.0.1:3001"
           EAP_DB_URL: sqlite:////tmp/eap-e2e.db
         run: |
           pnpm exec playwright install --with-deps chromium
