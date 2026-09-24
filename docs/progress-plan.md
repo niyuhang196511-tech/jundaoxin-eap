@@ -18,11 +18,11 @@
 | 项 | 值 |
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
-| 最新里程碑 | M46（console-M46A 评测中心三页签/影子流量/人工抽检界面 / harness-M46B 更新下载进度条 / console-M46C 政策模板补齐九 kinds）——M44 两域从仅 API 补成可操作 |
-| 代码 commit | 171796a |
+| 最新里程碑 | M47（security-M47A RLS+依赖扫描 / audit-M47B 审计导出+保留期 / deploy-M47C 生产栈+fail-fast+媒体备份+观测栈）——成熟度盘点 P1 六项收官（另有 E2E 批次 12 条 Playwright 全绿，见批次 12） |
+| 代码 commit | 53cc413 |
 | 快照日期 | 2026-09-23 |
 | 测试基线 | **414 passed, 8 skipped**（114s）+ 控制台 typecheck/build + Harness cargo 23/tauri build NSIS 绿；**E2E（Playwright）12 条全绿**（存量冒烟 3 + M46 评测中心 7 + 治理 2，浏览器真实链路） |
-| 下一主线 | L 组全部为外部条件项（vLLM 需 GPU、IM 联调需外部账号、SLO 需生产环境、计费需产品决策）——工程侧无立即可开工的账本内任务，新需求照单追加 |
+| 下一主线 | 成熟度 P2 十三项 + P3 四项已按域登记（见批次 13 后「M48+ 待办任务组」）；L 组外部条件项按条件消化 |
 | 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
 
 ---
@@ -250,5 +250,10 @@
 | **M46-B ✅** | **Harness 更新下载进度条**（M43-C 留待增强收官，171796a） | install_update 的 download_and_install 进度回调落地：on_chunk 累计 downloaded 后 emit `update://progress {downloaded, total|null}`（total=Content-Length，分块传输缺失为 null），下载完成发 `update://installing`；emit 失败静默不影响安装闭环。前端 installUpdateNow 先挂 listen 再 invoke（防小包漏事件）：total 已知渲染百分比进度条，未知诚实降级为已下载 MB 计数不假装百分比；unlisten 双保险。事件名/回调签名对照 tauri-plugin-updater 2.12.0 与 tauri 2.11.6 源码核实。**诚实边界**：进度只覆盖下载阶段，验签/NSIS 安装无回调仅显示文案直至进程重启。新增 payload 形状单测，cargo test 23 绿 |
 | **M46-C ✅** | **政策配置模板补齐九 kinds + 后端登记缺口修复**（4b67264） | Governance 政策表单 kind 模板/下拉从 v0.6 三种补齐到九种：+tool-sandbox（M33）/a2a-delegate-allowlist（M30，endpoints/agents 双键——按运行时 check_a2a_delegate 语义预填）/eval-gate（M42-B）；空态文案同步。**连带修复 agent 发现的后端缺口**：a2a-delegate-allowlist 运行时真实生效但 PolicyCreate.kind 正则与 _KINDS 漏登记——控制台创建被 422 拒绝（存量测试绕过 API 直插库未暴露）；补登记 + config 校验（endpoints/agents 至少一项列表）+ API 可创建回归用例（test_a2a_push 8 用例） |
 | **批次 12 ✅（E2E）** | **端到端测试 + 浏览器可视化走查**：Playwright 用例 9 条新增（评测中心三页签全链路 / 治理政策九 kinds）+ 浏览器走查 T1~T6（214ecd4） | 走查发现并当场修复：侧栏版本标签 v0.4.0 过期（→v1.0.0）、评审备注缺 placeholder、政策对话框初始 config 空致直接创建 400（改为按 kind 预填）；另确认 eval-gate 策略按设计拦死未过评测模型（测试隔离纪律：用例内必清理）。走查截图留档 eap/frontend/gui-test-screenshots/；E2E 跑法：后端 `uv run python -m eap` + `cd eap/frontend && pnpm exec playwright test` |
+| **批次 13 ✅（M47）** | **产品成熟度 P1 六项三线并行**（Explore 盘点 27 条缺口后取 P1）：M47-A RLS 补齐+依赖扫描 ＋ M47-B 审计导出+保留期 ＋ M47-C 部署物资产化+观测栈 | 详见下方三行；验证基线：平台回归 430 passed + pip-audit/pnpm audit 零已知漏洞 + compose.prod 解析 11 服务 + 演练含媒体 6/6 全绿 |
+| **M47-A ✅** | **RLS 租户隔离补齐 + CI 依赖扫描**（安全线，36f4a9c） | 逐表核实修正盘点误报（grep 清单「7 张缺 RLS」实为 3 张可启用+4 张豁免）：启用 policies（特例 USING tenant_id=current OR 0，对齐 _policies_for 平台默认回退）/trigger_rules/webhook_endpoints（标准式）；豁免 tasks（租户在 payload JSON 内，列级 RLS 无谓词）、revoked_tokens（全局吊销黑名单，启用反致安全回归）、agent_versions/skills（无 tenant_id 列）。迁移 a7c9e1f3b5d7 往返可逆、SQLite no-op；rls.py 权威清单常量 + 7 条防线测试（防新表再漏/豁免表加列即红）。CI dependency-scan job：pip-audit + pnpm audit --prod --audit-level=high，失败即红；本地实扫两端当前零已知漏洞 |
+| **M47-B ✅** | **审计日志导出 + 保留期清理**（审计线，975a472） | 导出 GET /api/v1/audit/export（admin，csv/json，过滤语义与查询端点共用 _filtered_query；StreamingResponse 分块 500 条/独立会话；硬上限 EAP_AUDIT_EXPORT_LIMIT 默认 50000 防拖库不可突破；CSV BOM Excel 直开）；控制台审计页导出按钮所见即所导。保留期 EAP_AUDIT_RETENTION_DAYS（365，0=永久）+ POST /api/v1/audit/purge 显式触发（对齐 memory retention 既有模式——调研确认 memory 本就无自动扫描；自动化可直接调 purge_expired）；动作落审计仅条数。test_audit_governance 9 条；诚实修正：AuditLog 无 tenant_id 列（CSV 列清单未虚构） |
+| **M47-C ✅** | **部署物资产化 + 观测栈**（运营线，53cc413） | deploy/docker-compose.prod.yml（11 服务：ghcr 镜像/独立 eap-migrate/strict fail-fast/PG+Redis 不暴露宿主/Milvus profile/backup 带媒体卷）+ .env.example.prod（[*] 必改清单对齐 config.py）；启动 fail-fast：EAP_STRICT_CONFIG=1 时开发默认密钥/缺密钥退出码 78 拒绝启动（insecure_config_problems 与警告共用判定；实包验证 78/直通双向）；drill_restore.py --media-dir（媒体 tar.gz+sha256 清单，drill --media 逐文件复核；实包演练 6/6 全绿，消除库与媒体版本漂移）；deploy/observability/（Loki+Promtail 采 Docker 日志并提炼 level/trace_id 标签 + Grafana 预置数据源与 eap 仪表盘 JSON——指标名取自 M44-C 实际导出 + alertmanager 路由/抑制样例）；runbook §9。核查确认 release.yml release-console job 已存在（控制台镜像发布缺口不成立） |
+| **M48+ 待办任务组** | 成熟度 P2 十三项（按域登记）：安全（#2 .env 校验工具/#7 密钥轮换/#8 网关分布式态 Redis/#10 安全响应头 CSP）、运营（#3 备份 CronJob 化/#4 控制台镜像 CI 发布——核查 release.yml 已有 release-console，实际可销项/#22 PG 实测）、体验（#12 控制台三域界面 triggers/lora/memory 治理/#14 i18n 待产品方向/#13 UI 一致性/#15 移动端）、开发者（#16 SDK 独立包/#17 脚手架补 4 类/#18 openapi.json+文档站/#19 示例库）、观测（#24 Grafana 样例已交付部分余 alertmanager 联调/#25 成本报表导出/#23 余 Loki 生产调优）；P3 四项（#11 会话安全维持/#27 Harness 性能度量/#26 崩溃上报待选型/#15 移动端） | 外部条件项不变（L1/L3/L4/L5/L9） |
 
 > **取任务规则**：每轮从当前批次取一条线，按组内「剩余工作」序号顺序实施；完成即回写本文件（状态 ✅ + commit 号），再取下一项。
