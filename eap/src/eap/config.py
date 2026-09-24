@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
     # 静态秘密加密密钥（M8）：模型/连接器的 api_key 静态存储加密（Fernet）；未配置 = 明文存储（仅开发）
     secret_key: str | None = None
+    # 密钥轮换（M48-C）：旧密钥列表（逗号分隔）——EAP_SECRET_KEY 换新后把旧值放这里，
+    # 存量密文解密自动回退；存量重加密跑 scripts/reencrypt_secrets.py，完成后移除本变量
+    secret_key_previous: str | None = None
 
     # OTel tracing（M9）：配置 OTLP 端点即启用（如 http://otel-collector:4317）；未配置零开销
     otel_endpoint: str | None = None

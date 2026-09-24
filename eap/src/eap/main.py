@@ -114,6 +114,11 @@ def create_app() -> FastAPI:
     from .observability.latency import RequestLatencyMiddleware
 
     app.add_middleware(RequestLatencyMiddleware)
+    # M48-C（成熟度 #10）：安全响应头（nosniff/Referrer-Policy/X-Frame-Options/CSP）；
+    # 纯响应头改写无顺序语义依赖，/sdk 与 /docs 豁免见 security_headers.py
+    from .observability.security_headers import SecurityHeadersMiddleware
+
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(api_chat.router)
     app.include_router(api_connectors.router)
     app.include_router(api_agents.router)
