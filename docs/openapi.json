@@ -4435,6 +4435,28 @@
         "summary": "List Audit"
       }
     },
+    "/api/v1/audit/actions": {
+      "get": {
+        "description": "审计动作目录（M50-B2）：供审计查询页动作过滤做 datalist 候选提示。\n\n目录为文档性质（observability/audit_actions.AUDIT_ACTIONS，与全仓留痕调用点\n静态核实同步，防漂移测试 tests/test_audit_actions.py）；查询端点的 action\n过滤仍接受任意字符串（精确匹配），目录不构成白名单校验。\nHarness 上报等动态动作名（harness.<客户端提供>）不在目录内属预期。",
+        "operationId": "list_audit_actions_api_v1_audit_actions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Audit Actions"
+      }
+    },
     "/api/v1/audit/export": {
       "get": {
         "description": "审计日志导出（M47-B）：admin 专用，过滤语义与查询端点完全一致。\n\n- format=csv（默认，UTF-8 BOM，列 id/created_at/action/actor/target/trace_id/detail(JSON 字符串)）\n  | json（对象数组）；\n- StreamingResponse 分块流式响应，避免大结果集全量进内存；\n- 行数上限 EAP_AUDIT_EXPORT_LIMIT（默认 50000）：硬上限不可关闭（防拖库），\n  请求可传更小的 limit；Content-Disposition 为附件下载，文件名含 UTC 时间戳；\n- 导出动作本身落审计 audit.export（仅条数 + 过滤条件 + format，不含导出内容）。",
@@ -10854,6 +10876,28 @@
           }
         ],
         "summary": "Interact Task"
+      }
+    },
+    "/api/v1/tenants": {
+      "get": {
+        "description": "租户列表（admin）：id 升序，字段与 Tenant 表一一对应（不虚构）。",
+        "operationId": "list_tenants_api_v1_tenants_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Tenants"
       }
     },
     "/api/v1/triggers": {
