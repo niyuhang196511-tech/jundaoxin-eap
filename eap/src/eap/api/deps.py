@@ -100,11 +100,15 @@ def resolve_tenant(
             request.state.user = identity["user"]
             request.state.roles = identity["roles"]
             _set_acl(request, tenant.id)
-            # PostgreSQL RLS（M9）：会话变量为行级隔离依据（策略 fail-closed）
+            # PostgreSQL RLS（M9）：会话变量为行级隔离依据（策略 fail-closed）。
+            # M49-C PG 实测修正：SET 语句不支持绑定参数（psycopg 服务端绑定渲染为
+            # $1 → syntax error），改用等价函数 set_config(name, value, is_local=true)
+            # ——与 SET LOCAL 同为事务级作用域，且支持参数化。
             if db.get_bind().dialect.name == "postgresql":
                 from sqlalchemy import text as _text
 
-                db.execute(_text("SET LOCAL eap.tenant_id = :t"), {"t": str(tenant.id)})
+                db.execute(_text("SELECT set_config('eap.tenant_id', :t, true)"),
+                           {"t": str(tenant.id)})
             return tenant
 
     raise fastapi.HTTPException(status_code=401, detail="EAP-1001 无效 API Key")

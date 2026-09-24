@@ -28,8 +28,11 @@ _COLUMNS = [
 
 def _has_column(table: str, name: str) -> bool:
     conn = op.get_bind()
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(row[1] == name for row in rows)
+    if conn.dialect.name == "sqlite":
+        rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
+        return any(row[1] == name for row in rows)
+    # M49-C PG 实测：PRAGMA 为 SQLite 专有，其他方言走 SQLAlchemy inspector
+    return any(c["name"] == name for c in sa.inspect(conn).get_columns(table))
 
 
 def upgrade() -> None:

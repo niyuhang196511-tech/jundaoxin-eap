@@ -6,8 +6,14 @@ import os
 import tempfile
 
 # 必须在导入 eap 之前设置（config 使用 lru_cache）
-_TMPDIR = tempfile.mkdtemp(prefix="eap-test-")
-os.environ["EAP_DB_URL"] = f"sqlite:///{_TMPDIR}/test-eap.db"
+# M49-C：尊重预设 EAP_TEST_DB_URL（CI/本地指向真实 PostgreSQL 实测）；
+# 未预设时维持 SQLite 临时库（开发默认，完全向后兼容）。
+_TEST_DB_URL = os.environ.get("EAP_TEST_DB_URL")
+if _TEST_DB_URL:
+    os.environ["EAP_DB_URL"] = _TEST_DB_URL
+else:
+    _TMPDIR = tempfile.mkdtemp(prefix="eap-test-")
+    os.environ["EAP_DB_URL"] = f"sqlite:///{_TMPDIR}/test-eap.db"
 os.environ.pop("EAP_OPENAI_BASE_URL", None)  # 测试仅用 mock，离线确定
 os.environ.pop("EAP_OPENAI_API_KEY", None)
 

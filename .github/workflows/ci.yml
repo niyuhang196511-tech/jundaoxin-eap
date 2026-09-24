@@ -11,13 +11,28 @@ jobs:
     defaults:
       run:
         working-directory: eap
+    services:
+      # M49-C：Redis 服务（宿主 63790 = tests/test_tasks_redis.py 与
+      # test_multireplica.py 的默认端口约定）——MCP/Redis 集成步骤与多副本
+      # 限流/registry 广播路径在 CI 真跑而非静默回退
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 63790:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Sync dependencies
-        run: uv sync --frozen --extra otel --extra docs --extra tokens
+        # --extra redis：api/security.py 限流滑窗惰性 import redis.asyncio
+        # （无包时所有走限流的端点 500），且集成步骤的 test_tasks_redis 需要
+        run: uv sync --frozen --extra redis --extra otel --extra docs --extra tokens
       - name: "Lint (ruff: F/E9 only)"
         run: uv run ruff check src/ tests/ --select F,E9
       - name: Migration dry-run (empty DB)
@@ -40,6 +55,56 @@ jobs:
         run: |
           uv run python ../scripts/export_openapi.py
           git diff --exit-code -- ../docs/openapi.json
+
+  backend-postgres:
+    # M49-C：PostgreSQL 实测（成熟度盘点 P2 #22）——主套件在真实 PG 16 上跑：
+    # 迁移链全量执行（含 a1f2c3d4e5f6/a7c9e1f3b5d7 的 RLS 启用 DDL）、方言行为、
+    # tests/test_rls_behavior.py 行级租户隔离行为实测（SQLite 下整文件 skip）。
+    # 不放 redis service（保持精简）：test_tasks_redis 同 backend job 被 ignore，
+    # 限流路径无 EAP_REDIS_URL 时进程内回退（仅需 redis 包在场）。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eap
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: eap
+          POSTGRES_PASSWORD: eap
+          POSTGRES_DB: eap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eap -d eap"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --extra postgres --extra redis --extra otel --extra docs --extra tokens
+      - name: Migration dry-run (empty PostgreSQL)
+        # 独立空库 eap_migdry（对齐 backend job 的 sqlite 临时库语义）：
+        # 全新库 upgrade head 全链 + RLS DDL 在真实 PG 上可执行
+        env:
+          EAP_DB_URL: postgresql+psycopg://eap:eap@localhost:5432/eap_migdry
+        run: |
+          uv run python -c "
+          import psycopg
+          with psycopg.connect('postgresql://eap:eap@localhost:5432/eap', autocommit=True) as c:
+              c.execute('CREATE DATABASE eap_migdry')
+          from eap.db import init_db
+          init_db()
+          print('migration dry-run (postgres) OK')
+          "
+      - name: Run tests on PostgreSQL
+        run: uv run pytest -q --ignore=tests/test_mcp.py --ignore=tests/test_tasks_redis.py
+        env:
+          EAP_TEST_DB_URL: postgresql+psycopg://eap:eap@localhost:5432/eap
 
   frontend:
     runs-on: ubuntu-latest

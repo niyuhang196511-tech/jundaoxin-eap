@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import fastapi
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
@@ -149,7 +149,12 @@ async def delete_endpoint(endpoint_id: int, request: fastapi.Request,
         raise fastapi.HTTPException(status_code=404,
                                     detail=f"EAP-4004 端点 {endpoint_id} 不存在")
     name = record.name
-    db.delete(record)  # 投递记录随 FK 级联语义由 DB 决定；查询端点过滤已不存在者自然为空
+    # M49-C PG 实测修正：投递记录随端点显式删除。原注释「级联语义由 DB 决定」不成立——
+    # FK 无 ON DELETE CASCADE：SQLite 默认不强制 FK（静默留孤儿行），PG 则
+    # ForeignKeyViolation 500。显式先删子表，两方言行为一致。
+    db.execute(sa_delete(WebhookDeliveryRecord).where(
+        WebhookDeliveryRecord.endpoint_id == endpoint_id))
+    db.delete(record)
     db.commit()
     audit.record("webhook.delete", actor=audit.actor_of(request), target=name,
                  trace_id=getattr(request.state, "trace_id", ""))
