@@ -6,7 +6,7 @@ import {
   Badge, Button, Input, Label, PageHeader, Table, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api } from '@/lib/api'
+import { api, exportAudit } from '@/lib/api'
 
 type AuditRow = {
   id: number
@@ -35,6 +35,7 @@ export default function AuditPage() {
   const [until, setUntil] = useState('')
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -55,10 +56,34 @@ export default function AuditPage() {
 
   useEffect(() => { load() }, [load])
 
+  /** 导出 CSV（M47-B）：带当前过滤条件请求 /audit/export，浏览器附件下载（行数上限由后端控制） */
+  const doExport = useCallback(async () => {
+    setExporting(true)
+    try {
+      await exportAudit({
+        format: 'csv',
+        action: action || undefined,
+        actor: actor || undefined,
+        target: target || undefined,
+        since: since || undefined,
+        until: until || undefined,
+      })
+    } catch (e) {
+      toast.error(`导出审计失败：${(e as Error).message}`)
+    } finally {
+      setExporting(false)
+    }
+  }, [action, actor, target, since, until])
+
   return (
     <div>
       <PageHeader title="审计日志" description="管理面操作追踪：谁在何时对什么做了什么（过滤 + 分页）"
-        actions={<Button variant="secondary" onClick={load} loading={loading}>刷新</Button>} />
+        actions={
+          <div className="flex items-center gap-1.5">
+            <Button variant="secondary" onClick={doExport} loading={exporting}>导出 CSV</Button>
+            <Button variant="secondary" onClick={load} loading={loading}>刷新</Button>
+          </div>
+        } />
 
       <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-6">
         <div>

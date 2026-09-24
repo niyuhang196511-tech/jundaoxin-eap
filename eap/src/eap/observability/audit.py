@@ -7,8 +7,9 @@ record(action, target, detail=...) 在路由写端点显式调用（actor 取请
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
@@ -46,6 +47,21 @@ def record(action: str, *, actor: str = "", target: str = "", detail: dict | Non
                 own_db.commit()
     except Exception as e:
         logging.getLogger("eap.audit").warning("审计落库失败: %s", e)
+
+
+def purge_expired(db: Session, retention_days: int) -> int:
+    """审计保留期清理（M47-B，对齐 memory_service.purge_expired 模式）：
+    删除 created_at 早于 now - retention_days 的行，返回清理条数。
+
+    retention_days <= 0 = 永久保留（不删任何行）。动作本身由调用方落审计
+    audit.retention.purge（仅条数，不含内容）。
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
+    result = db.execute(delete(AuditLog).where(AuditLog.created_at < cutoff))
+    db.commit()
+    return int(result.rowcount or 0)
 
 
 def actor_of(request) -> str:

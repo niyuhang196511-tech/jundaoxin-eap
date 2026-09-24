@@ -128,6 +128,56 @@ export const conversationsApi = {
     api<{ deleted: number }>('DELETE', `/api/v1/conversations/${encodeURIComponent(sessionId)}`),
 }
 
+/* ---------- 审计（M47-B 导出） ---------- */
+
+export interface AuditExportParams {
+  format?: 'csv' | 'json'
+  action?: string
+  actor?: string
+  target?: string
+  since?: string
+  until?: string
+}
+
+/** 审计导出（M47-B）：原生 fetch 下载文件（api() 走 JSON 解析不适用二进制/CSV），带当前过滤条件 */
+export async function exportAudit(params: AuditExportParams = {}): Promise<void> {
+  const q = new URLSearchParams({ format: params.format ?? 'csv' })
+  if (params.action) q.set('action', params.action)
+  if (params.actor) q.set('actor', params.actor)
+  if (params.target) q.set('target', params.target)
+  if (params.since) q.set('since', params.since)
+  if (params.until) q.set('until', params.until)
+  const r = await fetch(
+    new URL(safeApiPath(`/api/v1/audit/export?${q.toString()}`),
+      API_BASE || window.location.origin),
+    { headers: headers() },
+  )
+  if (r.status === 401 && !window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login'
+    throw new Error('登录已失效，请重新登录')
+  }
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}))
+    const detail = (d as any).detail
+    throw new Error(typeof detail === 'string' ? detail : `HTTP ${r.status}`)
+  }
+  const blob = await r.blob()
+  // 文件名取后端 Content-Disposition（含 UTC 时间戳），缺失时按格式兜底
+  const m = (r.headers.get('Content-Disposition') ?? '').match(/filename="([^"]+)"/)
+  const name = m ? m[1] : `audit-export.${params.format === 'json' ? 'json' : 'csv'}`
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 /* ---------- Webhooks（对外 Webhook 推送，M31） ---------- */
 
 // type 别名（非 interface）：携带隐式索引签名，满足 Table 泛型 Record<string, unknown> 约束
