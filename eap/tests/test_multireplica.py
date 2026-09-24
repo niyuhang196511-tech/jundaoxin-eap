@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 
+import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
+
+
+def _redis_up() -> bool:
+    """本地 63790（compose redis）可达性探测——不可达时 Redis 路径用例 skip 而非红。
+
+    CI 教训（M51）：backend-postgres job 刻意不放 redis service，本用例曾因无守卫
+    直连 63790 拒绝而红（该 job 的测试步骤在 lint 长期红时期从未执行，地雷未暴露）。
+    """
+    try:
+        with socket.create_connection(("localhost", 63790), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 def test_registry_apply_remote_event(client: TestClient):
@@ -49,6 +64,7 @@ def test_rate_limiter_fallback_without_redis(client: TestClient):
     assert results == [True, True, False]
 
 
+@pytest.mark.skipif(not _redis_up(), reason="本地 63790 无 Redis（compose redis 未起/CI 无 service）")
 def test_rate_limiter_redis_path(client: TestClient, monkeypatch):
     """配置 EAP_REDIS_URL：走 Redis 滑窗（compose redis 已在本地 63790）。"""
 
