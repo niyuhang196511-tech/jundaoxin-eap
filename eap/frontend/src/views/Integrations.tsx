@@ -1,12 +1,16 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, RefreshCw } from 'lucide-react'
+import { Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api, triggersApi, webhooksApi, type TriggerRule, type WebhookDelivery, type WebhookEndpoint } from '@/lib/api'
+import {
+  agentsApi, api, connectorsApi, triggersApi, webhooksApi, workflowsApi,
+  type TriggerRule, type WebhookDelivery, type WebhookEndpoint,
+} from '@/lib/api'
+import { cn } from '@/lib/cn'
 
 type Connector = {
   name: string
@@ -31,6 +35,90 @@ const TRIGGER_SOURCE_TONE: Record<string, BadgeTone> = {
   event: 'purple', cron: 'amber', webhook: 'blue',
 }
 
+/** 多选 chips（照抄 components/agents/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
+function ChipPicker({ options, values, onChange }: {
+  options: string[]
+  values: string[]
+  onChange: (next: string[]) => void
+}) {
+  const all = [...new Set([...options, ...values])]
+  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {all.map(name => {
+        const on = values.includes(name)
+        return (
+          <button
+            key={name}
+            type="button"
+            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
+            className={cn(
+              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
+              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
+                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
+            )}
+          >{name}</button>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ---------- 连接器 endpoints 轻量行编辑（M49-E1，替代裸 JSON textarea） ---------- */
+
+/** 后端 EndpointDef.method 枚举（api/v1/connectors.py） */
+const EP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
+/** Webhook 订阅通配模板（fnmatch，事件目录之外的常用快捷项） */
+const EV_WILDCARDS = ['task.*', 'agent.*', 'kb.*', 'workflow.*', 'connector.*', '*']
+
+/** 后端 ConnectorCreate.kind 枚举（api/v1/connectors.py） */
+const CONNECTOR_KINDS = [
+  { value: 'rest', label: 'rest（HTTP API）' },
+  { value: 'mock-erp', label: 'mock-erp（演示 ERP）' },
+  { value: 'sql', label: 'sql（只读 SELECT）' },
+] as const
+
+const DEFAULT_ENDPOINTS = '[{"name":"order.create","tool_name":"erp.order.create","method":"POST","path":"/orders","requires_approval":true}]'
+
+type EndpointRow = {
+  name: string
+  tool_name: string
+  method: string
+  path: string
+  requires_approval: boolean
+  query: string  // sql kind 专用（只读 SELECT）
+}
+
+/** 解析既有 JSON 数组 → 行；非数组/解析失败返回 null（调用方降级回 textarea，不丢用户数据） */
+function parseEndpointRows(raw: string): EndpointRow[] | null {
+  try {
+    const arr: unknown = JSON.parse(raw)
+    if (!Array.isArray(arr) || arr.some(x => typeof x !== 'object' || x === null || Array.isArray(x))) return null
+    return arr.map((x: any) => ({
+      name: String(x.name ?? ''),
+      tool_name: String(x.tool_name ?? ''),
+      method: EP_METHODS.includes(x.method) ? String(x.method) : 'GET',
+      path: String(x.path ?? '/'),
+      requires_approval: Boolean(x.requires_approval),
+      query: String(x.query ?? ''),
+    }))
+  } catch {
+    return null
+  }
+}
+
+/** 行 → 后端 EndpointDef JSON 数组（sql kind 才携带 query 字段） */
+function serializeEndpointRows(rows: EndpointRow[], kind: string): Record<string, unknown>[] {
+  return rows.map(r => {
+    const ep: Record<string, unknown> = {
+      name: r.name.trim(), tool_name: r.tool_name.trim(),
+      method: r.method, path: r.path.trim() || '/', requires_approval: r.requires_approval,
+    }
+    if (kind === 'sql') ep.query = r.query.trim()
+    return ep
+  })
+}
+
 /** 企业集成：连接器（业务系统 API）+ IM 渠道（群机器人 webhook）+ 对外 Webhook 推送 + 事件触发器 */
 export default function IntegrationsPage() {
   return (
@@ -49,10 +137,11 @@ export default function IntegrationsPage() {
 function ConnectorsTab() {
   const [list, setList] = useState<Connector[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({
-    name: '', kind: 'rest', description: '', baseUrl: '',
-    endpoints: '[{"name":"order.create","tool_name":"erp.order.create","method":"POST","path":"/orders","requires_approval":true}]',
-  })
+  const [form, setForm] = useState({ name: '', kind: 'rest', description: '', baseUrl: '' })
+  // endpoints 行编辑（null = 解析失败降级回 JSON textarea，诚实降级不丢数据）
+  const [epRows, setEpRows] = useState<EndpointRow[] | null>(null)
+  const [epRaw, setEpRaw] = useState(DEFAULT_ENDPOINTS)
+  const [epNote, setEpNote] = useState('')
   const [busy, setBusy] = useState('')
 
   const load = useCallback(async () => {
@@ -64,11 +153,57 @@ function ConnectorsTab() {
   }, [])
   useEffect(() => { load() }, [load])
 
+  const openCreate = () => {
+    setForm({ name: '', kind: 'rest', description: '', baseUrl: '' })
+    const rows = parseEndpointRows(DEFAULT_ENDPOINTS)
+    setEpRows(rows)
+    setEpRaw(DEFAULT_ENDPOINTS)
+    setEpNote(rows ? '' : 'Endpoints 模板解析失败，已降级为 JSON 编辑')
+    setOpen(true)
+  }
+
+  /** 行编辑 ⇄ JSON 编辑切换：双向序列化，不丢已录数据 */
+  const switchEpMode = () => {
+    if (epRows) {
+      setEpRaw(JSON.stringify(serializeEndpointRows(epRows, form.kind), null, 2))
+      setEpRows(null)
+      setEpNote('')
+    } else {
+      const rows = parseEndpointRows(epRaw)
+      if (rows) {
+        setEpRows(rows)
+        setEpNote('')
+      } else {
+        toast.error('JSON 解析失败，无法切回行编辑（请先修正 JSON）')
+      }
+    }
+  }
+
+  const updateRow = (i: number, patch: Partial<EndpointRow>) => {
+    setEpRows(rows => (rows ?? []).map((r, j) => (j === i ? { ...r, ...patch } : r)))
+  }
+
   const create = async () => {
+    let endpoints: unknown
+    if (epRows) {
+      if (!epRows.length) { toast.error('请至少添加一个端点'); return }
+      if (epRows.some(r => !r.name.trim() || !r.tool_name.trim())) {
+        toast.error('每个端点的 name 与 tool_name 不能为空')
+        return
+      }
+      endpoints = serializeEndpointRows(epRows, form.kind)
+    } else {
+      try {
+        endpoints = JSON.parse(epRaw)
+      } catch {
+        toast.error('Endpoints 不是合法 JSON')
+        return
+      }
+    }
     try {
       await api('POST', '/api/v1/connectors', {
         name: form.name.trim(), kind: form.kind, description: form.description,
-        base_url: form.baseUrl, endpoints: JSON.parse(form.endpoints),
+        base_url: form.baseUrl, endpoints,
       })
       toast.success('连接器已注册')
       setOpen(false)
@@ -103,7 +238,7 @@ function ConnectorsTab() {
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />注册连接器</Button>
+        <Button variant="primary" onClick={openCreate}><Plus className="size-3.5" />注册连接器</Button>
       </div>
       <div className="rounded-[--radius-card] border border-line bg-surface">
         <Table<Connector>
@@ -136,12 +271,21 @@ function ConnectorsTab() {
           <Button variant="primary" onClick={create} disabled={!form.name.trim()}>注册</Button>
         </>}>
         <div className="space-y-3">
-          <div>
-            <Label>名称</Label>
-            <Input value={form.name} placeholder="erp-connector" onChange={e => setForm({ ...form, name: e.target.value })} />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>名称</Label>
+              <Input value={form.name} placeholder="erp-connector" onChange={e => setForm({ ...form, name: e.target.value })} />
+            </div>
+            <div>
+              {/* bug 修复（M49-E1）：kind 此前在 state 里静默提交 rest 而无任何 UI 控件 */}
+              <Label>类型（kind）</Label>
+              <Select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value })}>
+                {CONNECTOR_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+              </Select>
+            </div>
           </div>
           <div>
-            <Label>Base URL</Label>
+            <Label>Base URL{form.kind === 'rest' ? '（rest 必填 http/https）' : ''}</Label>
             <Input value={form.baseUrl} placeholder="http://erp.internal/api" onChange={e => setForm({ ...form, baseUrl: e.target.value })} />
           </div>
           <div>
@@ -149,10 +293,65 @@ function ConnectorsTab() {
             <Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           </div>
           <div>
-            <Label>Endpoints（JSON 数组）</Label>
-            <textarea rows={5} value={form.endpoints}
-              onChange={e => setForm({ ...form, endpoints: e.target.value })}
-              className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[11px] text-ink focus:border-brand-500 focus:outline-none" />
+            <div className="mb-1.5 flex items-center justify-between">
+              <Label className="mb-0">Endpoints（出站端点 → 自动暴露为工具）</Label>
+              <Button size="xs" variant="ghost" onClick={switchEpMode}>
+                {epRows ? '切换 JSON 编辑' : '切换行编辑'}
+              </Button>
+            </div>
+            {epRows ? (
+              <div className="space-y-2">
+                {epRows.length === 0 && <p className="text-xs text-ink-3">暂无端点，点击下方「添加端点」</p>}
+                {epRows.map((r, i) => (
+                  <div key={i} className="space-y-1.5 rounded-lg border border-line bg-surface-2 p-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input placeholder="name（order.create）" value={r.name}
+                        onChange={e => updateRow(i, { name: e.target.value })} />
+                      <Input placeholder="tool_name（erp.order.create）" value={r.tool_name}
+                        onChange={e => updateRow(i, { tool_name: e.target.value })} />
+                    </div>
+                    <div className="grid grid-cols-[1fr_110px_auto] items-center gap-2">
+                      <Input placeholder="path（/orders）" value={r.path}
+                        onChange={e => updateRow(i, { path: e.target.value })} />
+                      <Select value={r.method} onChange={e => updateRow(i, { method: e.target.value })}>
+                        {EP_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                      </Select>
+                      <Button size="xs" variant="ghost" aria-label="删除端点"
+                        onClick={() => setEpRows(rows => (rows ?? []).filter((_, j) => j !== i))}>
+                        <Trash2 className="size-3.5 text-red-500" />
+                      </Button>
+                    </div>
+                    {form.kind === 'sql' && (
+                      <Input placeholder="query（sql kind 必填，只读 SELECT）" value={r.query}
+                        className="font-mono !text-[11px]"
+                        onChange={e => updateRow(i, { query: e.target.value })} />
+                    )}
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-3">
+                      <input type="checkbox" checked={r.requires_approval} className="cursor-pointer"
+                        onChange={e => updateRow(i, { requires_approval: e.target.checked })} />
+                      requires_approval（出站调用需人工审批）
+                    </label>
+                  </div>
+                ))}
+                <Button size="xs" variant="secondary"
+                  onClick={() => setEpRows(rows => [...(rows ?? []),
+                    { name: '', tool_name: '', method: 'POST', path: '/', requires_approval: false, query: '' }])}>
+                  <Plus className="size-3" />添加端点
+                </Button>
+              </div>
+            ) : (
+              <div>
+                <textarea rows={5} value={epRaw}
+                  onChange={e => setEpRaw(e.target.value)}
+                  className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[11px] text-ink focus:border-brand-500 focus:outline-none" />
+                {epNote && <p className="mt-1 text-xs text-amber-500">{epNote}</p>}
+              </div>
+            )}
+            {form.kind === 'sql' && (
+              <p className="mt-1 text-[11px] text-ink-3">
+                sql 类型还需 config.database（本表单暂未覆盖，可先经 API 创建）；每个端点须填只读 SELECT query
+              </p>
+            )}
           </div>
         </div>
       </DialogContent>
@@ -291,7 +490,12 @@ function WebhooksTab() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<WebhookEndpoint | null>(null)
   const [form, setForm] = useState({ name: '', url: '', events: 'agent.run.completed', secret: '' })
+  const [customEv, setCustomEv] = useState('')
+  // 事件目录（M49-E1）：选项提示用；订阅 pattern 仍支持 fnmatch 通配自定义值
+  const [eventTypes, setEventTypes] = useState<string[]>([])
   const [busy, setBusy] = useState('')
+
+  useEffect(() => { triggersApi.eventTypes().then(setEventTypes).catch(() => {}) }, [])
 
   const loadDeliveries = useCallback(async (endpointId: number | null, st: string) => {
     try {
@@ -311,14 +515,26 @@ function WebhooksTab() {
   useEffect(() => { load() }, [load])
   useEffect(() => { loadDeliveries(sel, status) }, [sel, status, loadDeliveries])
 
+  // form.events 仍是逗号分隔串（后端契约不变）；chips UI 只是它的解析/序列化视图
+  const selectedEvents = form.events.split(',').map(s => s.trim()).filter(Boolean)
+  const setEvents = (next: string[]) => setForm(f => ({ ...f, events: next.join(',') }))
+  const addCustomEvent = () => {
+    const v = customEv.trim()
+    if (!v) return
+    if (!selectedEvents.includes(v)) setEvents([...selectedEvents, v])
+    setCustomEv('')
+  }
+
   const openCreate = () => {
     setEditing(null)
     setForm({ name: '', url: '', events: 'agent.run.completed', secret: '' })
+    setCustomEv('')
     setOpen(true)
   }
   const openEdit = (ep: WebhookEndpoint) => {
     setEditing(ep)
     setForm({ name: ep.name, url: ep.url, events: ep.events.join(','), secret: '' })
+    setCustomEv('')
     setOpen(true)
   }
   const submit = async () => {
@@ -485,8 +701,17 @@ function WebhooksTab() {
               onChange={e => setForm({ ...form, url: e.target.value })} />
           </div>
           <div>
-            <Label>订阅事件（逗号分隔 pattern）</Label>
-            <Input value={form.events} onChange={e => setForm({ ...form, events: e.target.value })} />
+            <Label>订阅事件（点击多选；含通配模板，提交仍为逗号分隔 pattern）</Label>
+            <ChipPicker options={[...EV_WILDCARDS, ...eventTypes]} values={selectedEvents} onChange={setEvents} />
+            <div className="mt-2 flex gap-2">
+              <Input placeholder="自定义 pattern（如 erp.order.*）" value={customEv}
+                onChange={e => setCustomEv(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomEvent() } }} />
+              <Button size="xs" variant="secondary" className="shrink-0" disabled={!customEv.trim()}
+                onClick={addCustomEvent}>
+                <Plus className="size-3" />添加
+              </Button>
+            </div>
           </div>
           <div>
             <Label>{editing ? '签名密钥（留空保持不变，仅入库不回显）' : '签名密钥（可空，仅入库不回显）'}</Label>
@@ -511,6 +736,11 @@ function TriggersTab() {
   }
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState('')
+  // 事件目录（M49-E1）：datalist 选项提示，仍保留 fnmatch 通配自定义输入
+  const [eventTypes, setEventTypes] = useState<string[]>([])
+  // 目标名称联动选项：按 targetType 拉取 agent/workflow/connector 列表；拉取失败降级自由输入
+  const [targetOptions, setTargetOptions] = useState<string[]>([])
+  const [targetsFailed, setTargetsFailed] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -520,6 +750,30 @@ function TriggersTab() {
     }
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => { triggersApi.eventTypes().then(setEventTypes).catch(() => {}) }, [])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    const fetchTargets = async () => {
+      try {
+        const names = form.targetType === 'agent' ? await agentsApi.list()
+          : form.targetType === 'workflow' ? await workflowsApi.list()
+          : await connectorsApi.list()
+        if (cancelled) return
+        setTargetOptions(names.map(x => x.name))
+        setTargetsFailed(false)
+      } catch {
+        if (cancelled) return
+        setTargetOptions([])
+        setTargetsFailed(true)  // 诚实降级：目录不可用时退回自由输入
+      }
+    }
+    setTargetOptions([])
+    setTargetsFailed(false)
+    fetchTargets()
+    return () => { cancelled = true }
+  }, [open, form.targetType])
 
   const openCreate = () => {
     setEditing(null)
@@ -674,9 +928,12 @@ function TriggersTab() {
           </div>
           {form.source === 'event' && (
             <div>
-              <Label>事件类型（如 kb.document.indexed / agent.run.completed）</Label>
-              <Input value={form.eventType} placeholder="kb.document.indexed"
+              <Label>事件类型（下拉为事件目录；仍可输入 task.* 等 fnmatch 通配）</Label>
+              <Input value={form.eventType} placeholder="kb.document.indexed" list="trigger-event-types"
                 onChange={e => setForm({ ...form, eventType: e.target.value })} />
+              <datalist id="trigger-event-types">
+                {eventTypes.map(t => <option key={t} value={t} />)}
+              </datalist>
             </div>
           )}
           {form.source === 'cron' && (
@@ -697,7 +954,11 @@ function TriggersTab() {
             <div>
               <Label>目标类型</Label>
               <Select value={form.targetType}
-                onChange={e => setForm({ ...form, targetType: e.target.value as TriggerRule['target_type'] })}>
+                onChange={e => setForm({
+                  ...form,
+                  targetType: e.target.value as TriggerRule['target_type'],
+                  targetName: '',  // 类型切换 → 清空并按新类型重拉目标列表
+                })}>
                 <option value="agent">agent（智能体）</option>
                 <option value="workflow">workflow（工作流）</option>
                 <option value="connector">connector（连接器工具）</option>
@@ -705,8 +966,18 @@ function TriggersTab() {
             </div>
             <div>
               <Label>目标名称</Label>
-              <Input value={form.targetName} placeholder="faq-agent"
-                onChange={e => setForm({ ...form, targetName: e.target.value })} />
+              {targetsFailed ? (
+                <Input value={form.targetName} placeholder="faq-agent（目标列表加载失败，手动输入）"
+                  onChange={e => setForm({ ...form, targetName: e.target.value })} />
+              ) : (
+                <Select value={form.targetName}
+                  onChange={e => setForm({ ...form, targetName: e.target.value })}>
+                  <option value="">请选择…</option>
+                  {/* 已选值不在列表（编辑回显/已下线目标）时附加 option，保持可选中 */}
+                  {[...new Set([...targetOptions, ...(form.targetName ? [form.targetName] : [])])]
+                    .map(n => <option key={n} value={n}>{n}</option>)}
+                </Select>
+              )}
             </div>
           </div>
           <div>

@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast, type BadgeTone } from '@/components/ui'
-import { api, loraApi, type LoraAdapter } from '@/lib/api'
+import { api, loraApi, modelsApi, type LoraAdapter } from '@/lib/api'
+import { cn } from '@/lib/cn'
 
 type Model = {
   name: string
@@ -16,6 +17,41 @@ type Model = {
 
 const LORA_STATUS_TONE: Record<string, BadgeTone> = {
   registered: 'blue', loaded: 'green', unloaded: 'gray', failed: 'red',
+}
+
+/** 后端能力全集（schemas.py ALLOWED_CAPABILITIES，field_validator 强校验；M49-E1 前 label 只提示 3 种） */
+const ALL_CAPABILITIES = [
+  'chat', 'reasoning', 'embedding', 'rerank', 'vision',
+  'extraction', 'stt', 'tts', 'image_gen', 'moderation',
+] as const
+
+/** 多选 chips（照抄 components/agents/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
+function ChipPicker({ options, values, onChange }: {
+  options: string[]
+  values: string[]
+  onChange: (next: string[]) => void
+}) {
+  const all = [...new Set([...options, ...values])]
+  if (!all.length) return <p className="text-xs text-ink-3">（无可选项）</p>
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {all.map(name => {
+        const on = values.includes(name)
+        return (
+          <button
+            key={name}
+            type="button"
+            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
+            className={cn(
+              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
+              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
+                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
+            )}
+          >{name}</button>
+        )
+      })}
+    </div>
+  )
 }
 
 /** 模型中心：能力路由 + 优先级降级链（priority 小者优先）+ LoRA adapter 托管（M42-A） */
@@ -34,7 +70,7 @@ export default function ModelsPage() {
 function ModelsTab() {
   const [models, setModels] = useState<Model[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ name: '', caps: 'chat,reasoning', provider: 'mock', url: '', priority: '50' })
+  const [form, setForm] = useState({ name: '', caps: ['chat', 'reasoning'] as string[], provider: 'mock', url: '', priority: '50' })
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(async () => {
@@ -60,14 +96,14 @@ function ModelsTab() {
     try {
       await api('POST', '/api/v1/models', {
         name: form.name.trim(),
-        capabilities: form.caps.split(',').map(s => s.trim()).filter(Boolean),
+        capabilities: form.caps,
         provider: form.provider,
         base_url: form.url.trim() || null,
         priority: parseInt(form.priority) || 50,
       })
       toast.success(`模型 ${form.name} 已注册`)
       setOpen(false)
-      setForm({ name: '', caps: 'chat,reasoning', provider: 'mock', url: '', priority: '50' })
+      setForm({ name: '', caps: ['chat', 'reasoning'], provider: 'mock', url: '', priority: '50' })
       load()
     } catch (e) {
       toast.error(`注册失败：${(e as Error).message}`)
@@ -120,8 +156,9 @@ function ModelsTab() {
             <Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           </div>
           <div>
-            <Label>能力（逗号分隔：chat / reasoning / embedding）</Label>
-            <Input value={form.caps} onChange={e => setForm({ ...form, caps: e.target.value })} />
+            <Label>能力（多选，后端全集 {ALL_CAPABILITIES.length} 种，非法值 422）</Label>
+            <ChipPicker options={[...ALL_CAPABILITIES]} values={form.caps}
+              onChange={caps => setForm({ ...form, caps })} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -158,6 +195,14 @@ function LoraTab() {
   const [form, setForm] = useState({ name: '', baseModel: '', sourcePath: '', servedAs: '', note: '' })
   const [saving, setSaving] = useState(false)
   const [busy, setBusy] = useState('')
+  // 基座模型候选（M49-E1）：模型中心 provider=vllm 的模型名；vLLM 实际加载的基座
+  // 可能不在登记列表，必须保持可自由输入 → datalist 而非 Select
+  const [vllmModels, setVllmModels] = useState<string[]>([])
+  useEffect(() => {
+    modelsApi.list()
+      .then(l => setVllmModels(l.filter(m => m.provider === 'vllm').map(m => m.name)))
+      .catch(() => {})
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -269,9 +314,12 @@ function LoraTab() {
               onChange={e => setForm({ ...form, name: e.target.value })} />
           </div>
           <div>
-            <Label>基座模型（vLLM serve 的 model 名）</Label>
-            <Input value={form.baseModel} placeholder="qwen2.5-7b-instruct"
+            <Label>基座模型（vLLM serve 的 model 名；下拉为 provider=vllm 登记模型，可自由输入）</Label>
+            <Input value={form.baseModel} placeholder="qwen2.5-7b-instruct" list="lora-base-models"
               onChange={e => setForm({ ...form, baseModel: e.target.value })} />
+            <datalist id="lora-base-models">
+              {vllmModels.map(m => <option key={m} value={m} />)}
+            </datalist>
           </div>
           <div>
             <Label>source_path（GPU 宿主机 WSL2/容器内的 adapter 目录）</Label>

@@ -107,6 +107,18 @@ def list_triggers(db: Session = fastapi.Depends(get_db)):
     return [_view(r) for r in rules]
 
 
+@router.get("/event-types")
+def list_event_types():
+    """事件类型目录（M49-E1）：供触发器/Webhook 订阅表单做选项提示。
+
+    目录为文档性质（runtime/events.EVENT_CATALOG，与全仓 emit 点核实同步）；
+    event_type 仍支持 fnmatch 通配（task.* 等）与未来新事件，不构成白名单校验。
+    """
+    from ...runtime.events import EVENT_CATALOG
+
+    return list(EVENT_CATALOG)
+
+
 @router.post("")
 async def create_trigger(body: TriggerCreate, request: fastapi.Request,
                          db: Session = fastapi.Depends(get_db)):

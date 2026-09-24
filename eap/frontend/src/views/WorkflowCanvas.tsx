@@ -456,6 +456,7 @@ export default function WorkflowCanvasPage() {
         <ConfigDrawer
           step={selectedStep}
           allIds={nodes.map(n => n.id)}
+          workflowName={dsl.name}
           onChange={patch => selectedId && patchStep(selectedId, patch)}
           onClose={() => setNodes(ns => ns.map(n => (n.selected ? { ...n, selected: false } : n)))}
         />

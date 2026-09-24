@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CircleStop, Plus, RefreshCw } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Table, TabBar, Textarea, toast,
+  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import { UISchemaRenderer, type UISchema } from '@/components/chat/UISchemaRenderer'
-import { api } from '@/lib/api'
+import { agentsApi, api } from '@/lib/api'
 
 type Task = {
   task_id: string
@@ -194,6 +194,15 @@ function TasksPanel() {
   )
 }
 
+/** 任务类型限集（M49-E1）：与后端注册表 runtime/tasks.create_task_engine 一致；
+ * 未知类型提交后直接 FAILED，故表单收敛为下拉 */
+const TASK_TYPES = [
+  { value: 'agent.invoke', label: 'agent.invoke（智能体调用）' },
+  { value: 'agent.hitl', label: 'agent.hitl（智能体 + 人工审批）' },
+  { value: 'kb.ingest', label: 'kb.ingest（文档异步摄入）' },
+  { value: 'eval.run', label: 'eval.run（评测运行）' },
+] as const
+
 /** 定时调度管理（M15）：创建/启停/删除，到期由引擎自动提交 */
 function SchedulesPanel() {
   const [list, setList] = useState<Schedule[]>([])
@@ -201,6 +210,9 @@ function SchedulesPanel() {
   const [form, setForm] = useState({
     name: '', task_type: 'agent.invoke', interval: '60', payload: '{"agent": "faq-agent", "input": "巡检"}',
   })
+  // agent.* 任务的辅助选择（M49-E1）：选中后把 agent 键合并进 payload JSON
+  const [agents, setAgents] = useState<string[]>([])
+  useEffect(() => { agentsApi.list().then(l => setAgents(l.map(a => a.name))).catch(() => {}) }, [])
 
   const load = useCallback(async () => {
     try {
@@ -210,6 +222,34 @@ function SchedulesPanel() {
     }
   }, [])
   useEffect(() => { load() }, [load])
+
+  /** payload 里的当前 agent（Select 回显用；非法 JSON / 无 agent 键 → 空） */
+  const payloadAgent = (() => {
+    try {
+      const obj = JSON.parse(form.payload || '{}')
+      return obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.agent === 'string'
+        ? obj.agent : ''
+    } catch {
+      return ''
+    }
+  })()
+
+  /** 选中 agent → 合并进 payload（非法 JSON 不覆盖，提示用户手改） */
+  const applyPayloadAgent = (name: string) => {
+    if (!name) return
+    let obj: unknown
+    try {
+      obj = JSON.parse(form.payload || '{}')
+    } catch {
+      toast.error('Payload 不是合法 JSON，未覆盖——请先修正后再选择智能体')
+      return
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      toast.error('Payload 不是 JSON 对象，未覆盖——请手动添加 agent 键')
+      return
+    }
+    setForm(f => ({ ...f, payload: JSON.stringify({ ...(obj as Record<string, unknown>), agent: name }) }))
+  }
 
   const create = async () => {
     try {
@@ -286,9 +326,21 @@ function SchedulesPanel() {
             <Input value={form.name} placeholder="daily-faq-smoke" onChange={e => setForm({ ...form, name: e.target.value })} />
           </div>
           <div>
-            <Label>任务类型</Label>
-            <Input value={form.task_type} onChange={e => setForm({ ...form, task_type: e.target.value })} />
+            <Label>任务类型（注册表限集，未知类型提交即 FAILED）</Label>
+            <Select value={form.task_type} onChange={e => setForm({ ...form, task_type: e.target.value })}>
+              {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </Select>
           </div>
+          {form.task_type.startsWith('agent.') && (
+            <div>
+              <Label>智能体（辅助：选中后把 agent 键合并进下方 Payload，非法 JSON 不覆盖）</Label>
+              <Select value={payloadAgent} onChange={e => applyPayloadAgent(e.target.value)}>
+                <option value="">（不修改 Payload）</option>
+                {[...new Set([...agents, ...(payloadAgent ? [payloadAgent] : [])])]
+                  .map(a => <option key={a} value={a}>{a}</option>)}
+              </Select>
+            </div>
+          )}
           <div>
             <Label>间隔（秒）</Label>
             <Input type="number" min={1} value={form.interval} onChange={e => setForm({ ...form, interval: e.target.value })} />

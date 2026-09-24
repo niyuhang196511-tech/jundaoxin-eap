@@ -256,6 +256,8 @@ export type TriggerRule = {
 
 export const triggersApi = {
   list: () => api<TriggerRule[]>('GET', '/api/v1/triggers'),
+  /** 事件类型目录（M49-E1）：文档性质选项提示，订阅仍支持 fnmatch 通配自定义值 */
+  eventTypes: () => api<string[]>('GET', '/api/v1/triggers/event-types'),
   create: (body: {
     name: string
     source: TriggerRule['source']
@@ -539,4 +541,45 @@ export const reviewApi = {
     api<{ id: number; status: string; scores: Record<string, number> }>('POST', `/api/v1/evals/reviews/${id}/review`, body),
   report: (agent?: string) =>
     api<ReviewReport>('GET', `/api/v1/evals/reviews/report${agent ? `?agent=${encodeURIComponent(agent)}` : ''}`),
+}
+
+/* ---------- 选项列表封装（M49-E1「输入改选择」） ----------
+ * 各视图下拉 / datalist / chips 的轻量数据源：只声明选项渲染所需字段，
+ * 完整行数据仍由各视图既有的 api<T>() 调用承载。命名对齐现有 xxxApi 风格。 */
+
+export const agentsApi = {
+  /** Agent Registry 目录（builtin/sdk/entrypoint 三类纳管） */
+  list: () => api<{ name: string; source?: string; status?: string }[]>('GET', '/api/v1/agents'),
+}
+
+export const workflowsApi = {
+  list: () => api<{ name: string; version?: number; enabled?: boolean }[]>('GET', '/api/v1/workflows'),
+}
+
+export const connectorsApi = {
+  list: () => api<{ name: string; kind: string }[]>('GET', '/api/v1/connectors'),
+}
+
+export const kbApi = {
+  list: () => api<{ name: string; title: string }[]>('GET', '/api/v1/kb'),
+}
+
+export const modelsApi = {
+  list: () => api<{ name: string; provider: string; capabilities: string[] }[]>('GET', '/api/v1/models'),
+}
+
+export const tasksApi = {
+  /** 最近 50 条任务（后端固定 limit）；抽检抽样只认 agent.invoke/agent.hitl 两类 */
+  list: () => api<{
+    task_id: string
+    type: string
+    state: string
+    payload: Record<string, unknown> | null
+  }[]>('GET', '/api/v1/tasks'),
+}
+
+export const evalsApi = {
+  /** 评测数据集目录（发布门禁 / 运行评测共用数据源） */
+  datasets: () => api<{ name: string; kind: string; description: string; cases: number }[]>(
+    'GET', '/api/v1/evals/datasets'),
 }

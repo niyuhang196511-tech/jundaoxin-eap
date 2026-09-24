@@ -6,7 +6,7 @@ import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api } from '@/lib/api'
+import { agentsApi, api, kbApi, tasksApi } from '@/lib/api'
 import {
   reviewApi, shadowApi,
   type ReviewReport, type ReviewSample, type ShadowConfig, type ShadowReport, type ShadowRun,
@@ -30,6 +30,12 @@ type RunResult = {
 
 const VERDICT_TONE: Record<string, BadgeTone> = { PASS: 'green', FAIL: 'red', PENDING: 'gray' }
 
+/** 数据集 cases JSON 模板（kind 切换时若仍是模板/空则跟随切换，用户已编辑内容不覆盖） */
+const CASES_TEMPLATES: Record<string, string> = {
+  agent: '[{"input":"如何创建知识库？","expected_any":["知识库"]}]',
+  rag: '[{"query":"如何创建知识库？","relevant_chunk_ids":[1]}]',
+}
+
 /** 评测中心（v0.6 起）：运行评测 / 影子流量（M44-A）/ 人工抽检（M44-B）三页签 */
 export default function EvalsPage() {
   return (
@@ -51,7 +57,7 @@ function EvalRunTab() {
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
   const [dsKind, setDsKind] = useState('agent')
-  const [cases, setCases] = useState('[{"input":"如何创建知识库？","expected_any":["知识库"]}]')
+  const [cases, setCases] = useState(CASES_TEMPLATES.agent)
   const [agent, setAgent] = useState('faq-agent')
   const [dataset, setDataset] = useState('')
   const [rate, setRate] = useState('0.8')
@@ -59,6 +65,13 @@ function EvalRunTab() {
   const [result, setResult] = useState<RunResult | null>(null)
   const [running, setRunning] = useState(false)
   const [history, setHistory] = useState<RunResult[]>([])
+  // 运行目标联动（M49-E1）：数据集 kind=agent → 智能体列表；kind=rag → 知识库列表
+  const [agents, setAgents] = useState<string[]>([])
+  const [kbs, setKbs] = useState<string[]>([])
+  useEffect(() => {
+    agentsApi.list().then(l => setAgents(l.map(a => a.name))).catch(() => {})
+    kbApi.list().then(l => setKbs(l.map(k => k.name))).catch(() => {})
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -71,6 +84,7 @@ function EvalRunTab() {
   }, [])
   useEffect(() => { load() }, [load])
 
+  /** bug 修复（M49-E1）：本函数与 createOpen/name/dsKind/cases 状态此前已存在但页面无入口，功能不可达 */
   const createDataset = async () => {
     try {
       await api('POST', '/api/v1/evals/datasets', {
@@ -78,12 +92,16 @@ function EvalRunTab() {
       })
       toast.success(`数据集 ${name} 已创建`)
       setCreateOpen(false)
+      setDataset(name.trim())
       setName('')
       load()
     } catch (e) {
       toast.error(`创建失败：${(e as Error).message}`)
     }
   }
+
+  const selectedKind = datasets.find(d => d.name === dataset)?.kind === 'rag' ? 'rag' : 'agent'
+  const targetOptions = selectedKind === 'rag' ? kbs : agents
 
   const run = async () => {
     setRunning(true)
@@ -121,6 +139,12 @@ function EvalRunTab() {
     <div className="grid grid-cols-[380px_1fr] items-start gap-4">
       <div className="space-y-4">
         <div className="rounded-[--radius-card] border border-line bg-surface">
+          <div className="flex items-center justify-between px-3 py-2">
+            <div className="text-sm font-medium">数据集</div>
+            <Button size="xs" variant="secondary" onClick={() => setCreateOpen(true)}>
+              <Plus className="size-3" />新建数据集
+            </Button>
+          </div>
           <Table<DS>
             rowKey={d => d.name}
             data={datasets}
@@ -142,9 +166,13 @@ function EvalRunTab() {
           </p>
           <div className="space-y-3">
             <div>
-              <Label>{datasets.find(d => d.name === dataset)?.kind === 'rag' ? '知识库' : '智能体'}</Label>
-              <Input value={agent} onChange={e => setAgent(e.target.value)}
-                placeholder={datasets.find(d => d.name === dataset)?.kind === 'rag' ? 'website-faq' : 'faq-agent'} />
+              <Label>{selectedKind === 'rag' ? '知识库' : '智能体'}</Label>
+              <Select value={agent} onChange={e => setAgent(e.target.value)}>
+                <option value="">请选择…</option>
+                {/* 当前值不在列表（如已删除对象/历史运行）时附加 option，保持可选中 */}
+                {[...new Set([...targetOptions, ...(agent ? [agent] : [])])]
+                  .map(n => <option key={n} value={n}>{n}</option>)}
+              </Select>
             </div>
             <div>
               <Label>数据集</Label>
@@ -242,6 +270,38 @@ function EvalRunTab() {
           </div>
         )}
       </div>
+
+      {/* bug 修复（M49-E1）：新建数据集入口——createDataset 逻辑与状态此前已存在但页面无入口，功能不可达 */}
+      <DialogContent open={createOpen} onOpenChange={setCreateOpen} title="新建数据集"
+        description="agent = 智能体问答用例（input + expected_any/expectation）；rag = 检索标注用例（query + relevant_chunk_ids）"
+        footer={<>
+          <Button variant="ghost" onClick={() => setCreateOpen(false)}>取消</Button>
+          <Button variant="primary" onClick={createDataset} disabled={!name.trim()}>创建</Button>
+        </>}>
+        <div className="space-y-3">
+          <div>
+            <Label>名称（小写字母开头，a-z0-9-）</Label>
+            <Input value={name} placeholder="faq-regression" onChange={e => setName(e.target.value)} />
+          </div>
+          <div>
+            <Label>类型（kind，后端枚举 agent | rag）</Label>
+            <Select value={dsKind} onChange={e => {
+              const k = e.target.value
+              setDsKind(k)
+              // 仍是模板/空时随 kind 切换模板；用户已编辑的内容不覆盖
+              setCases(c => (!c.trim() || Object.values(CASES_TEMPLATES).includes(c)
+                ? (CASES_TEMPLATES[k] ?? c) : c))
+            }}>
+              <option value="agent">agent（问答用例）</option>
+              <option value="rag">rag（检索标注）</option>
+            </Select>
+          </div>
+          <div>
+            <Label>用例（JSON 数组）</Label>
+            <Textarea rows={6} value={cases} onChange={e => setCases(e.target.value)} className="font-mono !text-[11px]" />
+          </div>
+        </div>
+      </DialogContent>
     </div>
   )
 }
@@ -258,6 +318,9 @@ function ShadowTab() {
   const [report, setReport] = useState<ShadowReport | null>(null)
   const [judgeLimit, setJudgeLimit] = useState('10')
   const [judgeBusy, setJudgeBusy] = useState(false)
+  // 生产/影子 agent 选择（M49-E1）：选项来自 Agent Registry
+  const [agents, setAgents] = useState<string[]>([])
+  useEffect(() => { agentsApi.list().then(l => setAgents(l.map(a => a.name))).catch(() => {}) }, [])
 
   const loadConfigs = useCallback(async () => {
     try { setConfigs(await shadowApi.configs()) } catch (e) { toast.error(`加载影子配置失败：${(e as Error).message}`) }
@@ -430,13 +493,21 @@ function ShadowTab() {
             <Label>配置名</Label>
             <Input value={form.name} placeholder="order-shadow-v2" onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
           </div>
-          <div>
-            <Label>生产 agent</Label>
-            <Input value={form.source_agent} placeholder="order-agent" onChange={e => setForm(f => ({ ...f, source_agent: e.target.value }))} />
-          </div>
-          <div>
-            <Label>影子 agent（候选）</Label>
-            <Input value={form.shadow_agent} placeholder="order-agent-v2" onChange={e => setForm(f => ({ ...f, shadow_agent: e.target.value }))} />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>生产 agent</Label>
+              <Select value={form.source_agent} onChange={e => setForm(f => ({ ...f, source_agent: e.target.value }))}>
+                <option value="">请选择…</option>
+                {agents.map(a => <option key={a} value={a}>{a}</option>)}
+              </Select>
+            </div>
+            <div>
+              <Label>影子 agent（候选）</Label>
+              <Select value={form.shadow_agent} onChange={e => setForm(f => ({ ...f, shadow_agent: e.target.value }))}>
+                <option value="">请选择…</option>
+                {agents.map(a => <option key={a} value={a}>{a}</option>)}
+              </Select>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -498,6 +569,25 @@ function ReviewTab() {
   const [detail, setDetail] = useState<ReviewSample | null>(null)
   const [scores, setScores] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
+  // 抽样任务选择（M49-E1）：后端只认 agent.invoke/agent.hitl 两类（evals.py sample_review），前端预过滤
+  const [tasks, setTasks] = useState<{ task_id: string; type: string; state: string; agent: string }[]>([])
+  const [agents, setAgents] = useState<string[]>([])
+
+  const loadTasks = useCallback(async () => {
+    try {
+      const l = await tasksApi.list()
+      setTasks(l
+        .filter(t => t.type === 'agent.invoke' || t.type === 'agent.hitl')
+        .map(t => ({
+          task_id: t.task_id, type: t.type, state: t.state,
+          agent: String((t.payload as Record<string, unknown> | null)?.agent ?? ''),
+        })))
+    } catch { /* 任务列表加载失败静默：下拉暂空，切页签/刷新后重试 */ }
+  }, [])
+  useEffect(() => {
+    loadTasks()
+    agentsApi.list().then(l => setAgents(l.map(a => a.name))).catch(() => {})
+  }, [loadTasks])
 
   const load = useCallback(async () => {
     try {
@@ -520,6 +610,7 @@ function ReviewTab() {
       toast.success(`任务已抽样（样本 #${s.id}）`)
       setTaskId('')
       load()
+      loadTasks()  // 抽样后刷新任务列表（同源任务防重复入选，状态以最新为准）
     } catch (e) { toast.error(`抽样失败：${(e as Error).message}`) }
   }
 
@@ -571,10 +662,19 @@ function ReviewTab() {
 
       <div className="flex flex-wrap items-end gap-2">
         <div>
-          <Label>从任务抽样（task_id）</Label>
+          <Label>从任务抽样（仅 agent.invoke / agent.hitl 任务）</Label>
           <div className="flex gap-2">
-            <Input className="!w-72" value={taskId} onChange={e => setTaskId(e.target.value)} placeholder="agent.invoke/agent.hitl 任务 id" />
-            <Button variant="primary" onClick={sample} disabled={!taskId.trim()}><Plus className="size-3.5" />抽样</Button>
+            <Select className="!w-80" value={taskId} onChange={e => setTaskId(e.target.value)}>
+              <option value="">请选择任务…</option>
+              {tasks.map(t => (
+                <option key={t.task_id} value={t.task_id}>
+                  {t.task_id.slice(0, 8)} · {t.agent || t.type} · {t.state}
+                </option>
+              ))}
+            </Select>
+            <Button variant="primary" className="shrink-0" onClick={sample} disabled={!taskId.trim()}>
+              <Plus className="size-3.5" />抽样
+            </Button>
           </div>
         </div>
         <div>
@@ -587,7 +687,11 @@ function ReviewTab() {
         </div>
         <div>
           <Label>Agent 过滤</Label>
-          <Input className="!w-40" value={agentFilter} onChange={e => setAgentFilter(e.target.value)} placeholder="留空=全部" />
+          <Select className="!w-40" value={agentFilter} onChange={e => setAgentFilter(e.target.value)}>
+            <option value="">全部</option>
+            {[...new Set([...agents, ...samples.map(s => s.agent).filter(Boolean)])]
+              .map(a => <option key={a} value={a}>{a}</option>)}
+          </Select>
         </div>
       </div>
 
@@ -608,7 +712,7 @@ function ReviewTab() {
           ]}
           empty={
             <span className="flex items-center gap-1.5">
-              <Users className="size-3.5" />暂无抽检样本——上方输入 agent.invoke 任务的 task_id 抽样入队
+              <Users className="size-3.5" />暂无抽检样本——上方选择 agent.invoke/agent.hitl 任务抽样入队
             </span>
           }
         />
@@ -643,8 +747,12 @@ function ReviewTab() {
                     {REVIEW_DIMS.map(d => (
                       <div key={d}>
                         <p className="mb-1 text-[11px] text-ink-3">{DIM_LABEL[d]}</p>
-                        <Input type="number" min="1" max="5" step="1" value={scores[d] ?? ''}
-                          onChange={e => setScores(s => ({ ...s, [d]: e.target.value }))} />
+                        {/* 维度固定 correctness/relevance/format，分值限 1-5（evals.py 后端强校验）→ Select */}
+                        <Select value={scores[d] ?? ''}
+                          onChange={e => setScores(s => ({ ...s, [d]: e.target.value }))}>
+                          <option value="">—</option>
+                          {[1, 2, 3, 4, 5].map(n => <option key={n} value={String(n)}>{n}</option>)}
+                        </Select>
                       </div>
                     ))}
                   </div>

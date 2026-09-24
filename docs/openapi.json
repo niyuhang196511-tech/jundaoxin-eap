@@ -10916,6 +10916,28 @@
         "summary": "Create Trigger"
       }
     },
+    "/api/v1/triggers/event-types": {
+      "get": {
+        "description": "事件类型目录（M49-E1）：供触发器/Webhook 订阅表单做选项提示。\n\n目录为文档性质（runtime/events.EVENT_CATALOG，与全仓 emit 点核实同步）；\nevent_type 仍支持 fnmatch 通配（task.* 等）与未来新事件，不构成白名单校验。",
+        "operationId": "list_event_types_api_v1_triggers_event_types_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Event Types"
+      }
+    },
     "/api/v1/triggers/webhook/{rule_id}": {
       "post": {
         "description": "入站 webhook 触发：校验 X-EAP-Signature（HMAC-SHA256(raw_body, secret) hex）→ 按规则触发。\n\n- 规则未配置 secret 时放行未签名请求（开发形态；生产建规则应配置密钥）\n- X-EAP-Event-Id 去重：进程内 LRU，重复投递返回 duplicate（多副本为尽力而为）",

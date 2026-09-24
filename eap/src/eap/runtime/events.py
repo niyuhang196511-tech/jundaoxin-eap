@@ -21,6 +21,22 @@ log = logging.getLogger("eap.events")
 CHANNEL = "eap:events"  # Redis 跨副本转发频道
 QUEUE_MAX = 256  # 单订阅者队列深度（满则丢弃，背压不上抛）
 
+# ---------- 事件目录（M49-E1） ----------
+# 目录 = 文档性质：全仓 emit_event 实际发射点（grep 核实）的枚举，供触发器/
+# Webhook 订阅表单做选项提示（GET /api/v1/triggers/event-types）。
+# 订阅/触发仍按 fnmatch 通配匹配（task.* 等），目录不构成白名单校验，
+# 新增事件无需先改目录即可被订阅。
+EVENT_CATALOG: tuple[str, ...] = (
+    "agent.run.completed",    # api/v1/agents.py：智能体运行完成（同步与 SSE 流式）
+    "kb.document.indexed",    # api/v1/kb.py：知识库文档索引完成
+    "workflow.run.finished",  # workflows.py：工作流运行结束
+    "connector.invoked",      # runtime/connectors.py：连接器出站调用
+    "task.completed",         # runtime/tasks.py：任务终态 COMPLETED
+    "task.failed",            # runtime/tasks.py：任务终态 FAILED
+    # 注：webhook.test 为手工试投专用合成事件（runtime/webhooks.test_push 直接
+    # 投递、不经总线与 pattern 匹配），不可被订阅，故不列入目录。
+)
+
 
 class EventBus:
     """进程内事件总线：subscribe(pattern) → Queue；await emit(...) 非阻塞 fan-out。"""

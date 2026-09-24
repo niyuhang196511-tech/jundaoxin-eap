@@ -233,3 +233,29 @@ def test_test_fire_endpoint(client: TestClient):
     task = _poll_task(client, result["ref"], {"COMPLETED", "FAILED"})
     assert task["state"] == "COMPLETED", task["result"]
     assert client.delete(f"/api/v1/triggers/{rid}", headers=AUTH).status_code == 200
+
+
+def test_event_types_catalog_endpoint(client: TestClient, fake_idp):  # noqa: F811
+    """GET /event-types（M49-E1）：返回事件目录，与 runtime/events.EVENT_CATALOG 一致。
+
+    - 目录覆盖全仓已知 emit 事件类型（文档性质，非白名单）
+    - 鉴权与本 router 其他 GET 一致：member 403、admin 200
+    """
+    from eap.runtime.events import EVENT_CATALOG
+
+    # member 读 → 403（与 list_triggers 同 require_admin）
+    member = _token(roles=["member"])
+    resp = client.get("/api/v1/triggers/event-types",
+                      headers={"Authorization": f"Bearer {member}"})
+    assert resp.status_code == 403, resp.text
+    # admin 读 → 200，目录 = EVENT_CATALOG（顺序一致）
+    resp = client.get("/api/v1/triggers/event-types", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == list(EVENT_CATALOG)
+    # 覆盖全仓已知实际发射的事件类型
+    for known in ("agent.run.completed", "kb.document.indexed", "workflow.run.finished",
+                  "connector.invoked", "task.completed", "task.failed"):
+        assert known in body, f"事件目录缺 {known}"
+    # webhook.test 是合成事件（不经总线/不可订阅），不应列入目录
+    assert "webhook.test" not in body

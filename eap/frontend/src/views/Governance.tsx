@@ -6,7 +6,7 @@ import {
   Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api, exportBudgetReport, memoryOpsApi, type MemoryItem } from '@/lib/api'
+import { api, evalsApi, exportBudgetReport, kbApi, memoryOpsApi, modelsApi, type MemoryItem } from '@/lib/api'
 
 type Release = {
   id: string
@@ -54,11 +54,18 @@ function ReleasesTab() {
   const [dataset, setDataset] = useState('faq-smoke')
   const [canaryPct, setCanaryPct] = useState(20)
   const [busy, setBusy] = useState(false)
+  // 门禁数据集目录（M49-E1）：选项来自评测数据集；当前值不在列表时附加 option 保持可选中
+  const [datasets, setDatasets] = useState<string[]>([])
+  // 灰度 overrides.model（M49-E1）：此前硬编码 'mock-llm'，改为可选（默认仍 mock-llm）
+  const [models, setModels] = useState<string[]>([])
+  const [canaryModel, setCanaryModel] = useState('mock-llm')
 
   const load = useCallback(async () => {
     try {
       setList(await api<Release[]>('GET', '/api/v1/releases'))
       api<{ name: string }[]>('GET', '/api/v1/agents').then(a => setAgents(a.map(x => x.name))).catch(() => {})
+      evalsApi.datasets().then(l => setDatasets(l.map(d => d.name))).catch(() => {})
+      modelsApi.list().then(l => setModels(l.map(m => m.name))).catch(() => {})
     } catch (e) {
       toast.error(`加载发布单失败：${(e as Error).message}`)
     }
@@ -85,7 +92,10 @@ function ReleasesTab() {
           {(agents.length ? agents : ['faq-agent']).map(a => <option key={a} value={a}>{a}</option>)}
         </Select>
         <Input className="!w-32" value={version} placeholder="版本" onChange={e => setVersion(e.target.value)} />
-        <Input className="!w-36" value={dataset} placeholder="门禁数据集" onChange={e => setDataset(e.target.value)} />
+        <Select className="!w-40" value={dataset} title="门禁数据集" onChange={e => setDataset(e.target.value)}>
+          {[...new Set([...datasets, ...(dataset ? [dataset] : [])])]
+            .map(d => <option key={d} value={d}>{d}</option>)}
+        </Select>
         <Button variant="primary" loading={busy}
           onClick={() => act(async () => {
             await api('POST', '/api/v1/releases', { agent: agent.trim(), version: version.trim(), eval_dataset: dataset })
@@ -97,6 +107,11 @@ function ReleasesTab() {
           <span className="text-xs text-ink-3">灰度比例</span>
           <Input className="!w-20" type="number" min={0} max={100} value={canaryPct}
             onChange={e => setCanaryPct(parseInt(e.target.value) || 0)} />
+          <span className="text-xs text-ink-3">灰度模型</span>
+          <Select className="!w-36" value={canaryModel} title="灰度 overrides.model"
+            onChange={e => setCanaryModel(e.target.value)}>
+            {[...new Set([...models, canaryModel])].map(m => <option key={m} value={m}>{m}</option>)}
+          </Select>
         </div>
         <Button variant="secondary" size="sm" onClick={load}><RefreshCw className="size-3.5" />刷新</Button>
       </div>
@@ -120,7 +135,7 @@ function ReleasesTab() {
                   </Button>
                 )}
                 {['draft', 'review', 'prod'].includes(r.state) && (
-                  <Button size="xs" variant="secondary" onClick={() => act(() => api('POST', `/api/v1/releases/${r.id}/canary`, { percent: canaryPct, overrides: { model: 'mock-llm' } }), `已进入 ${canaryPct}% 灰度`)}>
+                  <Button size="xs" variant="secondary" onClick={() => act(() => api('POST', `/api/v1/releases/${r.id}/canary`, { percent: canaryPct, overrides: { model: canaryModel } }), `已进入 ${canaryPct}% 灰度（模型 ${canaryModel}）`)}>
                     进灰度
                   </Button>
                 )}
@@ -368,6 +383,9 @@ function MemoryTab() {
   const [minImportance, setMinImportance] = useState('0.7')
   const [limit, setLimit] = useState(50)
   const [busy, setBusy] = useState('')
+  // KB 名候选（M49-E1）：datalist 提示既有库；语义是「不存在会自动建」，必须保持可自由输入
+  const [kbs, setKbs] = useState<string[]>([])
+  useEffect(() => { kbApi.list().then(l => setKbs(l.map(k => k.name))).catch(() => {}) }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -491,8 +509,11 @@ function MemoryTab() {
           </p>
           <div className="grid grid-cols-3 gap-2">
             <div>
-              <Label>KB 名</Label>
-              <Input value={kbName} onChange={e => setKbName(e.target.value)} />
+              <Label>KB 名（可选既有库；不存在自动创建）</Label>
+              <Input value={kbName} list="memory-kb-names" onChange={e => setKbName(e.target.value)} />
+              <datalist id="memory-kb-names">
+                {kbs.map(k => <option key={k} value={k} />)}
+              </datalist>
             </div>
             <div>
               <Label>阈值</Label>

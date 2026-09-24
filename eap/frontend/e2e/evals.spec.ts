@@ -26,8 +26,10 @@ test.describe.serial('评测中心·影子流量', () => {
     await page.getByRole('tab', { name: '影子流量' }).click()
     await page.getByRole('button', { name: '新建影子配置' }).click()
     await page.getByPlaceholder('order-shadow-v2').fill(CFG)
-    await page.getByPlaceholder('order-agent', { exact: true }).fill('faq-agent')
-    await page.getByPlaceholder('order-agent-v2').fill('canvas-demo')
+    // 输入改选择（M49-E1）：生产/影子 agent 由自由 Input 改为 Select（选项来自 Agent Registry）
+    const dialog = page.locator('[role="dialog"]')
+    await dialog.locator('div:has(> label:text-is("生产 agent")) select').selectOption('faq-agent')
+    await dialog.locator('div:has(> label:text-is("影子 agent（候选）")) select').selectOption('canvas-demo')
     await page.getByRole('button', { name: '创建' }).click()
     // 表格出现新配置
     await expect(page.getByText(CFG).first()).toBeVisible({ timeout: 10_000 })
@@ -57,8 +59,11 @@ test.describe.serial('评测中心·影子流量', () => {
     await page.goto('/evals')
     await page.getByRole('tab', { name: '影子流量' }).click()
     await page.getByText(CFG).first().click()
-    // 页面上有两个表（配置表 + 运行表）：第二个才是配对运行
-    await page.locator('table').nth(1).locator('tbody tr').first().click()
+    // 页面上有两个表（配置表 + 运行表）：第二个才是配对运行。
+    // 运行数据异步加载，未到位时 tbody 先渲染空态行（无 code 元素）→ 等真实数据行再点击，避免竞态
+    const runRow = page.locator('table').nth(1).locator('tbody tr:has(code)').first()
+    await expect(runRow).toBeVisible({ timeout: 10_000 })
+    await runRow.click()
     await expect(page.getByText('主侧输出')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('影侧输出')).toBeVisible()
     await page.keyboard.press('Escape')
@@ -94,7 +99,12 @@ test.describe.serial('评测中心·人工抽检', () => {
     await login(page)
     await page.goto('/evals')
     await page.getByRole('tab', { name: '人工抽检' }).click()
-    await page.getByPlaceholder('agent.invoke/agent.hitl 任务 id').fill(taskId)
+    // 输入改选择（M49-E1）：task_id 由自由 Input 改为 Select（仅列 agent.invoke/agent.hitl
+    // 任务，选项异步加载 → 先等目标任务 option 出现再选）
+    const taskSelect = page.locator('div:has(> label:text("从任务抽样")) select')
+    // option 在收起的 select 内视为 hidden → 只能等 attached（不能等 visible）
+    await taskSelect.locator(`option[value="${taskId}"]`).waitFor({ state: 'attached', timeout: 15_000 })
+    await taskSelect.selectOption(taskId)
     await page.getByRole('button', { name: '抽样' }).click()
     // 队列出现待评审样本
     await expect(page.getByText('待评审').first()).toBeVisible({ timeout: 10_000 })
@@ -104,12 +114,15 @@ test.describe.serial('评测中心·人工抽检', () => {
     await login(page)
     await page.goto('/evals')
     await page.getByRole('tab', { name: '人工抽检' }).click()
-    // 队列按 id 倒序：首行 = 上一步刚抽样的样本（getByText('待评审') 会误中过滤下拉的 option）
-    await page.locator('table tbody tr').first().click()
+    // 队列按 id 倒序：首个数据行 = 上一步刚抽样的样本。列表异步加载，未到位时 tbody
+    // 先渲染空态行 → 用 :has(code) 锁定真实数据行（样本行含 <code>#id</code>），避免竞态
+    const firstRow = page.locator('table tbody tr:has(code)').first()
+    await expect(firstRow).toBeVisible({ timeout: 10_000 })
+    await firstRow.click()
     await expect(page.getByText('评分（1-5，至少一项）')).toBeVisible({ timeout: 10_000 })
-    // 三个维度输入（按标签定位）
+    // 三个维度评分（M49-E1：number Input → Select 1-5，按标签定位）
     for (const dim of ['正确性', '相关性', '格式']) {
-      await page.locator(`div:has(> p:text-is("${dim}")) input[type="number"]`).fill('4')
+      await page.locator(`div:has(> p:text-is("${dim}")) select`).selectOption('4')
     }
     await page.getByPlaceholder('评审备注（可选）').fill('E2E 自动评审备注')
     await page.getByRole('button', { name: '提交评审' }).click()
