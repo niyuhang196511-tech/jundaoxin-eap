@@ -87,9 +87,16 @@ def test_redis_stream_transport(client, redis_client_client):
     t = _wait_state(redis_client_client, task_id, {"COMPLETED", "FAILED"})
     assert t["state"] == "COMPLETED", t
     assert "mock" in t["result"]["output"]
-    # 已 XACK：stream 长度仍在增长但 pending 归零（消费组无滞留）
-    pending = r.xpending("eap:tasks", "eap-workers")
-    assert pending["pending"] == 0
+    # 已 XACK：pending 归零（消费组无滞留）——注意时序：引擎先 _mark(COMPLETED) 再
+    # 经 _notify_done/_notify_a2a（网络回执）后于 worker finally 里 XACK，故观察
+    # 到 COMPLETED 后 pending 可能短暂非 0，轮询至归零（M48 实测竞态）
+    pending = r.xpending("eap:tasks", "eap-workers")["pending"]
+    for _ in range(40):
+        if pending == 0:
+            break
+        time.sleep(0.15)
+        pending = r.xpending("eap:tasks", "eap-workers")["pending"]
+    assert pending == 0
     assert r.xlen("eap:tasks") >= before + 1
 
 
