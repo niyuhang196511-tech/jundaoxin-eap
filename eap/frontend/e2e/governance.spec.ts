@@ -34,8 +34,11 @@ test('eval-gate 模板创建 → 列表可见 → 用例结束停用（隔离纪
   const dialog = page.locator('[role="dialog"]')
   await dialog.locator('input').first().fill(NAME)
   await dialog.locator('select').selectOption('eval-gate')
-  // 配置 JSON 自动预填 eval-gate 模板
-  await expect(dialog.locator('input').nth(2)).toHaveValue(/models/)
+  // M50-B1：eval-gate 改结构化子表单——模板预填 models=[mock-llm] / require_eval=true / min_pass_rate=0.8
+  await expect(dialog.getByRole('button', { name: '切换 JSON 编辑' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'mock-llm', exact: true })).toBeVisible()
+  await expect(dialog.locator('input[type="checkbox"]')).toBeChecked()
+  await expect(dialog.locator('input[type="number"]').last()).toHaveValue('0.8')
   await dialog.getByRole('button', { name: '创建', exact: true }).click()
   await expect(page.getByText(NAME).first()).toBeVisible({ timeout: 10_000 })
   // 隔离纪律：eval-gate 钉住 mock-llm 会拦死 dev 库整条 chat 链，断言后立刻停用

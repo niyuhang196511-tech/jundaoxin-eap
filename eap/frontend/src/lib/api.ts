@@ -583,3 +583,14 @@ export const evalsApi = {
   datasets: () => api<{ name: string; kind: string; description: string; cases: number }[]>(
     'GET', '/api/v1/evals/datasets'),
 }
+
+export const tenantsApi = {
+  /** 租户列表（M50-B1，admin only）：BudgetsTab 租户下拉数据源；member 403 → 调用方降级手输 */
+  list: () => api<{ id: number; name: string; created_at: string }[]>('GET', '/api/v1/tenants'),
+}
+
+export const toolsApi = {
+  /** 平台工具目录（内置 + 工作流 + MCP 桥接）：策略工具白名单 / 沙箱清单 chips 数据源 */
+  list: () => api<{ name: string; description: string; origin?: string }[]>(
+    'GET', '/api/v1/extensions/tools'),
+}

@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Download, Plus, RefreshCw } from 'lucide-react'
 import {
-  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, toast,
+  Badge, Button, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
-import { api, evalsApi, exportBudgetReport, kbApi, memoryOpsApi, modelsApi, type MemoryItem } from '@/lib/api'
+import {
+  agentsApi, api, evalsApi, exportBudgetReport, kbApi, memoryOpsApi, modelsApi, tenantsApi, toolsApi,
+  type MemoryItem,
+} from '@/lib/api'
+import { cn } from '@/lib/cn'
 
 type Release = {
   id: string
@@ -160,6 +164,15 @@ function BudgetsTab() {
   const [budget, setBudget] = useState(1000000)
   const [days, setDays] = useState(30)
   const [exporting, setExporting] = useState(false)
+  // 租户下拉（M50-B1）：GET /api/v1/tenants 为 admin only；member 403 或加载失败时
+  // 诚实降级回手输租户 ID（前端无会话租户信息可用，凭证仅存 token 不含租户声明）
+  const [tenants, setTenants] = useState<{ id: number; name: string }[] | null>(null)
+  const [tenantsFailed, setTenantsFailed] = useState(false)
+  useEffect(() => {
+    tenantsApi.list()
+      .then(l => { setTenants(l.map(t => ({ id: t.id, name: t.name }))); setTenantsFailed(false) })
+      .catch(() => { setTenants(null); setTenantsFailed(true) })
+  }, [])
 
   const load = useCallback(async (t: number) => {
     try {
@@ -196,8 +209,23 @@ function BudgetsTab() {
     <div className="grid grid-cols-[360px_1fr] items-start gap-4">
       <div className="space-y-3 rounded-[--radius-card] border border-line bg-surface p-4">
         <div>
-          <Label>租户 ID</Label>
-          <Input type="number" value={tenant} onChange={e => setTenant(parseInt(e.target.value) || 1)} />
+          <Label>租户</Label>
+          {tenants ? (
+            <Select value={String(tenant)} onChange={e => setTenant(parseInt(e.target.value) || 1)}>
+              {/* 当前值不在列表（如既有手输 ID）时附加 option 保持可选中 */}
+              {(tenants.some(t => t.id === tenant) ? tenants : [...tenants, { id: tenant, name: `租户 ${tenant}` }])
+                .map(t => <option key={t.id} value={t.id}>#{t.id} · {t.name}</option>)}
+            </Select>
+          ) : (
+            <>
+              <Input type="number" value={tenant} onChange={e => setTenant(parseInt(e.target.value) || 1)} />
+              {tenantsFailed && (
+                <p className="mt-1 text-[11px] text-amber-500">
+                  租户列表加载失败（该端点需 admin 权限），已降级为手输租户 ID
+                </p>
+              )}
+            </>
+          )}
         </div>
         <div>
           <Label>月度 token 预算</Label>
@@ -261,13 +289,265 @@ const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
   'eval-gate': { models: ['mock-llm'], require_eval: true, min_pass_rate: 0.8 },
 }
 
+/* ---------- 策略配置结构化子表单（M50-B1） ----------
+ * schema 事实以后端为准：api/v1/policies.py create_policy 的逐 kind 键校验
+ * （EAP-7102）+ runtime/policy.py 各 check_* 实际消费的 config 键。
+ * 未知 kind / JSON 解析失败 / schema 之外的未知键 / 类型不符 → 诚实降级
+ * JSON 编辑并提示原因；结构化 ⇄ JSON 双向切换不丢已填数据。 */
+
+type ChipsFieldDef = {
+  key: string; label: string; type: 'chips'
+  source?: 'models' | 'tools' | 'agents'; presets?: string[]; hint?: string
+}
+type EnumFieldDef = {
+  key: string; label: string; type: 'enum'
+  options: { value: string; label: string }[]; default?: string; hint?: string
+}
+type NumFieldDef = {
+  key: string; label: string; type: 'int' | 'float'
+  min?: number; max?: number; step?: number; required?: boolean; hint?: string
+}
+type BoolFieldDef = { key: string; label: string; type: 'bool'; default?: boolean; hint?: string }
+type PolicyFieldDef = ChipsFieldDef | EnumFieldDef | NumFieldDef | BoolFieldDef
+
+const POLICY_SCHEMA: Record<string, PolicyFieldDef[]> = {
+  'model-allowlist': [
+    { key: 'models', label: '放行模型（config.models，必填列表）', type: 'chips', source: 'models',
+      hint: '路由链仅保留名单内模型，全部被过滤时调用拒绝（EAP-7101）；空清单 = 拒绝全部候选' },
+  ],
+  'provider-allowlist': [
+    { key: 'providers', label: '放行供应商（config.providers，必填列表）', type: 'chips',
+      presets: ['mock', 'openai_compat', 'vllm'],
+      hint: '数据不出域：仅保留名单内供应商的模型；供应商无列表 API，预置常见值 + 自由输入' },
+  ],
+  'max-prompt-tokens': [
+    { key: 'limit', label: 'prompt token 上限（config.limit，必填整数）', type: 'int', required: true, min: 0,
+      hint: '单次调用约数 tokens 超限即拒（EAP-7101）；0 视为不限（不强制）' },
+  ],
+  'tool-allowlist': [
+    { key: 'tools', label: '工具白名单（config.tools，必填列表）', type: 'chips', source: 'tools',
+      hint: '名单外工具调用拒绝（EAP-7102）；空清单 = 不限制' },
+  ],
+  'tool-risk-approval': [
+    { key: 'threshold', label: '风险审批阈值（config.threshold）', type: 'enum', default: 'high',
+      options: [
+        { value: 'low', label: 'low（低及以上风险均须审批）' },
+        { value: 'medium', label: 'medium（中及以上须审批）' },
+        { value: 'high', label: 'high（仅高风险须审批，后端缺省）' },
+      ],
+      hint: '工具风险等级 ≥ 阈值即强制审批（与工具自带 requires_approval 任一为真即走审批门）' },
+  ],
+  'agent-allowlist': [
+    { key: 'agents', label: '可委派智能体（config.agents，必填列表）', type: 'chips', source: 'agents',
+      hint: '名单外智能体委派拒绝（EAP-7102）；空清单 = 不限制' },
+  ],
+  'tool-sandbox': [
+    { key: 'mode', label: '执行模式（config.mode）', type: 'enum', default: 'enforce',
+      options: [
+        { value: 'enforce', label: 'enforce（进程内工具命中即拒绝，后端缺省）' },
+        { value: 'audit', label: 'audit（进程内工具放行，仅记违规审计）' },
+      ],
+      hint: '清单内脚本工具必须经沙箱执行（防绕过 handler，两种 mode 一致）' },
+    { key: 'tools', label: '沙箱工具清单（config.tools，必填列表）', type: 'chips', source: 'tools',
+      hint: '空清单 = 不命中任何工具' },
+  ],
+  'eval-gate': [
+    { key: 'models', label: '门禁模型（config.models，必填列表）', type: 'chips', source: 'models',
+      hint: '清单内模型无评测记录（且 require_eval）/ 最新评测非 PASS / 通过率低于阈值 → 路由剔除；清单外不受影响' },
+    { key: 'require_eval', label: '要求评测记录（config.require_eval，后端缺省 true）', type: 'bool', default: true },
+    { key: 'min_pass_rate', label: '最低通过率（config.min_pass_rate，0~1，留空 = 后端缺省 0）', type: 'float',
+      min: 0, max: 1, step: 0.05 },
+  ],
+  'a2a-delegate-allowlist': [
+    { key: 'endpoints', label: '放行外部 endpoint（config.endpoints）', type: 'chips', presets: ['*'],
+      hint: '跨租户 A2A 委派 fail-closed 默认拒绝；endpoint 或 agent 任一命中即放行，"*" 通配' },
+    { key: 'agents', label: '放行外部 agent（config.agents）', type: 'chips', presets: ['*'],
+      hint: '外部 A2A agent 名（非平台注册表），自由输入；两项至少填一项' },
+  ],
+}
+
+const POLICY_KIND_LABELS: Record<string, string> = {
+  'model-allowlist': '模型白名单',
+  'provider-allowlist': '供应商白名单',
+  'max-prompt-tokens': 'prompt 上限',
+  'tool-allowlist': '工具白名单',
+  'tool-risk-approval': '风险审批阈值',
+  'agent-allowlist': '可委派智能体',
+  'tool-sandbox': '脚本工具沙箱',
+  'a2a-delegate-allowlist': 'A2A 外部委派白名单',
+  'eval-gate': '评测门禁',
+}
+
+/** 多选 chips（照抄 Integrations/VersionDrawer ChipPicker 模式）：候选 ∪ 已选，点击切换 */
+function ChipPicker({ options, values, onChange }: {
+  options: string[]
+  values: string[]
+  onChange: (next: string[]) => void
+}) {
+  const all = [...new Set([...options, ...values])]
+  if (!all.length) return <p className="text-xs text-ink-3">（无可选项，可在下方自由输入）</p>
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {all.map(name => {
+        const on = values.includes(name)
+        return (
+          <button key={name} type="button"
+            onClick={() => onChange(on ? values.filter(v => v !== name) : [...values, name])}
+            className={cn(
+              'cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors',
+              on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
+                 : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink',
+            )}>{name}</button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** chips 字段：ChipPicker + 自由输入（数据源列表拉取失败/为空时天然退化为纯手输） */
+function ChipsField({ def, values, options, onChange }: {
+  def: ChipsFieldDef
+  values: string[]
+  options: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [custom, setCustom] = useState('')
+  const add = () => {
+    const v = custom.trim()
+    if (!v) return
+    if (!values.includes(v)) onChange([...values, v])
+    setCustom('')
+  }
+  return (
+    <div>
+      <Label>{def.label}</Label>
+      <ChipPicker options={[...options, ...(def.presets ?? [])]} values={values} onChange={onChange} />
+      <div className="mt-2 flex gap-2">
+        <Input placeholder={`自定义 ${def.key}，回车添加`} value={custom}
+          onChange={e => setCustom(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add() } }} />
+        <Button size="xs" variant="secondary" className="shrink-0" disabled={!custom.trim()} onClick={add}>
+          <Plus className="size-3" />添加
+        </Button>
+      </div>
+      {def.hint && <p className="mt-1 text-[11px] text-ink-3">{def.hint}</p>}
+    </div>
+  )
+}
+
+type ParseResult = { ok: true; draft: Record<string, unknown> } | { ok: false; reason: string }
+
+/** config JSON（模板或既有策略）→ 结构化草稿。未知 kind、解析失败、schema 之外的
+ * 未知键、类型/枚举/范围不符 → ok:false 附原因（调用方降级 JSON 编辑）。
+ * int/float 归一为字符串便于受控输入；缺失的可选键补后端缺省值（threshold=high、
+ * mode=enforce、require_eval=true，与 runtime/policy.py 的 or/缺省语义一致）。 */
+function parseConfig(kind: string, raw: string): ParseResult {
+  const schema = POLICY_SCHEMA[kind]
+  if (!schema) return { ok: false, reason: `策略类型 ${kind} 无结构化表单（不在九种已知 kind 内）` }
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { return { ok: false, reason: '配置不是合法 JSON' } }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, reason: '配置须为 JSON 对象' }
+  }
+  const obj = parsed as Record<string, unknown>
+  const known = new Set(schema.map(f => f.key))
+  const unknownKeys = Object.keys(obj).filter(k => !known.has(k))
+  if (unknownKeys.length) {
+    return { ok: false, reason: `配置含子表单 schema 之外的键（${unknownKeys.join('、')}），结构化编辑会丢键` }
+  }
+  const draft: Record<string, unknown> = {}
+  for (const f of schema) {
+    const v = obj[f.key]
+    if (v === undefined) {
+      if (f.type === 'enum') draft[f.key] = f.default ?? f.options[0].value
+      else if (f.type === 'bool') draft[f.key] = f.default ?? false
+      continue
+    }
+    if (f.type === 'chips') {
+      if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) {
+        return { ok: false, reason: `${f.key} 须为字符串数组` }
+      }
+      draft[f.key] = [...v]
+    } else if (f.type === 'enum') {
+      if (typeof v !== 'string' || !f.options.some(o => o.value === v)) {
+        return { ok: false, reason: `${f.key} 须为 ${f.options.map(o => o.value).join('/')} 之一` }
+      }
+      draft[f.key] = v
+    } else if (f.type === 'int') {
+      if (typeof v !== 'number' || !Number.isInteger(v)) {
+        return { ok: false, reason: `${f.key} 须为整数` }
+      }
+      draft[f.key] = String(v)
+    } else if (f.type === 'float') {
+      if (typeof v !== 'number' || !Number.isFinite(v)
+        || v < (f.min ?? -Infinity) || v > (f.max ?? Infinity)) {
+        return { ok: false, reason: `${f.key} 须为 ${f.min}~${f.max} 数值` }
+      }
+      draft[f.key] = String(v)
+    } else if (f.type === 'bool') {
+      if (typeof v !== 'boolean') return { ok: false, reason: `${f.key} 须为布尔` }
+      draft[f.key] = v
+    }
+  }
+  return { ok: true, draft }
+}
+
+/** 结构化草稿 → 与后端校验形状一致的 config JSON。errors 非空时提交被拦
+ * （切换 JSON 模式不拦，宽松序列化保证切换不丢数据）。 */
+function buildConfig(kind: string, draft: Record<string, unknown>):
+  { config: Record<string, unknown>; errors: string[] } {
+  const config: Record<string, unknown> = {}
+  const errors: string[] = []
+  for (const f of POLICY_SCHEMA[kind] ?? []) {
+    const v = draft[f.key]
+    if (f.type === 'chips') {
+      config[f.key] = Array.isArray(v) ? [...new Set(v.map(x => String(x).trim()).filter(Boolean))] : []
+    } else if (f.type === 'enum') {
+      config[f.key] = typeof v === 'string' && f.options.some(o => o.value === v) ? v : f.options[0].value
+    } else if (f.type === 'int') {
+      const n = typeof v === 'number' ? v : parseInt(String(v ?? ''), 10)
+      if (!Number.isFinite(n)) {
+        if (f.required) errors.push(`${f.key} 须填写整数`)
+      } else {
+        config[f.key] = Math.trunc(n)
+      }
+    } else if (f.type === 'float') {
+      const s = String(v ?? '').trim()
+      if (!s) continue  // 可选键留空 = 不提交（后端按缺省语义处理）
+      const n = typeof v === 'number' ? v : parseFloat(s)
+      if (!Number.isFinite(n) || n < (f.min ?? -Infinity) || n > (f.max ?? Infinity)) {
+        errors.push(`${f.key} 须为 ${f.min}~${f.max} 数值`)
+      } else {
+        config[f.key] = n
+      }
+    } else if (f.type === 'bool') {
+      config[f.key] = Boolean(v)
+    }
+  }
+  // a2a-delegate-allowlist：endpoint 或 agent 任一命中即放行——两者皆空 = 拒绝全部
+  // 外部委派（后端只要求至少一项为列表，这里把语义死角提前拦下）
+  if (kind === 'a2a-delegate-allowlist'
+    && !(config.endpoints as string[] | undefined)?.length
+    && !(config.agents as string[] | undefined)?.length) {
+    errors.push('a2a-delegate-allowlist 需至少填写 endpoints 或 agents 之一（两者皆空 = 拒绝全部外部委派）')
+  }
+  return { config, errors }
+}
+
 function PoliciesTab() {
   const [list, setList] = useState<Policy[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({
-    name: '', tenantId: 1, kind: 'model-allowlist',
-    config: JSON.stringify(POLICY_TEMPLATES['model-allowlist'] ?? {}, null, 2), priority: 10,
-  })
+  const [form, setForm] = useState({ name: '', tenantId: 1, kind: 'model-allowlist', priority: 10 })
+  // 配置双模式（M50-B1）：结构化子表单 ⇄ JSON 编辑；cfgNote = 降级原因（如实展示）
+  const [cfgMode, setCfgMode] = useState<'structured' | 'json'>('structured')
+  const [cfgDraft, setCfgDraft] = useState<Record<string, unknown>>({})
+  const [cfgRaw, setCfgRaw] = useState('')
+  const [cfgNote, setCfgNote] = useState('')
+  const [prefilled, setPrefilled] = useState(false)
+  // chips 选项数据源：models/tools/agents 列表（对话框打开时拉取；失败静默 → 仅剩自由输入）
+  const [optModels, setOptModels] = useState<string[]>([])
+  const [optTools, setOptTools] = useState<string[]>([])
+  const [optAgents, setOptAgents] = useState<string[]>([])
 
   const load = useCallback(async () => {
     try {
@@ -277,20 +557,121 @@ function PoliciesTab() {
     }
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (!open) return
+    modelsApi.list().then(l => setOptModels(l.map(m => m.name))).catch(() => {})
+    toolsApi.list().then(l => setOptTools(l.map(t => t.name))).catch(() => {})
+    agentsApi.list().then(l => setOptAgents(l.map(a => a.name))).catch(() => {})
+  }, [open])
+
+  /** kind → POLICY_TEMPLATES 默认值进子表单（创建流程） */
+  const applyTemplate = (kind: string) => {
+    const raw = JSON.stringify(POLICY_TEMPLATES[kind] ?? {}, null, 2)
+    setCfgRaw(raw)
+    const parsed = parseConfig(kind, raw)
+    if (parsed.ok) { setCfgDraft(parsed.draft); setCfgMode('structured'); setCfgNote('') }
+    else { setCfgDraft({}); setCfgMode('json'); setCfgNote(parsed.reason) }
+  }
+
+  const openCreate = () => {
+    setForm({ name: '', tenantId: 1, kind: 'model-allowlist', priority: 10 })
+    setPrefilled(false)
+    applyTemplate('model-allowlist')
+    setOpen(true)
+  }
+
+  /** 复用配置（回显流程）：解析既有 config 进子表单；后端无策略更新端点，改名后新建 */
+  const openReuse = (p: Policy) => {
+    setForm({ name: '', tenantId: p.tenant_id, kind: p.kind, priority: p.priority })
+    setPrefilled(true)
+    const raw = JSON.stringify(p.config ?? {}, null, 2)
+    setCfgRaw(raw)
+    const parsed = parseConfig(p.kind, raw)
+    if (parsed.ok) { setCfgDraft(parsed.draft); setCfgMode('structured'); setCfgNote('') }
+    else { setCfgDraft({}); setCfgMode('json'); setCfgNote(parsed.reason) }
+    setOpen(true)
+  }
+
+  /** 结构化 ⇄ JSON 切换不丢已填数据：结构化侧宽松序列化；JSON 侧解析 + schema
+   * 校验通过才允许切回（否则 toast 原因，停在 JSON 模式） */
+  const switchCfgMode = () => {
+    if (cfgMode === 'structured') {
+      setCfgRaw(JSON.stringify(buildConfig(form.kind, cfgDraft).config, null, 2))
+      setCfgMode('json')
+    } else {
+      const parsed = parseConfig(form.kind, cfgRaw)
+      if (parsed.ok) { setCfgDraft(parsed.draft); setCfgMode('structured'); setCfgNote('') }
+      else toast.error(`无法切回结构化表单：${parsed.reason}`)
+    }
+  }
 
   const create = async () => {
+    let config: Record<string, unknown>
+    if (cfgMode === 'structured') {
+      const built = buildConfig(form.kind, cfgDraft)
+      if (built.errors.length) { toast.error(built.errors[0]); return }
+      config = built.config
+    } else {
+      try { config = JSON.parse(cfgRaw) } catch { toast.error('配置不是合法 JSON'); return }
+      if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+        toast.error('配置须为 JSON 对象')
+        return
+      }
+    }
     try {
       await api('POST', '/api/v1/policies', {
         name: form.name.trim(), tenant_id: form.tenantId, kind: form.kind,
-        config: JSON.parse(form.config), priority: form.priority,
-      }).catch(e => { throw new Error((e as Error).message) })
+        config, priority: form.priority,
+      })
       toast.success('策略已创建')
       setOpen(false)
-      setForm({ name: '', tenantId: 1, kind: 'model-allowlist', config: '{}', priority: 10 })
       load()
     } catch (e) {
       toast.error(`创建失败：${(e as Error).message}`)
     }
+  }
+
+  const renderField = (f: PolicyFieldDef) => {
+    if (f.type === 'chips') {
+      const options = f.source === 'models' ? optModels
+        : f.source === 'tools' ? optTools
+        : f.source === 'agents' ? optAgents : []
+      const values = Array.isArray(cfgDraft[f.key]) ? (cfgDraft[f.key] as string[]) : []
+      return (
+        <ChipsField key={f.key} def={f} values={values} options={options}
+          onChange={next => setCfgDraft(d => ({ ...d, [f.key]: next }))} />
+      )
+    }
+    if (f.type === 'enum') {
+      const value = typeof cfgDraft[f.key] === 'string' ? (cfgDraft[f.key] as string) : f.options[0].value
+      return (
+        <div key={f.key}>
+          <Label>{f.label}</Label>
+          <Select value={value} onChange={e => setCfgDraft(d => ({ ...d, [f.key]: e.target.value }))}>
+            {f.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </Select>
+          {f.hint && <p className="mt-1 text-[11px] text-ink-3">{f.hint}</p>}
+        </div>
+      )
+    }
+    if (f.type === 'bool') {
+      return (
+        <label key={f.key} className="flex cursor-pointer items-center gap-2 text-xs text-ink-2">
+          <input type="checkbox" className="cursor-pointer" checked={Boolean(cfgDraft[f.key])}
+            onChange={e => setCfgDraft(d => ({ ...d, [f.key]: e.target.checked }))} />
+          {f.label}
+        </label>
+      )
+    }
+    return (
+      <div key={f.key}>
+        <Label>{f.label}</Label>
+        <Input type="number" min={f.min} max={f.max} step={f.type === 'float' ? (f.step ?? 0.05) : 1}
+          value={cfgDraft[f.key] === undefined ? '' : String(cfgDraft[f.key])}
+          onChange={e => setCfgDraft(d => ({ ...d, [f.key]: e.target.value }))} />
+        {f.hint && <p className="mt-1 text-[11px] text-ink-3">{f.hint}</p>}
+      </div>
+    )
   }
 
   const toggle = async (p: Policy) => {
@@ -305,7 +686,7 @@ function PoliciesTab() {
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <Button variant="primary" onClick={() => setOpen(true)}><Plus className="size-3.5" />创建策略</Button>
+        <Button variant="primary" onClick={openCreate}><Plus className="size-3.5" />创建策略</Button>
       </div>
       <div className="rounded-[--radius-card] border border-line bg-surface">
         <Table<Policy>
@@ -321,13 +702,19 @@ function PoliciesTab() {
             ) },
             { key: 'enabled', title: '状态', render: p => p.enabled ? <Badge tone="green">启用</Badge> : <Badge tone="gray">停用</Badge> },
             { key: 'actions', title: '操作', render: p => (
-              <Button size="xs" variant="secondary" onClick={() => toggle(p)}>{p.enabled ? '停用' : '启用'}</Button>
+              <span className="flex gap-1.5">
+                <Button size="xs" variant="secondary" onClick={() => toggle(p)}>{p.enabled ? '停用' : '启用'}</Button>
+                <Button size="xs" variant="secondary" onClick={() => openReuse(p)}>复用配置</Button>
+              </span>
             ) },
           ]}
           empty="策略类型：模型 / 供应商 / 工具 / 智能体白名单 / 风险审批阈值 / prompt token 上限 / 工具沙箱 / A2A 委派白名单 / 评测门禁（违规 403 EAP-7101）"
         />
       </div>
       <DialogContent open={open} onOpenChange={setOpen} title="创建策略"
+        description={prefilled
+          ? '配置已复用自既有策略：后端无策略更新端点，请以新名称创建（同名 409）'
+          : '按类型渲染结构化子表单，产出 config 与后端校验形状一致；可随时切换 JSON 编辑'}
         footer={<>
           <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
           <Button variant="primary" onClick={create} disabled={!form.name.trim()}>创建</Button>
@@ -340,20 +727,17 @@ function PoliciesTab() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>类型</Label>
-              <Select value={form.kind} onChange={e => setForm({
-                ...form,
-                kind: e.target.value,
-                config: JSON.stringify(POLICY_TEMPLATES[e.target.value] ?? {}, null, 2),
-              })}>
-                <option value="model-allowlist">model-allowlist（模型白名单）</option>
-                <option value="provider-allowlist">provider-allowlist（供应商白名单）</option>
-                <option value="max-prompt-tokens">max-prompt-tokens（prompt 上限）</option>
-                <option value="tool-allowlist">tool-allowlist（工具白名单）</option>
-                <option value="tool-risk-approval">tool-risk-approval（风险审批阈值）</option>
-                <option value="agent-allowlist">agent-allowlist（可委派智能体）</option>
-                <option value="tool-sandbox">tool-sandbox（脚本工具沙箱）</option>
-                <option value="a2a-delegate-allowlist">a2a-delegate-allowlist（A2A 外部委派白名单）</option>
-                <option value="eval-gate">eval-gate（评测门禁）</option>
+              <Select value={form.kind} onChange={e => {
+                setForm({ ...form, kind: e.target.value })
+                applyTemplate(e.target.value)
+              }}>
+                {/* 复用旧数据时 kind 可能不在九种内：附加 option 保持选中并如实标注 */}
+                {!POLICY_KIND_LABELS[form.kind] && (
+                  <option value={form.kind}>{form.kind}（未知类型，仅 JSON 编辑）</option>
+                )}
+                {Object.entries(POLICY_KIND_LABELS).map(([k, label]) => (
+                  <option key={k} value={k}>{k}（{label}）</option>
+                ))}
               </Select>
             </div>
             <div>
@@ -363,8 +747,21 @@ function PoliciesTab() {
             </div>
           </div>
           <div>
-            <Label>配置（JSON）</Label>
-            <Input value={form.config} onChange={e => setForm({ ...form, config: e.target.value })} className="font-mono !text-[11px]" />
+            <div className="mb-1.5 flex items-center justify-between">
+              <Label className="mb-0">配置（{cfgMode === 'structured' ? '结构化子表单' : 'JSON'}）</Label>
+              <Button size="xs" variant="ghost" onClick={switchCfgMode}>
+                {cfgMode === 'structured' ? '切换 JSON 编辑' : '切换结构化表单'}
+              </Button>
+            </div>
+            {cfgMode === 'structured' ? (
+              <div className="space-y-3">{(POLICY_SCHEMA[form.kind] ?? []).map(renderField)}</div>
+            ) : (
+              <div>
+                <Textarea rows={6} value={cfgRaw} onChange={e => setCfgRaw(e.target.value)}
+                  className="font-mono !text-[11px]" />
+                {cfgNote && <p className="mt-1 text-xs text-amber-500">已降级 JSON 编辑：{cfgNote}</p>}
+              </div>
+            )}
           </div>
         </div>
       </DialogContent>

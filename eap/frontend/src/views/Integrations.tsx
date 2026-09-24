@@ -142,6 +142,10 @@ function ConnectorsTab() {
   const [epRows, setEpRows] = useState<EndpointRow[] | null>(null)
   const [epRaw, setEpRaw] = useState(DEFAULT_ENDPOINTS)
   const [epNote, setEpNote] = useState('')
+  // sql kind 专属 config（M50-B1）：后端只消费 dialect（缺省 sqlite）与 database
+  // （必填，缺了 400 EAP-7003）两个键——runtime/connectors.py _sqlite_config 为准，
+  // 不存在 host/port/user/password 键，不虚构
+  const [sqlCfg, setSqlCfg] = useState({ dialect: 'sqlite', database: '' })
   const [busy, setBusy] = useState('')
 
   const load = useCallback(async () => {
@@ -159,6 +163,7 @@ function ConnectorsTab() {
     setEpRows(rows)
     setEpRaw(DEFAULT_ENDPOINTS)
     setEpNote(rows ? '' : 'Endpoints 模板解析失败，已降级为 JSON 编辑')
+    setSqlCfg({ dialect: 'sqlite', database: '' })
     setOpen(true)
   }
 
@@ -191,6 +196,10 @@ function ConnectorsTab() {
         toast.error('每个端点的 name 与 tool_name 不能为空')
         return
       }
+      if (form.kind === 'sql' && epRows.some(r => !r.query.trim())) {
+        toast.error('sql 连接器每个端点必须提供只读 SELECT query（后端 400 EAP-7003）')
+        return
+      }
       endpoints = serializeEndpointRows(epRows, form.kind)
     } else {
       try {
@@ -199,11 +208,24 @@ function ConnectorsTab() {
         toast.error('Endpoints 不是合法 JSON')
         return
       }
+      if (form.kind === 'sql' && Array.isArray(endpoints)
+        && endpoints.some((e: any) => !String(e?.query ?? '').trim())) {
+        toast.error('sql 连接器每个端点必须提供只读 SELECT query（后端 400 EAP-7003）')
+        return
+      }
+    }
+    // sql kind：config.database 必填（后端 400 EAP-7003），dialect 缺省 sqlite
+    if (form.kind === 'sql' && !sqlCfg.database.trim()) {
+      toast.error('sql 连接器必须提供 config.database（后端 400 EAP-7003）')
+      return
     }
     try {
       await api('POST', '/api/v1/connectors', {
         name: form.name.trim(), kind: form.kind, description: form.description,
         base_url: form.baseUrl, endpoints,
+        ...(form.kind === 'sql'
+          ? { config: { dialect: sqlCfg.dialect, database: sqlCfg.database.trim() } }
+          : {}),
       })
       toast.success('连接器已注册')
       setOpen(false)
@@ -292,6 +314,25 @@ function ConnectorsTab() {
             <Label>描述</Label>
             <Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           </div>
+          {form.kind === 'sql' && (
+            <div>
+              <Label>SQL 配置（config，提交进连接器 config JSON）</Label>
+              <div className="grid grid-cols-[140px_1fr] gap-2">
+                <Select value={sqlCfg.dialect} title="config.dialect"
+                  onChange={e => setSqlCfg({ ...sqlCfg, dialect: e.target.value })}>
+                  <option value="sqlite">sqlite</option>
+                </Select>
+                <Input placeholder="database（必填，sqlite 文件路径，如 data/erp.db 或 :memory:）"
+                  value={sqlCfg.database}
+                  onChange={e => setSqlCfg({ ...sqlCfg, database: e.target.value })} />
+              </div>
+              <p className="mt-1 text-[11px] text-ink-3">
+                后端 sql 连接器只消费 config.dialect（缺省 sqlite）与 config.database（必填，缺失 400 EAP-7003）；
+                当前运行时仅 sqlite 可执行，其它 dialect 运行时报 EAP-7003（平台不随附驱动）；
+                无 host/port/user/password 键
+              </p>
+            </div>
+          )}
           <div>
             <div className="mb-1.5 flex items-center justify-between">
               <Label className="mb-0">Endpoints（出站端点 → 自动暴露为工具）</Label>
@@ -349,7 +390,7 @@ function ConnectorsTab() {
             )}
             {form.kind === 'sql' && (
               <p className="mt-1 text-[11px] text-ink-3">
-                sql 类型还需 config.database（本表单暂未覆盖，可先经 API 创建）；每个端点须填只读 SELECT query
+                sql 类型每个端点须填只读 SELECT query（后端 400 EAP-7003）；config.database 在上方「SQL 配置」填写
               </p>
             )}
           </div>

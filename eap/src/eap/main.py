@@ -37,6 +37,7 @@ from .api.v1 import policies as api_policies
 from .api.v1 import releases as api_releases
 from .api.v1 import skills as api_skills
 from .api.v1 import tasks as api_tasks
+from .api.v1 import tenants as api_tenants
 from .api.v1 import triggers as api_triggers
 from .api.v1 import webhooks as api_webhooks
 from .api.v1 import workflows as api_workflows
@@ -144,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(api_embed.router)
     app.include_router(api_im.router)
     app.include_router(api_tasks.router)
+    app.include_router(api_tenants.router)
     app.include_router(api_triggers.router)
     app.include_router(api_triggers.public_router)  # 入站 webhook（公开端点，签名即凭证）
     app.include_router(api_webhooks.router)  # 对外 Webhook 推送（M31：端点/投递/重投/试投）
