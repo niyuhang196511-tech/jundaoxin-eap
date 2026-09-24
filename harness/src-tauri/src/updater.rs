@@ -39,6 +39,14 @@
 //! 前端发进度（payload 见 UpdateProgress），下载完成/开始安装时发
 //! `update://installing`；前端监听与进度条见 App.tsx，文档 docs/21 §5。
 //!
+//! 下载性能度量（M51-E）：下载记起止时间戳（Instant），完成回调里算平均速率
+//! （KB/s，avg_kb_per_sec 纯函数）→ ① Rust 侧直写 `perf.update_download` 审计行
+//! （detail=紧凑 JSON {"ms","bytes","kb_per_sec"}）——**不放前端写**的原因：
+//! Windows 上 NSIS 安装器拉起后进程即刻退出，前端收到事件再 invoke 存在竞态
+//! 丢行；单一写者在 Rust 侧无此问题；② `update://installing` 事件 payload 从
+//! null 扩展为 UpdateInstallStats（camelCase），前端展示下载耗时/均速。
+//! 度量失败静默，绝不影响下载安装闭环。
+//!
 //! 测试：参数校验/endpoint 形态解析/错误文案/UpdateInfo 与 UpdateProgress serde
 //! shape 为纯函数单测；「不可达 endpoint 返回 error 而非 panic」用 generate_context!（真实
 //! conf，含占位 pubkey）+ updater 插件构建真实 App 驱动——`build()` 不进事件
@@ -46,7 +54,8 @@
 //! setup()），可安全在测试中运行。
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -105,6 +114,27 @@ pub struct UpdateProgress {
     pub total: Option<u64>,
 }
 
+/// 下载完成事件 payload（M51-E 扩展——M46-B 时为 null）：downloaded=总字节，
+/// elapsed_ms=下载总耗时，kb_per_sec=平均速率（KB/s；字节或耗时为 0 时记 0，
+/// 不假装速率）。serde camelCase 对齐前端 TS 类型（App.tsx installing 监听）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallStats {
+    pub downloaded: u64,
+    pub elapsed_ms: u64,
+    pub kb_per_sec: f64,
+}
+
+/// 平均下载速率（KB/s，M51-E 纯函数便于单测）：bytes=0 或 elapsed_ms=0 → 0.0
+/// （瞬时完成不给 inf 假值）；非有限结果一律回退 0.0（防手写 JSON 出现 inf/NaN）
+pub fn avg_kb_per_sec(bytes: u64, elapsed_ms: u64) -> f64 {
+    if bytes == 0 || elapsed_ms == 0 {
+        return 0.0;
+    }
+    let v = (bytes as f64 / 1024.0) / (elapsed_ms as f64 / 1000.0);
+    if v.is_finite() { v } else { 0.0 }
+}
+
 /// 检查更新：endpoint 为更新源 URL（目录/完整模板/固定 .json 清单三态，
 /// 见 resolve_endpoint），pubkey 为 minisign Ed25519 公钥。
 /// 空参数 → Err("未配置更新源或签名公钥")；其余失败 → Ok + error 字段。
@@ -122,8 +152,9 @@ pub async fn check_update(
 /// 下载期间经事件 `update://progress` 上报进度，payload
 /// `{downloaded: u64, total: u64 | null}`（字节；total=Content-Length，服务端未回
 /// 该头时为 null——前端按不确定进度只显示已下载 MB 数，不得假设必有 total）；
-/// 下载完成/开始安装时发 `update://installing`（payload null）。
-/// 失败返回 Err(中文可读错误)。
+/// 下载完成/开始安装时发 `update://installing`，payload=UpdateInstallStats
+/// `{downloaded, elapsedMs, kbPerSec}`（M51-E；此前为 null，前端监听需容错）。
+/// 同时 Rust 侧写 `perf.update_download` 审计行。失败返回 Err(中文可读错误)。
 #[tauri::command]
 pub async fn install_update(
     app: tauri::AppHandle,
@@ -203,17 +234,37 @@ async fn install_update_impl<R: tauri::Runtime>(
     // 进度上报（M46-B）：插件 on_chunk 回调 (chunk_length, total)——chunk_length
     // 为本次分片字节数，total 为总大小（Content-Length，可能 None，每个分片重复
     // 携带同一值），本地累计得 downloaded 后发事件；emit 失败（如窗口不存在）
-    // 不影响下载安装闭环，静默忽略。回调在 await 期间被插件反复调用，闭包仅
-    // 可变借用 downloaded、共享借用 app，无跨 await 持锁问题。
-    let mut downloaded: u64 = 0;
+    // 不影响下载安装闭环，静默忽略。回调在 await 期间被插件反复调用。
+    // 下载计时（M51-E）：t0=下载起点；downloaded 改用 AtomicU64（on_chunk 累计
+    // 与完成回调读数两处借用，普通 &mut 无法同时被两个闭包持有；且 Tauri async
+    // command 要求 Future: Send——Cell 非 Sync 会破坏该约束，原子量两者兼得）。
+    let t0 = Instant::now();
+    let downloaded = AtomicU64::new(0);
     update
         .download_and_install(
             |chunk, total| {
-                downloaded = downloaded.saturating_add(chunk as u64);
-                let _ = app.emit(EVENT_UPDATE_PROGRESS, UpdateProgress { downloaded, total });
+                let now = downloaded.fetch_add(chunk as u64, Ordering::Relaxed).saturating_add(chunk as u64);
+                let _ = app.emit(
+                    EVENT_UPDATE_PROGRESS,
+                    UpdateProgress { downloaded: now, total },
+                );
             },
             || {
-                let _ = app.emit(EVENT_UPDATE_INSTALLING, ());
+                // 下载完成（M51-E）：耗时/平均速率 → perf.update_download 审计行
+                // （Rust 侧单写者，Windows 进程退出竞态见模块 docstring）+
+                // installing 事件带 UpdateInstallStats 供前端展示；全部静默失败。
+                let bytes = downloaded.load(Ordering::Relaxed);
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+                let kb_per_sec = avg_kb_per_sec(bytes, elapsed_ms);
+                crate::local_db::record_audit(
+                    app,
+                    "perf.update_download",
+                    &format!("{{\"ms\":{elapsed_ms},\"bytes\":{bytes},\"kb_per_sec\":{kb_per_sec:.1}}}"),
+                );
+                let _ = app.emit(
+                    EVENT_UPDATE_INSTALLING,
+                    UpdateInstallStats { downloaded: bytes, elapsed_ms, kb_per_sec },
+                );
             },
         )
         .await
@@ -378,8 +429,36 @@ mod tests {
     }
 
     #[test]
-    fn check_unreachable_endpoint_returns_error_not_panic() {
-        // 真实 conf（含占位 pubkey）+ updater 插件；build() 不进事件循环、不创建窗口。
+    fn avg_kb_per_sec_computation_and_guards() {
+        // M51-E 下载速率：1KB/1s = 1.0；10MB/5s = 2048 KB/s
+        assert_eq!(avg_kb_per_sec(1024, 1000), 1.0);
+        assert_eq!(avg_kb_per_sec(10 * 1024 * 1024, 5000), 2048.0);
+        // 边界：0 字节 / 0 耗时 → 0（瞬时完成不给 inf 假值）
+        assert_eq!(avg_kb_per_sec(0, 1000), 0.0);
+        assert_eq!(avg_kb_per_sec(1024, 0), 0.0);
+        // 极小耗时不为 0 时结果有限（不产生 inf/NaN 进 JSON）
+        let v = avg_kb_per_sec(u64::MAX, 1);
+        assert!(v.is_finite() && v > 0.0);
+    }
+
+    #[test]
+    fn install_stats_payload_is_camel_case() {
+        // M51-E：installing 事件 payload 从 null 扩展为统计——camelCase 对齐前端
+        let v = serde_json::to_value(UpdateInstallStats {
+            downloaded: 2048,
+            elapsed_ms: 1500,
+            kb_per_sec: 1.4,
+        })
+        .expect("序列化失败");
+        assert_eq!(v.get("downloaded").and_then(|x| x.as_u64()), Some(2048));
+        assert_eq!(v.get("elapsedMs").and_then(|x| x.as_u64()), Some(1500));
+        assert!((v.get("kbPerSec").and_then(|x| x.as_f64()).unwrap() - 1.4).abs() < 1e-9);
+        let back: UpdateInstallStats = serde_json::from_value(v).expect("反序列化失败");
+        assert_eq!(back.elapsed_ms, 1500);
+    }
+
+    #[test]
+    fn check_unreachable_endpoint_returns_error_not_panic() {        // 真实 conf（含占位 pubkey）+ updater 插件；build() 不进事件循环、不创建窗口。
         // any_thread：cargo test 的用例跑在非主线程，Windows 上 tao 事件循环默认
         // 拒绝（Builder::any_thread 即为该场景提供的逃生舱）。
         // 127.0.0.1:1 = connection refused，不依赖外网。

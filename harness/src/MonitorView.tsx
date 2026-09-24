@@ -27,6 +27,8 @@ type PlatformConversation = {
 };
 type MessageRow = { id: number; role: string; content: string; created_at: string };
 type LocalSession = { id: string; agent: string; input: string; answer: string; created_at: string };
+// M51-E 本机性能：本地审计表 perf.* 行（harness_audit_list prefix="perf."）
+type PerfEntry = { id: number; action: string; detail: string; created_at: string };
 
 type NavView = "quick" | "skills" | "privacy";
 
@@ -57,6 +59,86 @@ export function formatTime(raw: string): string {
   }
   const d = new Date(raw.includes("T") ? raw : raw.replace(" ", "T"));
   return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
+}
+
+// ---- M51-E 本机性能聚合（纯函数，数据源=本地 audit 表 perf.* 行）----
+
+/** perf 类别 → 中文标签（与 perf.ts 头注释的类别清单一一对应） */
+export const PERF_LABELS: Record<string, string> = {
+  platform_stream: "平台流式调用",
+  local_model: "本地模型调用",
+  skill_pull: "技能包拉取",
+  agent_list: "Agent 目录",
+  audit_report: "审计上报",
+  update_download: "更新下载",
+};
+/** 展示顺序（未列出的类别排在后面按字母序） */
+const PERF_ORDER = ["platform_stream", "local_model", "skill_pull", "agent_list", "audit_report", "update_download"];
+
+export type PerfAgg = {
+  key: string;
+  label: string;
+  n: number;
+  avgMs: number | null;       // 无 ms 样本时为 null（区分「0ms」与「无数据」）
+  maxMs: number | null;
+  avgTtfbMs: number | null;   // 流式调用首字节
+  avgBytes: number | null;    // skill_pull 包大小 / update_download 下载量
+  avgKbps: number | null;     // update_download 平均速率
+  avgCount: number | null;    // agent_list 条数 / audit_report 批量
+};
+
+function avg(xs: number[]): number | null {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
+
+/** 解析 perf.* 行 detail JSON 并按类别聚合；detail 脏数据（非 JSON）静默跳过 */
+export function aggregatePerf(entries: PerfEntry[]): PerfAgg[] {
+  const buckets = new Map<string, { ms: number[]; ttfb: number[]; bytes: number[]; kbps: number[]; count: number[] }>();
+  for (const e of entries) {
+    if (!e.action.startsWith("perf.")) continue;
+    const key = e.action.slice("perf.".length);
+    let d: Record<string, unknown>;
+    try { d = JSON.parse(e.detail) as Record<string, unknown>; } catch { continue; }
+    let b = buckets.get(key);
+    if (!b) { b = { ms: [], ttfb: [], bytes: [], kbps: [], count: [] }; buckets.set(key, b); }
+    if (typeof d.ms === "number") b.ms.push(d.ms);
+    if (typeof d.ttfb_ms === "number") b.ttfb.push(d.ttfb_ms);
+    if (typeof d.bytes === "number") b.bytes.push(d.bytes);
+    if (typeof d.kb_per_sec === "number") b.kbps.push(d.kb_per_sec);
+    if (typeof d.count === "number") b.count.push(d.count);
+  }
+  const keys = [...buckets.keys()].sort((a, b) => {
+    const ia = PERF_ORDER.indexOf(a), ib = PERF_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+  return keys.map(key => {
+    const b = buckets.get(key)!;
+    const a = avg(b.ms);
+    return {
+      key,
+      label: PERF_LABELS[key] ?? key,
+      n: Math.max(b.ms.length, b.bytes.length, b.kbps.length, b.count.length),
+      avgMs: a === null ? null : Math.round(a),
+      maxMs: b.ms.length ? Math.max(...b.ms) : null,
+      avgTtfbMs: avg(b.ttfb.map(Math.round)),
+      avgBytes: avg(b.bytes.map(Math.round)),
+      avgKbps: avg(b.kbps.map(x => Math.round(x * 10) / 10)),
+      avgCount: avg(b.count.map(x => Math.round(x * 10) / 10)),
+    };
+  });
+}
+
+/** 关键指标列文案（按类别取最有信息量的维度） */
+export function perfExtra(p: PerfAgg): string {
+  const parts: string[] = [];
+  if (p.avgTtfbMs !== null) parts.push(`TTFB 均 ${p.avgTtfbMs}ms`);
+  if (p.key === "skill_pull" && p.avgBytes !== null) parts.push(`包均 ${(p.avgBytes / 1024).toFixed(0)}KB`);
+  if (p.key === "update_download") {
+    if (p.avgBytes !== null) parts.push(`包均 ${(p.avgBytes / 1024 / 1024).toFixed(1)}MB`);
+    if (p.avgKbps !== null) parts.push(`均速 ${p.avgKbps.toFixed(0)}KB/s`);
+  }
+  if (p.avgCount !== null && (p.key === "agent_list" || p.key === "audit_report")) parts.push(`均 ${p.avgCount} 条`);
+  return parts.length ? parts.join(" · ") : "—";
 }
 
 // 平台 GET 统一入口：设备 Key 鉴权 + 8s 超时（网络错误/超时统一抛出 → 上层判离线）
@@ -110,6 +192,8 @@ export default function MonitorView(props: {
   const [platformOffline, setPlatformOffline] = useState(false);
   const [platformError, setPlatformError] = useState("");
   const [localSessions, setLocalSessions] = useState<LocalSession[]>([]);
+  // M51-E 本机性能：最近 perf.* 审计行（30s 轮询随 loadLocal 刷新）
+  const [perfEntries, setPerfEntries] = useState<PerfEntry[]>([]);
   const [filter, setFilter] = useState<string>("ALL");
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState("");
@@ -157,6 +241,10 @@ export default function MonitorView(props: {
     try {
       setLocalSessions(await invoke<LocalSession[]>("list_sessions", { limit: 100 }));
     } catch { /* 本地仓读取失败静默（监控页不以本地数据为阻断） */ }
+    // M51-E：最近 200 条 perf.* 行（本地 SQLite 审计表，不出端）——聚合展示于「本机性能」
+    try {
+      setPerfEntries(await invoke<PerfEntry[]>("harness_audit_list", { prefix: "perf.", limit: 200 }));
+    } catch { /* 静默：性能区块非监控页阻断项 */ }
   }, []);
 
   const loadAll = useCallback(async () => {
@@ -200,6 +288,8 @@ export default function MonitorView(props: {
   const listRows = filter === "ALL"
     ? all.filter(t => t.state !== "WAITING_HUMAN") // 全部视图：待办已置顶，不重复展示
     : all.filter(t => t.state === filter);
+  // M51-E：perf.* 行按类别聚合（纯函数，detail 脏数据自动跳过）
+  const perfAggs = aggregatePerf(perfEntries);
 
   function taskRow(t: TaskView, isWaiting: boolean) {
     const b = stateBadge(t.state);
@@ -346,6 +436,35 @@ export default function MonitorView(props: {
             {hasKey && !platformDown && platformConvos !== null && platformConvos.map(platformRow)}
           </div>
         </div>
+      </fieldset>
+
+      {/* M51-E 本机性能：最近 200 条 perf.* 审计行按类别聚合——数据源=本机 SQLite
+          审计表（不出端；上报与否见隐私清单「审计上报」开关）。诚实说明：时长为
+          前端 performance.now 计时（update_download 为 Rust 侧 Instant），非 OTel
+          分布式 span——docs/08 §SLO 的 Harness span 上报属后续批次 */}
+      <fieldset>
+        <legend>本机性能（M51-E · 最近 {perfEntries.length} 条 perf.* · 按类别聚合）</legend>
+        {perfAggs.length === 0 && (
+          <p className="m40-hint">（暂无性能记录——快捷调用/技能拉取/审计上报/更新下载后自动采集）</p>
+        )}
+        {perfAggs.length > 0 && (
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+            <thead><tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+              <th style={{ padding: 6 }}>类别</th><th>次数</th><th>平均时长</th><th>最大时长</th><th>关键指标</th>
+            </tr></thead>
+            <tbody>
+              {perfAggs.map(p => (
+                <tr key={p.key} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: 6 }}>{p.label} <small style={{ color: "#888" }}>perf.{p.key}</small></td>
+                  <td>{p.n}</td>
+                  <td>{p.avgMs !== null ? `${p.avgMs}ms` : "—"}</td>
+                  <td>{p.maxMs !== null ? `${p.maxMs}ms` : "—"}</td>
+                  <td style={{ color: "#555" }}>{perfExtra(p)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </fieldset>
     </div>
   );

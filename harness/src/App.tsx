@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import MonitorView from "./MonitorView";
+import MonitorView, { formatTime } from "./MonitorView";
+// M51-E 性能度量采集：mark/elapsedMs 计时 + recordPerf 静默写 perf 审计行（perf.ts）
+import { elapsedMs, mark, recordPerf, truncate512 } from "./perf";
 
 type Agent = { name: string; description?: string; status?: string };
 type DataMode = "local" | "cloud-personal" | "cloud-org";
@@ -23,6 +25,8 @@ type Domain = "filesystem" | "network" | "process" | "browser";
 type Grants = Record<Domain, boolean>;
 type AssetMeta = { path: string; size: number; sha256: string };
 type AuditEntry = { id: number; action: string; detail: string; created_at: string };
+// M51-E 崩溃诊断：crashes/ 日志元信息（crash_list 返回；modified=epoch 秒字符串）
+type CrashMeta = { name: string; size: number; modified: string };
 type SkillEntry = {
   name: string;
   version: string;
@@ -142,6 +146,11 @@ export default function App() {
   const [reportBusy, setReportBusy] = useState(false);
   const [unreported, setUnreported] = useState<AuditEntry[]>([]);
 
+  // ---- 崩溃诊断（M51-E）状态：隐私页「崩溃诊断」区块 ----
+  const [crashes, setCrashes] = useState<CrashMeta[]>([]);
+  const [crashView, setCrashView] = useState<{ name: string; text: string } | null>(null);
+  const [crashMsg, setCrashMsg] = useState("");
+
   // M46-B 安装进度事件监听的卸载清理兜底：正常由 installUpdateNow 的 finally
   // unlisten；极端情况下（安装中组件卸载——本组件为根组件正常不卸载，防御性
   // 兜底）也不泄漏监听。
@@ -164,9 +173,10 @@ export default function App() {
     return r.status === 401 ? "设备凭证已失效（可能被远程吊销）" : `HTTP ${r.status}`;
   }
 
-  // Agent 目录订阅（M37-3）：设备 Key → 目录 → 本地状态
+  // Agent 目录订阅（M37-3）：设备 Key → 目录 → 本地状态；M51-E：时长写 perf.agent_list
   async function loadAgents() {
     setError("");
+    const t0 = mark();
     try {
       const r = await fetch(`${settings.baseUrl}/api/v1/agents`, {
         headers: { Authorization: `Bearer ${settings.deviceKey}` },
@@ -177,6 +187,7 @@ export default function App() {
       setAgents(list);
       setDeviceStatus("ok");
       if (list.length && !active) setActive(list[0].name);
+      recordPerf("agent_list", { ms: elapsedMs(t0), count: list.length });
     } catch (e) {
       setError(`目录订阅失败：${(e as Error).message}`);
     }
@@ -234,24 +245,37 @@ export default function App() {
     return () => { alive = false; clearTimeout(first); clearInterval(t); };
   }, [settings.updateEndpoint, settings.updatePubkey]);
 
-  // SSE 响应体统一消费：逐行提取 data: 载荷（M43-B 从快捷调用中拆出，平台与本地模型共用）
-  async function consumeSSE(r: Response, onData: (payload: string) => void) {
+  // SSE 响应体统一消费：逐行提取 data: 载荷（M43-B 从快捷调用中拆出，平台与本地模型共用）。
+  // M51-E：传入 t0 时顺带统计 TTFB（首个数据块到达耗时 ms）与总字节数，返回给调用点写 perf 审计
+  async function consumeSSE(
+    r: Response,
+    onData: (payload: string) => void,
+    t0?: number,
+  ): Promise<{ bytes: number; ttfbMs: number | null }> {
     const reader = r.body!.getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    let bytes = 0;
+    let ttfbMs: number | null = null;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (value) {
+        bytes += value.byteLength;
+        if (ttfbMs === null && t0 !== undefined) ttfbMs = elapsedMs(t0);
+      }
       buf += decoder.decode(value, { stream: true });
       for (const line of buf.split("\n")) {
         if (line.startsWith("data:")) onData(line.slice(5).trim());
       }
       buf = buf.slice(buf.lastIndexOf("\n") + 1);
     }
+    return { bytes, ttfbMs };
   }
 
-  // 平台流式调用（agents invocations，M37 协议不变）
+  // 平台流式调用（agents invocations，M37 协议不变）；M51-E：TTFB+总时长写 perf.platform_stream
   async function streamPlatformCall(agentName: string, text: string, acc: { v: string }) {
+    const t0 = mark();
     const r = await fetch(`${settings.baseUrl}/api/v1/agents/${encodeURIComponent(agentName)}/invocations`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
@@ -259,17 +283,23 @@ export default function App() {
     });
     checkAuthStatus(r);
     if (!r.ok || !r.body) throw new Error(httpError(r));
-    await consumeSSE(r, payload => {
+    const stats = await consumeSSE(r, payload => {
       try {
         const ev = JSON.parse(payload);
         if (ev.event === "token" && ev.data?.content) { acc.v += ev.data.content; setAnswer(a => a + ev.data.content); }
         if (ev.event === "result" && ev.data?.content) { acc.v = ev.data.content; setAnswer(ev.data.content); }
       } catch { /* 非 JSON 行跳过 */ }
+    }, t0);
+    // 仅成功路径记时长（失败计时是网络噪声，不入指标）；recordPerf 内部静默
+    recordPerf("platform_stream", {
+      ms: elapsedMs(t0), ttfb_ms: stats.ttfbMs ?? undefined, bytes: stats.bytes, agent: agentName,
     });
   }
 
-  // 本地小模型流式调用（M43-B 离线降级）：OpenAI 兼容 chat/completions（Ollama 等本地推理服务）
+  // 本地小模型流式调用（M43-B 离线降级）：OpenAI 兼容 chat/completions（Ollama 等本地推理服务）；
+  // M51-E：时长写 perf.local_model
   async function streamLocalCall(text: string, acc: { v: string }) {
+    const t0 = mark();
     const url = settings.localModelUrl.replace(/\/+$/, "");
     const r = await fetch(`${url}/chat/completions`, {
       method: "POST",
@@ -277,13 +307,16 @@ export default function App() {
       body: JSON.stringify({ model: settings.localModelName, messages: [{ role: "user", content: text }], stream: true }),
     });
     if (!r.ok || !r.body) throw new Error(`本地模型 HTTP ${r.status}`);
-    await consumeSSE(r, payload => {
+    const stats = await consumeSSE(r, payload => {
       if (!payload || payload === "[DONE]") return;
       try {
         const j = JSON.parse(payload);
         const piece = j.choices?.[0]?.delta?.content;
         if (piece) { acc.v += piece; setAnswer(a => a + piece); }
       } catch { /* 非 JSON 行跳过 */ }
+    }, t0);
+    recordPerf("local_model", {
+      ms: elapsedMs(t0), ttfb_ms: stats.ttfbMs ?? undefined, bytes: stats.bytes, model: settings.localModelName,
     });
   }
 
@@ -363,12 +396,51 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
       const pending = await invoke<AuditEntry[]>("harness_audit_unreported", { limit: 500 });
       setUnreported(pending);
     } catch { setUnreported([]); }
+    await loadCrashes(); // M51-E 崩溃诊断列表随隐私页加载
   }
   useEffect(() => { if (view === "privacy") void loadPrivacy(); /* eslint-disable-line */ }, [view]);
 
   async function clearScope(scope: string) {
     await invoke("clear_local", { scope });
     await loadPrivacy();
+  }
+
+  // ---- M51-E 崩溃诊断（隐私页区块）：列表/查看/导出/一键清除 ----
+
+  async function loadCrashes() {
+    try { setCrashes(await invoke<CrashMeta[]>("crash_list")); } catch { setCrashes([]); }
+  }
+
+  async function viewCrash(name: string) {
+    setCrashMsg("");
+    try {
+      setCrashView({ name, text: await invoke<string>("crash_read", { name }) });
+    } catch (e) {
+      setCrashMsg(`读取失败：${(e as Error).message}`);
+    }
+  }
+
+  async function exportCrash(name: string) {
+    setCrashMsg("");
+    try {
+      // Rust 侧 plugin-dialog save 对话框（取消 → null）
+      const saved = await invoke<string | null>("crash_export", { name });
+      setCrashMsg(saved ? `已导出到 ${saved}` : "已取消导出");
+    } catch (e) {
+      setCrashMsg(`导出失败：${(e as Error).message}`);
+    }
+  }
+
+  async function clearCrashes() {
+    if (!window.confirm("清除全部本机崩溃日志？（crash.* 审计行不在此列——用上方审计清除）")) return;
+    setCrashMsg(""); setCrashView(null);
+    try {
+      const n = await invoke<number>("crash_clear");
+      setCrashMsg(`已清除 ${n} 个崩溃日志`);
+    } catch (e) {
+      setCrashMsg(`清除失败：${(e as Error).message}`);
+    }
+    await loadCrashes();
   }
 
   // 本地模型连通性探测（M43-B + M49-F）：先走 OpenAI 兼容 GET {localModelUrl}/models，
@@ -472,10 +544,19 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
         "update://progress",
         e => setUpdateProgress(e.payload),
       );
-      unlistenInstalling = await listen("update://installing", () => {
-        setUpdateInstalling(true);
-        setUpdateMsg("下载完成，正在安装…");
-      });
+      unlistenInstalling = await listen<{ downloaded: number; elapsedMs: number; kbPerSec: number } | null>(
+        "update://installing",
+        e => {
+          setUpdateInstalling(true);
+          // M51-E：payload 从 null 扩展为下载统计（耗时/平均速率；旧 Rust 侧发 null 容错）。
+          // perf.update_download 审计行由 Rust 侧单写（Windows NSIS 装完即退进程，
+          // 前端 invoke 有竞态丢行风险）——此处仅展示，不重复写
+          const s = e.payload;
+          setUpdateMsg(s
+            ? `下载完成（${fmtMB(s.downloaded)} MB · ${(s.elapsedMs / 1000).toFixed(1)}s · ${Math.round(s.kbPerSec)} KB/s），正在安装…`
+            : "下载完成，正在安装…");
+        },
+      );
       updateUnlistenRef.current = [unlistenProgress, unlistenInstalling];
       await invoke("install_update", { endpoint: settings.updateEndpoint, pubkey: settings.updatePubkey });
       setUpdateMsg("安装完成，应用即将重启…"); // Windows 实际到不了这里（进程已退出）
@@ -492,21 +573,27 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
   }
 
   // 审计上报（M41-B，企业可选·显式开启）：本地读取未上报 → 前端 fetch 上报平台 → 标记已上报。
-  // 仅上报技能执行类（action 以 skill 开头），不含会话/记忆/清除动作（更不含对话内容）。
-  function reportableSkillEntries(entries: AuditEntry[]): AuditEntry[] {
-    return entries.filter(e => e.action.startsWith("skill")).slice(0, 500);
+  // M51-E 放行范围扩展：技能执行类（skill*）+ 性能指标（perf.*）+ 崩溃诊断（crash.*）——
+  // 均不含对话内容/记忆/参数（perf detail=紧凑指标 JSON；crash detail=消息摘要 ≤512）。
+  // 会话/记忆/清除动作仍不入批。同意开关语义不变：默认关闭、显式开启才出端。
+  // 批次 ≤500 对齐平台单批上限；detail 前端 512 预截断省流量（平台 audit.py 兜底截断）。
+  function reportableEntries(entries: AuditEntry[]): AuditEntry[] {
+    return entries
+      .filter(e => e.action.startsWith("skill") || e.action.startsWith("perf.") || e.action.startsWith("crash."))
+      .slice(0, 500);
   }
 
   async function reportAuditNow() {
     setReportBusy(true); setReportMsg(""); setError("");
+    const t0 = mark();
     try {
-      const candidates = reportableSkillEntries(unreported);
-      if (candidates.length === 0) { setReportMsg("没有待上报的技能执行审计"); return; }
+      const candidates = reportableEntries(unreported);
+      if (candidates.length === 0) { setReportMsg("没有待上报的审计（技能/性能/崩溃）"); return; }
       const r = await fetch(`${settings.baseUrl}/api/v1/audit/harness-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.deviceKey}` },
         body: JSON.stringify({
-          entries: candidates.map(e => ({ action: e.action, detail: e.detail, created_at: e.created_at })),
+          entries: candidates.map(e => ({ action: e.action, detail: truncate512(e.detail), created_at: e.created_at })),
         }),
       });
       checkAuthStatus(r);
@@ -515,6 +602,7 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
       const ids = candidates.map(e => e.id);
       const marked = await invoke<number>("harness_audit_mark_reported", { ids });
       setReportMsg(`已上报 ${j.accepted ?? ids.length} 条（本地标记 ${marked} 条）`);
+      recordPerf("audit_report", { ms: elapsedMs(t0), count: candidates.length, accepted: Number(j.accepted ?? ids.length) });
       await loadPrivacy();
     } catch (e) {
       setReportMsg(`上报失败：${(e as Error).message}（本地标记未动，可重试）`);
@@ -574,10 +662,12 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
     }
   }
 
-  // 从平台技能中心拉取签名包（GET /api/v1/skills/{name}/package）
+  // 从平台技能中心拉取签名包（GET /api/v1/skills/{name}/package）；
+  // M51-E：时长+包大小写 perf.skill_pull（Content-Length 可得优先，否则按紧凑 JSON UTF-8 字节数）
   async function pullPackage() {
     if (!pullName.trim()) return;
     setError("");
+    const t0 = mark();
     try {
       const r = await fetch(`${settings.baseUrl}/api/v1/skills/${encodeURIComponent(pullName.trim())}/package`, {
         headers: { Authorization: `Bearer ${settings.deviceKey}` },
@@ -586,6 +676,11 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || httpError(r));
       setBundleText(JSON.stringify(j, null, 2));
+      const headerLen = Number(r.headers.get("content-length"));
+      const bytes = Number.isFinite(headerLen) && headerLen > 0
+        ? headerLen
+        : new TextEncoder().encode(JSON.stringify(j)).length;
+      recordPerf("skill_pull", { ms: elapsedMs(t0), bytes, name: pullName.trim() });
     } catch (e) {
       setError(`拉取技能包失败：${(e as Error).message}`);
     }
@@ -893,16 +988,21 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
                 onClick={() => setError("云端清除请到平台控制台 → Memory 页操作（按 scope/user 过滤）")}>前往平台清除</button></td></tr>
             <tr><td style={{ padding: 6 }}>技能执行审计</td><td>本机 SQLite</td><td>仅本机</td><td>—</td>
               <td><button onClick={() => clearScope("audit")}>清除</button></td></tr>
+            {/* M51-E：性能指标（perf.*）同存审计表，随「技能执行审计」行清除；崩溃日志单列 */}
+            <tr><td style={{ padding: 6 }}>崩溃日志（crashes/ 目录）</td><td>本机文件</td><td>仅本机</td>
+              <td>{crashes.length}</td>
+              <td><button onClick={() => clearScope("crashes")}>清除</button></td></tr>
           </tbody>
         </table>
         <button onClick={() => clearScope("all")} style={{ color: "#c0392b" }}>一键清除全部本地数据</button>
 
         {/* 审计上报（M41-B，docs/18 GA 项）：企业可选 · 用户可见 · 显式开启 */}
         <fieldset>
-          <legend>审计上报 <small style={{ color: "#888" }}>企业可选 · 默认关闭（M41-B）</small></legend>
+          <legend>审计上报 <small style={{ color: "#888" }}>企业可选 · 默认关闭（M41-B / M51-E 扩展）</small></legend>
           <p style={{ margin: "4px 0", color: "#555" }}>
-            开启后可把本机「技能执行类审计」（安装/运行/拒绝的动作名与时间）批量上报到平台，
-            供企业安全侧留存。<strong>不包含对话内容、记忆与参数</strong>；未开启时审计数据仅存本机。
+            开启后可把本机「技能执行 / 性能指标 / 崩溃诊断」审计（动作名、时间与紧凑指标 JSON
+            或消息摘要）批量上报到平台，供企业安全侧留存。
+            <strong>不包含对话内容、记忆与参数</strong>；未开启时审计数据仅存本机。
             上报使用上方连接设置（平台地址 + 设备 Key），平台侧动作强制 harness. 前缀、只认设备凭证。
           </p>
           <label>
@@ -912,13 +1012,64 @@ A: ${acc.v.slice(0, 500)}`, importance: 0.5 }),
           </label>
           <p style={{ margin: "4px 0" }}>
             上报状态：<strong>{settings.reportAudit ? "已开启" : "关闭（数据不出端）"}</strong>
-            {" · "}未上报技能审计：<strong>{reportableSkillEntries(unreported).length}</strong> 条
+            {" · "}未上报可上报审计（技能/性能/崩溃）：<strong>{reportableEntries(unreported).length}</strong> 条
           </p>
           <button onClick={reportAuditNow} disabled={!settings.reportAudit || reportBusy || !settings.deviceKey}>
             {reportBusy ? "上报中…" : "立即上报"}
           </button>{" "}
           {!settings.deviceKey && <small style={{ color: "#c0392b" }}>需先在连接设置配置设备 Key</small>}
           {reportMsg && <p style={{ margin: "4px 0", color: reportMsg.startsWith("上报失败") ? "#c0392b" : "#1e7e34" }}>{reportMsg}</p>}
+        </fieldset>
+
+        {/* M51-E 崩溃诊断（选型无关最小准备）：crashes/ 日志 + crash.* 审计双写 */}
+        <fieldset>
+          <legend>崩溃诊断 <small style={{ color: "#888" }}>本机 crashes/ 日志 · 最近在前（M51-E）</small></legend>
+          <p style={{ margin: "4px 0", color: "#555" }}>
+            覆盖面：JS 运行时错误（window.onerror / unhandledrejection / React 渲染异常）与 Rust
+            panic——双写本机日志文件与 crash.* 审计行（消息摘要 ≤512 字符）。
+            <strong>如实说明局限</strong>：进程级 abort/栈溢出与 WebView2 渲染进程崩溃不在本机制
+            覆盖内（Windows SEH/独立进程层面），Sentry/breakpad 级全覆盖属上报选型确定后事项。
+            {settings.reportAudit
+              ? " 审计上报已开启：crash.* 行会随批量上报到平台（日志文件本体永不出端）。"
+              : " 审计上报未开启：崩溃记录仅存本机。"}
+          </p>
+          {crashes.length === 0 && <p style={{ color: "#888", margin: 4 }}>（暂无崩溃记录）</p>}
+          {crashes.length > 0 && (
+            <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+              <thead><tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+                <th style={{ padding: 6 }}>文件</th><th>大小</th><th>时间</th><th>操作</th>
+              </tr></thead>
+              <tbody>
+                {crashes.map(c => (
+                  <tr key={c.name} style={{ borderBottom: "1px solid #eee" }}>
+                    <td style={{ padding: 6, fontFamily: "monospace", fontSize: 12, wordBreak: "break-all" }}>{c.name}</td>
+                    <td>{(c.size / 1024).toFixed(1)} KB</td>
+                    <td><small>{formatTime(c.modified)}</small></td>
+                    <td>
+                      <button onClick={() => void viewCrash(c.name)}>查看</button>{" "}
+                      <button onClick={() => void exportCrash(c.name)}>导出…</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {crashView && (
+            <div style={{ marginTop: 8 }}>
+              <strong style={{ fontSize: 13 }}>{crashView.name}</strong>{" "}
+              <button onClick={() => setCrashView(null)}>收起</button>
+              <pre style={{ background: "#f6f8fa", padding: 12, borderRadius: 8, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 240, overflow: "auto", fontSize: 12 }}>
+                {crashView.text}
+              </pre>
+            </div>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <button onClick={clearCrashes} disabled={crashes.length === 0} style={{ color: "#c0392b" }}>
+              一键清除崩溃日志
+            </button>{" "}
+            <small style={{ color: "#888" }}>（上方「一键清除全部本地数据」也会清除）</small>
+          </div>
+          {crashMsg && <p style={{ margin: "4px 0", color: crashMsg.includes("失败") ? "#c0392b" : "#1e7e34" }}>{crashMsg}</p>}
         </fieldset>
 
         <button onClick={() => setView("quick")}>← 返回快捷调用</button>
