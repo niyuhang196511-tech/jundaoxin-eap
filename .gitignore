@@ -17,6 +17,7 @@ eap/src/eap/static/console/
 # 工具状态目录
 .mimosa/
 .zcode/
+.zcodeignore
 # 系统文件
 Thumbs.db
 .DS_Store

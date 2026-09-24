@@ -127,7 +127,11 @@ services:
       - console
     restart: unless-stopped
 
-  # 数据库定时备份（复用 eap 镜像内 scripts/drill_restore.py；M47-C 扩展 --media-dir 一并备份媒体卷）
+  # 数据库备份（复用 eap 镜像内 scripts/drill_restore.py；M47-C 扩展 --media-dir 一并备份媒体卷）
+  # 一次性任务语义（restart: "no"），本服务不自带调度；定时化三选一（M48-D）：
+  #   1) 手动 / 宿主 cron：docker compose run --rm backup（crontab 直调见 runbook §3）
+  #   2) Kubernetes CronJob：deploy/k8s-cronjob-backup.yaml（每日 02:00，pg_dump + 媒体 tar 双 initContainer）
+  #   3) systemd timer（单机/VM 非容器化）：deploy/systemd/eap-backup.{service,timer}（每日 02:00，Persistent 停机补跑）
   backup:
     image: ${EAP_IMAGE:-ghcr.io/example/eap:${EAP_VERSION:-latest}}
     env_file: .env.prod
@@ -142,7 +146,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    restart: "no"
 
   # ---- Milvus 向量栈（可选：.env.prod 设 COMPOSE_PROFILES=milvus 或 --profile milvus 启用）----
   etcd:

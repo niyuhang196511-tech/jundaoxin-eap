@@ -1,0 +1,10 @@
+[Unit]
+Description=EAP daily backup timer（每日 02:00，见 eap-backup.service）
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true                 # 错过触发点（停机）开机后补跑
+RandomizedDelaySec=300          # 抖动 5 分钟，避免整点风暴
+
+[Install]
+WantedBy=timers.target

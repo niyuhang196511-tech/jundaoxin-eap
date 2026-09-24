@@ -1,0 +1,16 @@
+# EAP 备份失败告警——OnFailure 模板单元（被 eap-backup.service 的 OnFailure=eap-backup-alert@%n.service 引用）
+# 实例名 %i = 失败的单元名（如 eap-backup.service）。
+# 默认仅写 journal（journalctl -u 'eap-backup-alert@*' 查看）；若在 /opt/eap/.env 配置
+# EAP_BACKUP_ALERT_WEBHOOK（飞书/钉钉/企微等接受 JSON text 字段的群机器人，或 alertmanager webhook 适配端），
+# 则额外尝试 curl 推送一次（失败不重试，不影响 journal 记录——告警通道自身故障不应掩盖备份失败事实）。
+# 安装：sudo cp deploy/systemd/eap-backup-alert@.service /etc/systemd/system/ && sudo systemctl daemon-reload
+
+[Unit]
+Description=Alert: EAP backup unit %i failed
+
+[Service]
+Type=oneshot
+# 前缀 - ：文件不存在不报错（webhook 为可选配置）
+EnvironmentFile=-/opt/eap/.env
+# $$ 转义防止 systemd 预展开，变量由 sh 从单元环境读取
+ExecStart=/bin/sh -c 'echo "EAP backup FAILED: unit=%i detail=journalctl -u %i"; if [ -n "$${EAP_BACKUP_ALERT_WEBHOOK:-}" ]; then curl -fsS -m 10 -H "Content-Type: application/json" -d "{\"text\":\"EAP 备份失败: %i\"}" "$${EAP_BACKUP_ALERT_WEBHOOK}" || echo "alert webhook push failed (journal record unaffected)"; fi'

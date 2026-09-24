@@ -1,0 +1,61 @@
+# EAP 备份 CronJob（M48-D）：库（pg_dump）+ 媒体卷（tar+sha256 清单）每日备份到 PVC。
+# 恢复演练复用 scripts/drill_restore.py（drill --latest /backups --media /backups/eap-media-<stamp>.tar.gz）。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: eap-backup
+spec:
+  schedule: "0 2 * * *"            # 每日 02:00（对齐 runbook §3）
+  concurrencyPolicy: Forbid        # 上次未跑完不并发
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 7        # 失败保留现场
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: eap-backup-pvc
+            - name: media
+              persistentVolumeClaim:
+                claimName: eap-media-pvc
+          initContainers:
+            # pg_dump 与媒体打包同为 initContainer 顺序执行（主容器占位等待，语义清晰）
+            - name: pg-dump
+              image: postgres:16-alpine
+              envFrom:
+                - secretRef:
+                    name: eap-backup-db-url   # EAP_DB_URL=postgresql://user:pass@host:5432/db
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  OUT=/backups/eap-backup-$STAMP.dump
+                  pg_dump --format=custom --no-owner --no-privileges --file="$OUT"
+                  echo "写出 $OUT"
+            - name: media-tar
+              image: python:3.12-alpine
+              volumeMounts:
+                - name: media
+                  mountPath: /data/media:ro
+                - name: backups
+                  mountPath: /backups
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  tar -czf /backups/eap-media-$STAMP.tar.gz -C /data/media .
+                  cd /data/media && find . -type f -exec sha256sum {} \; > /backups/eap-media-$STAMP.tar.gz.sha256
+                  echo "媒体包与清单写出"
+          containers:
+            - name: done
+              image: busybox:1.36
+              command: ["echo", "backup job finished"]

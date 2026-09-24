@@ -1,0 +1,22 @@
+# EAP 备份调度——systemd timer 形态（M48-D，单机/VM 部署；k8s 见 k8s-cronjob-backup.yaml）
+# 两个单元：eap-backup.service（执行）+ eap-backup.timer（每日 02:00 触发）。
+# 安装（alert 模板单元为 OnFailure 依赖，需一并安装）：
+#   sudo cp deploy/systemd/eap-backup.service deploy/systemd/eap-backup.timer \
+#           deploy/systemd/eap-backup-alert@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now eap-backup.timer
+#   systemctl list-timers eap-backup.timer   # 确认下次触发
+
+[Unit]
+Description=EAP daily backup (DB via drill_restore.py + media tar)
+After=network-online.target eap.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 部署目录按实际调整（drill_restore.py 位于仓库 scripts/）
+WorkingDirectory=/opt/eap
+# 库备份 + 媒体目录一并打包（M47-C --media-dir）；EAP_DB_URL 从 /opt/eap/.env 读取
+EnvironmentFile=/opt/eap/.env
+ExecStart=/opt/eap/.venv/bin/python scripts/drill_restore.py backup --out /var/backups/eap --media-dir ${EAP_MEDIA_DIR}
+# 退出码：0 全绿 / 1 失败（失败由 OnFailure 模板单元 eap-backup-alert@.service 接手告警，见同目录）
+OnFailure=eap-backup-alert@%n.service
