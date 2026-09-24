@@ -458,11 +458,15 @@ def test_idempotency_replay_across_replicas(gw_settings, redis_url):
 
 
 @requires_redis
-def test_idempotency_inflight_cross_replica_waits_and_replays(gw_settings, redis_url):
+def test_idempotency_inflight_cross_replica_waits_and_replays(gw_settings, monkeypatch, redis_url):
     """在途跨副本合并：A 慢执行中 B 同键到达 → SETNX 失败短轮询等 A 完成后重放；标记用后即删。"""
     import redis as redis_sync
 
+    from eap.observability import gateway
     from eap.observability.gateway import IdempotencyMiddleware
+
+    # 满载回归下 B 的 2s 轮询预算会被 CPU 拖爆（M48 实测）——放大到 10s，语义不变
+    monkeypatch.setattr(gateway, "_IDEM_INFLIGHT_WAIT_S", 10.0)
 
     mw_a = IdempotencyMiddleware(app=None)
     mw_b = IdempotencyMiddleware(app=None)
