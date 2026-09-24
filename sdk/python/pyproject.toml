@@ -1,0 +1,59 @@
+# eap-sdk：EAP 平台扩展 SDK 的独立分发包（M50-C 打包就绪态）。
+#
+# 形态取舍（详见 sdk/python/README.md 与 docs/14 §四）：
+#   薄 re-export 层——包内只有 eap_sdk/__init__.py，全部契约符号运行时从平台包 eap
+#   再导出，零平台源码拷贝（单一事实源不变）。不采用 hatch sources 映射直接打包
+#   eap.ext 子树的方案：那会把平台代码复制进第二个发行版，造成 eap / eap-sdk 双重
+#   安装时同一 import 路径（eap.ext.*）由两个 dist 提供的遮蔽冲突。
+#
+# 版本单一事实源：eap/src/eap/__init__.py 的 __version__。
+#   构建期由 setup.py 从平台源码推导（sdist 异地重建走 PKG-INFO 回退、特殊场景
+#   走环境变量 EAP_SDK_VERSION），本文件声明 dynamic = ["version"] 不写死版本号，
+#   杜绝双处手改漂移。
+#
+# 依赖声明设计点：平台包 eap 未发布 PyPI，不能作为常规 dependencies 声明
+#   （pip/uv 无法从索引解析）。取舍 = 「无硬依赖 + import 期友好报错 + git 源 extra」：
+#   - dependencies 留空：装 eap-sdk 不会因解析不到 eap 而失败；
+#   - eap_sdk/__init__.py 检测平台缺失时抛带安装指引的 ModuleNotFoundError；
+#   - [platform-git] extra 提供机器可用的 git 源安装通道（需仓库读取权限）。
+
+[project]
+name = "eap-sdk"
+dynamic = ["version"]
+description = "EAP 平台扩展 SDK 独立分发包（薄 re-export 层）：Chunker/Reranker 基类、workflow 节点/模型供应商/连接器/UI 组件注册函数、Agent SDK 契约——契约源码单一事实源为平台包 eap，本包不含任何平台代码拷贝"
+readme = "README.md"
+requires-python = ">=3.12"
+# 仓库无 LICENSE 文件，许可证选择属发布前外部决策（docs/14 §四）：
+# 先以 LicenseRef-Proprietary 占位，发布时确定许可证后同步改此字段
+license = "LicenseRef-Proprietary"
+authors = [{ name = "EAP Team" }]
+keywords = ["eap", "sdk", "agent", "rag", "extension", "workflow", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# 平台包不在 PyPI：无硬依赖（见文件头注释的设计点说明）
+dependencies = []
+
+[project.optional-dependencies]
+# 平台包 git 源安装通道（需仓库读取权限）：uv pip install "eap-sdk[platform-git]"
+platform-git = [
+    "eap @ git+https://github.com/niyuhang196511-tech/jundaoxin-eap.git#subdirectory=eap",
+]
+
+[project.urls]
+Homepage = "https://github.com/niyuhang196511-tech/jundaoxin-eap"
+Repository = "https://github.com/niyuhang196511-tech/jundaoxin-eap"
+Documentation = "https://github.com/niyuhang196511-tech/jundaoxin-eap/blob/main/docs/14-extension-sdk.md"
+Issues = "https://github.com/niyuhang196511-tech/jundaoxin-eap/issues"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

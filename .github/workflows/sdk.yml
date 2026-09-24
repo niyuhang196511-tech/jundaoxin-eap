@@ -1,0 +1,224 @@
+name: SDK
+
+# M50-C：SDK 独立包「打包就绪」流水线（成熟度盘点 P2 #16 可代码化半区）。
+#
+# 为什么独立文件而非并入 ci.yml：
+#   ① ci.yml 刚经 M49-C 改动（redis/pg services），独立文件与其零冲突面，
+#      也避免误碰既有 job；
+#   ② SDK 产物流水线自成一体（build → artifact → 门控 publish 占位），
+#      与平台测试主线关注点不同；
+#   ③ 触发面可用 paths 收敛：只在 SDK 目录、平台契约源（eap.ext /
+#      agents.sdk / widget 源 / 版本源）或本文件变更时跑。
+#
+# 触发条件选择：push(main) + pull_request（对齐 ci.yml 仓库习惯）——artifacts
+# 在评审期即可下载实测，比 tag 触发更有用；v* tag 发布是 release.yml（镜像）
+# 的领域，SDK 包「发布」属外部决策，走 workflow_dispatch + environment 双重
+# 门控的占位 job，不做 tag 自动触发。
+#
+# 本流水线只产 artifacts，绝不发布：publish-pypi / publish-npm 两个占位 job
+# 需 workflow_dispatch 且 publish=true，并绑定 GitHub environment（pypi/npm，
+# 可在仓库 Settings → Environments 配必需审批人）；实际发布步骤保持注释态，
+# 所需 secrets：PYPI_TOKEN（或改用 PyPI Trusted Publishing/OIDC 免 token）、
+# NPM_TOKEN——当前均未配置任何真实凭据。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/**"
+      - "eap/src/eap/ext/**"
+      - "eap/src/eap/agents/sdk.py"
+      - "eap/src/eap/runtime/tools.py"
+      - "eap/src/eap/static/eap-widget.js"
+      - "eap/src/eap/__init__.py"
+      - ".github/workflows/sdk.yml"
+  pull_request:
+    paths:
+      - "sdk/**"
+      - "eap/src/eap/ext/**"
+      - "eap/src/eap/agents/sdk.py"
+      - "eap/src/eap/runtime/tools.py"
+      - "eap/src/eap/static/eap-widget.js"
+      - "eap/src/eap/__init__.py"
+      - ".github/workflows/sdk.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "实际发布 eap-sdk→PyPI / @eap/widget→npm（前置：先完成 docs/14 §四 列出的外部动作，并配置 pypi/npm environment 与 secrets）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  python-sdk:
+    name: Python SDK (eap-sdk wheel+sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel & sdist (version derived from platform source at build time)
+        working-directory: sdk/python
+        run: uv build
+
+      - name: Drift guard (wheel METADATA version == platform __version__)
+        # 版本单一事实源守卫：eap/src/eap/__init__.py 是唯一手改处，
+        # 构建产物版本与之不一致即红（正常不可能，防 setup.py 回退来源误用）
+        run: |
+          uv run --no-project python - <<'PY'
+          import glob, pathlib, re, sys, zipfile
+          plat = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']',
+                           pathlib.Path('eap/src/eap/__init__.py').read_text(encoding='utf-8')).group(1)
+          whls = glob.glob('sdk/python/dist/*.whl')
+          assert whls, 'wheel 产物缺失'
+          with zipfile.ZipFile(whls[0]) as z:
+              meta = z.read(next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))).decode()
+          ver = re.search(r'^Version:\s*(\S+)', meta, re.M).group(1)
+          if ver != plat:
+              sys.exit(f'版本漂移：wheel={ver} platform={plat}')
+          print(f'drift guard OK: eap-sdk {ver} == platform {plat}')
+          PY
+
+      - name: "Smoke install (temp venv: wheel + platform from source tree)"
+        # 模拟真实使用：平台包以源码树路径安装（未发布 PyPI 的现实通道），
+        # 再装 wheel，验证 re-export 契约面全部可导入、版本动态读取正确
+        run: |
+          uv venv /tmp/eap-sdk-smoke
+          uv pip install --python /tmp/eap-sdk-smoke/bin/python ./eap sdk/python/dist/eap_sdk-*.whl
+          /tmp/eap-sdk-smoke/bin/python - <<'PY'
+          import eap
+          import eap_sdk
+          from eap_sdk import (AgentApp, AgentManifest, Chunker, InvokeRequest, InvokeResult,
+                               PlatformContext, Reranker, Retriever, Tool, register_agent,
+                               register_chunker, register_connector_kind, register_provider,
+                               register_reranker, register_ui_component, register_workflow_node,
+                               retriever_tool, ui_components, workflow_node_executors)
+          assert eap_sdk.__version__ == eap.__version__, 'SDK 版本与平台版本不一致'
+          from eap.ext import Chunker as _C
+          assert Chunker is _C, 're-export 不是同一对象（出现了平台代码拷贝？）'
+          print(f'eap_sdk {eap_sdk.__version__}: re-export 契约面 OK')
+          PY
+
+      - name: Verify sdist is rebuildable (PKG-INFO version fallback)
+        # sdist 解包到 /tmp（平台源码不在场）：版本须走 PKG-INFO 回退推导，
+        # 重建 wheel 成功即证明 sdist 自足
+        run: |
+          rm -rf /tmp/sdist-rebuild && mkdir -p /tmp/sdist-rebuild
+          tar -xzf sdk/python/dist/eap_sdk-*.tar.gz -C /tmp/sdist-rebuild --strip-components=1
+          uv build --wheel /tmp/sdist-rebuild --out-dir /tmp/sdist-wheel
+          ls /tmp/sdist-wheel/*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eap-sdk-python
+          path: sdk/python/dist/*
+          if-no-files-found: error
+
+  widget-sdk:
+    name: Widget SDK (@eap/widget tarball)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # 不开 pnpm cache：sdk/widget 零依赖、无 lockfile
+
+      - name: Build (source pulled from platform at build time + version banner)
+        working-directory: sdk/widget
+        run: node scripts/build.mjs
+
+      - name: Drift guard (package.json version == platform __version__)
+        working-directory: sdk/widget
+        run: node scripts/build.mjs --check
+
+      - name: Pack tarball (prepack hook rebuilds dist)
+        working-directory: sdk/widget
+        run: pnpm pack
+
+      - name: Verify tarball contents (dist with banner + README + package.json)
+        working-directory: sdk/widget
+        run: |
+          tgz=$(ls eap-widget-*.tgz)
+          echo "== $tgz =="
+          tar -tzf "$tgz"
+          tar -tzf "$tgz" | grep -qx package/dist/eap-widget.js
+          tar -tzf "$tgz" | grep -qx package/README.md
+          tar -tzf "$tgz" | grep -qx package/package.json
+          rm -rf /tmp/widget-verify && mkdir -p /tmp/widget-verify
+          tar -xzf "$tgz" -C /tmp/widget-verify
+          head -1 /tmp/widget-verify/package/dist/eap-widget.js | grep -F '@eap/widget v'
+          node --check /tmp/widget-verify/package/dist/eap-widget.js
+          echo "tarball verify OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eap-widget-npm
+          path: |
+            sdk/widget/*.tgz
+            sdk/widget/dist/eap-widget.js
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish eap-sdk to PyPI (placeholder — gated, not wired)
+    # 双重门控：① 仅 workflow_dispatch 且 publish=true；② environment: pypi
+    # （Settings → Environments → pypi 可配必需审批人/分支限制；environment
+    # 未创建时本 job 也不会发布——实际发布步骤保持注释态）。
+    # 启用真实发布前需要的外部动作（docs/14 §四）：
+    #   · PyPI 账号/组织 + 包名 eap-sdk 保留（查名可用）
+    #   · secret：PYPI_TOKEN（或配置 PyPI Trusted Publishing/OIDC，免长期 token，推荐）
+    #   · 许可证字段从 LicenseRef-Proprietary 占位改为发布决定值
+    #   · 平台包 eap 是否上 PyPI 的决策（决定依赖声明形态是否升级）
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [python-sdk]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write   # PyPI Trusted Publishing（OIDC）预留；token 方案则仅需 PYPI_TOKEN
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: eap-sdk-python
+          path: dist
+      - name: Placeholder notice (real publish steps stay commented out)
+        run: |
+          echo "::notice::publish-pypi 为门控占位——artifacts 已就位（dist/），实际发布属外部决策。"
+          echo "启用方式：配置 PYPI_TOKEN secret（或 Trusted Publishing）后，取消下方注释步骤。"
+          ls -la dist/
+      # - name: Publish to PyPI (uncomment when external decisions are done)
+      #   run: uv publish --token "${{ secrets.PYPI_TOKEN }}" dist/*
+      #   # Trusted Publishing 替代方案（无 token）：
+      #   # run: uv publish --trusted-publishing always dist/*
+
+  publish-npm:
+    name: Publish @eap/widget to npm (placeholder — gated, not wired)
+    # 门控与前置同 publish-pypi；所需 secret：NPM_TOKEN（npm automation token）。
+    # 外部前置（docs/14 §四）：npm @eap scope（组织）保留或定名、
+    # license 字段从 "SEE LICENSE IN README.md" 占位改为明确 SPDX。
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [widget-sdk]
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: eap-widget-npm
+          path: dist
+      - name: Placeholder notice (real publish steps stay commented out)
+        run: |
+          echo "::notice::publish-npm 为门控占位——tarball 已就位（dist/），实际发布属外部决策。"
+          echo "启用方式：配置 NPM_TOKEN secret 后，取消下方注释步骤。"
+          ls -la dist/
+      # - name: Publish to npm (uncomment when external decisions are done)
+      #   run: |
+      #     cd dist
+      #     npm publish eap-widget-*.tgz --access public
+      #   env:
+      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

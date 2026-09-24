@@ -31,3 +31,8 @@ eap/vector-cache/
 harness/dist/
 harness/src-tauri/target/
 node_modules/
+
+# SDK 构建产物（M50-C：wheel/sdist、widget dist 与 npm tarball——均不入库，CI artifact 分发）
+sdk/python/dist/
+sdk/widget/dist/
+sdk/widget/*.tgz

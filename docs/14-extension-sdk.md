@@ -97,3 +97,58 @@ type 全集：`agent` / `tool` / `rag` / `mcp` / `skill` /
 （后四者为 M48-B 补齐的 SDK 脚手架：每类生成 manifest.json + 入口 manifest.py + README，
 manifest type 对应统一 Manifest 的 workflow_node / model_provider / connector / ui，
 `pack` 打包与安装端点开箱可用）。
+
+## 四、SDK 打包与分发（打包就绪态，M50-C）
+
+上述生命周期面向「扩展包（.eapext）」；SDK 本身另有**独立分发包**形态，
+源码树在 `sdk/`（[sdk/README.md](../sdk/README.md)），两种产物：
+
+| 产物 | 目录 | 形态 | 构建命令 |
+| --- | --- | --- | --- |
+| `eap-sdk`（import 名 `eap_sdk`） | `sdk/python/` | wheel + sdist，**薄 re-export 层**——运行时从平台包再导出 §二 契约面，零平台代码拷贝 | `cd sdk/python && uv build` |
+| `@eap/widget` | `sdk/widget/` | npm tarball（`pnpm pack`），**构建期取源**——从 `eap/src/eap/static/eap-widget.js` 读取并注入版本横幅产出 `dist/eap-widget.js` | `cd sdk/widget && pnpm pack` |
+
+widget 的 npm 形态与服务端分发（`GET /sdk/eap-widget.js`，docs/07 §嵌入）**并存**：
+内容等价（npm 产物仅多版本横幅头），前者服务版本锁定/自有 CDN 场景，后者随平台升级。
+两份包 README：[sdk/python/README.md](../sdk/python/README.md)、
+[sdk/widget/README.md](../sdk/widget/README.md)。
+
+### 版本策略（单一事实源）
+
+唯一手改处 = `eap/src/eap/__init__.py` 的 `__version__`（平台版本）：
+
+- **Python 构建期**：`sdk/python/setup.py`（setuptools 动态版本入口）
+  从平台源码推导；sdist 异地重建回退读 PKG-INFO，特殊场景可注入环境变量
+  `EAP_SDK_VERSION`。**运行期** `eap_sdk.__version__` 动态读 `eap.__version__`。
+- **widget 构建期**：`scripts/build.mjs` 读平台版本注入产物横幅并自动同步
+  `package.json` version。
+- **CI 漂移守卫**：[.github/workflows/sdk.yml](../.github/workflows/sdk.yml)
+  校验 wheel METADATA / package.json 版本 == 平台 `__version__`，不一致即红。
+
+### 安装与依赖声明
+
+平台包 `eap` 未发布 PyPI，`eap-sdk` 取舍为「**无硬依赖 + import 期友好报错 +
+git 源 extra**」：先装平台（`uv pip install ./eap` 或
+`uv pip install "eap-sdk[platform-git]"`，后者需仓库读取权限），再装
+`eap-sdk`；平台缺失时 `import eap_sdk` 抛带安装指引的 `ModuleNotFoundError`。
+
+### CI 形态（只出 artifacts，不发布）
+
+`sdk.yml` 在 push(main)/PR（paths 收敛到 sdk/ 与平台契约源）构建两侧产物、
+冒烟验证（临时 venv 装 wheel+平台源码；tarball 清单+横幅核对）后
+upload-artifact。`publish-pypi` / `publish-npm` 为**双重门控占位**
+（workflow_dispatch 的 publish 输入 + `environment: pypi|npm` 保护），
+实际发布步骤保持注释态。
+
+### 发布前置条件（外部决策，打包就绪 ≠ 已发布）
+
+1. **包名保留**：PyPI `eap-sdk` 查名可用并注册账号/组织；npm `@eap` scope
+   （组织）保留或定名；
+2. **凭据**：`PYPI_TOKEN`（或 PyPI Trusted Publishing/OIDC，推荐）与
+   `NPM_TOKEN` secrets + GitHub Environments（pypi/npm）审批配置；
+3. **许可证**：仓库当前无 LICENSE 文件，两包元数据均为占位
+   （`LicenseRef-Proprietary` / `SEE LICENSE IN README.md`），发布前须定值；
+4. **平台包去向**：`eap` 是否发布 PyPI——决定 `eap-sdk` 依赖声明能否从
+   extras+报错兜底升级为常规硬依赖；
+5. **API 稳定承诺**：`eap.ext` / `eap.agents.sdk` 契约面冻结后的 semver
+   承诺（独立分发包意味着第三方将锁定版本消费）。

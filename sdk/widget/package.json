@@ -1,0 +1,38 @@
+{
+  "name": "@eap/widget",
+  "version": "1.0.0",
+  "description": "EAP 嵌入外链聊天 Widget（<eap-chat> Web Component + EAP.widget.mount）——npm 分发形态；构建期取源平台 eap/src/eap/static/eap-widget.js 并注入版本横幅，与服务端 GET /sdk/eap-widget.js 分发并存",
+  "license": "SEE LICENSE IN README.md",
+  "keywords": [
+    "eap",
+    "widget",
+    "chat",
+    "embed",
+    "web-component",
+    "agent"
+  ],
+  "main": "dist/eap-widget.js",
+  "browser": "dist/eap-widget.js",
+  "exports": {
+    ".": "./dist/eap-widget.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
+    "check-version": "node scripts/build.mjs --check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/niyuhang196511-tech/jundaoxin-eap.git",
+    "directory": "sdk/widget"
+  },
+  "bugs": {
+    "url": "https://github.com/niyuhang196511-tech/jundaoxin-eap/issues"
+  },
+  "homepage": "https://github.com/niyuhang196511-tech/jundaoxin-eap/blob/main/docs/14-extension-sdk.md"
+}
