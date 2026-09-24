@@ -19,8 +19,10 @@ receivers:
   # 三个 receiver 均为占位（无任何通知方式）：告警会正常进入 Alertmanager、UI 可见、
   # 分组/抑制/静默照常生效，但不会对外发出通知。真实 webhook/SMTP 凭据属外部条件，
   # 不入库——按下方样例替换后，先本地校验再重启容器：
-  #   docker run --rm -v ${PWD}/deploy/observability/alertmanager.yml:/am.yml:ro \
-  #     prom/alertmanager:v0.27.0 amtool check-config /am.yml
+  #   MSYS_NO_PATHCONV=1 docker run --rm --entrypoint amtool \
+  #     -v ${PWD}/deploy/observability/alertmanager.yml:/am.yml:ro \
+  #     prom/alertmanager:v0.27.0 check-config /am.yml
+  #   （镜像 entrypoint 是 alertmanager 本体，amtool 须 --entrypoint 覆盖；Git Bash 需禁路径转换）
   #   docker compose -f deploy/observability/docker-compose.observability.yml restart alertmanager
   #
   # —— 样例 1：邮件（SMTP，Alertmanager 原生支持，最容易先跑通联调）——
@@ -65,7 +67,13 @@ receivers:
 #  - 发布窗口静默 EapLatencyP95High / EapLatencyHigh（deploy 期间延迟天然上升）
 #  - 演练静默 EapTaskQueueBacklog（drill 期间积压为预期）
 inhibit_rules:
-  # 实例全宕时抑制其派生告警（延迟/积压在宕机时必然触发，避免告警风暴）
-  - source_matchers: [ 'alertname = EapInstanceDown' ]
+  # 全部实例宕机时抑制逐实例宕机告警（M50-D 口径修订后单实例全宕会同时触发
+  # EapInstanceDown(warning) + EapAllInstancesDown(critical)——critical 压 warning 去重）
+  - source_matchers: [ 'alertname = EapAllInstancesDown' ]
+    target_matchers: [ 'alertname = EapInstanceDown' ]
+    equal: []
+  # 实例宕机时抑制其派生告警（延迟/积压在宕机时必然触发，避免告警风暴；
+  # 源含 All 形态——它抑制掉 InstanceDown 后本条仍需独立生效）
+  - source_matchers: [ 'alertname =~ "EapInstanceDown|EapAllInstancesDown"' ]
     target_matchers: [ 'alertname =~ "EapLatency.*|EapTaskQueueBacklog"' ]
     equal: []
