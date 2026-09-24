@@ -8,8 +8,6 @@ import hashlib
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import AUTH
-
 
 def _fernet_of(secret: str):
     from cryptography.fernet import Fernet

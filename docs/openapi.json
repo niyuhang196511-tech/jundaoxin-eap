@@ -5649,7 +5649,7 @@
     },
     "/api/v1/embed/session": {
       "post": {
-        "description": "EmbedToken → 短时会话令牌。\n\n校验链：渠道启用 → 域名白名单（Origin/Referer）→ 频控 → 签发（绑定 agent+租户+过期）。",
+        "description": "EmbedToken → 短时会话令牌。\n\n校验链：渠道启用 → 域名白名单（Origin/Referer）→ 频控 → 签发（绑定 agent+租户+渠道+过期；\n渠道绑定 cid 是 M51-D 渠道级吊销依据——渠道 disable 后其存量会话令牌立即失效）。",
         "operationId": "exchange_session_api_v1_embed_session_post",
         "requestBody": {
           "content": {
@@ -5686,6 +5686,7 @@
     },
     "/api/v1/embed/{channel_id}": {
       "delete": {
+        "description": "停用渠道：EmbedToken 换取即拒，且该渠道已签发的会话令牌立即失效（M51-D 渠道级吊销——\nverify_session 按 payload.cid 回查渠道状态，无需等令牌自然过期）。审计 embed.disable。",
         "operationId": "disable_embed_channel_api_v1_embed__channel_id__delete",
         "parameters": [
           {

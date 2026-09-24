@@ -38,8 +38,6 @@ def create_embed_channel(name: str, body: EmbedCreate, request: fastapi.Request,
     channel = EmbedChannel(agent_name=name, token=token, domains=body.domains, note=body.note)
     db.add(channel)
     db.commit()
-    from ...observability import audit
-
     audit.record("embed.create", actor=audit.actor_of(request), target=f"{name}/{channel.id}",
                  trace_id=getattr(request.state, "trace_id", ""))
     return {
@@ -60,13 +58,13 @@ def list_embed_channels(name: str, db: Session = fastapi.Depends(get_db)):
 
 @router.delete("/embed/{channel_id}")
 def disable_embed_channel(channel_id: int, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """停用渠道：EmbedToken 换取即拒，且该渠道已签发的会话令牌立即失效（M51-D 渠道级吊销——
+    verify_session 按 payload.cid 回查渠道状态，无需等令牌自然过期）。审计 embed.disable。"""
     channel = db.get(EmbedChannel, channel_id)
     if channel is None:
         raise fastapi.HTTPException(status_code=404, detail="EAP-4004 渠道不存在")
     channel.status = "disabled"
     db.commit()
-    from ...observability import audit
-
     audit.record("embed.disable", actor=audit.actor_of(request), target=str(channel_id),
                  trace_id=getattr(request.state, "trace_id", ""))
     return {"channel_id": channel_id, "status": "disabled"}
@@ -80,7 +78,8 @@ async def exchange_session(
 ):
     """EmbedToken → 短时会话令牌。
 
-    校验链：渠道启用 → 域名白名单（Origin/Referer）→ 频控 → 签发（绑定 agent+租户+过期）。
+    校验链：渠道启用 → 域名白名单（Origin/Referer）→ 频控 → 签发（绑定 agent+租户+渠道+过期；
+    渠道绑定 cid 是 M51-D 渠道级吊销依据——渠道 disable 后其存量会话令牌立即失效）。
     """
     token = None
     auth = request.headers.get("authorization", "")
@@ -103,7 +102,7 @@ async def exchange_session(
 
     session_token = sign_session(
         agent=channel.agent_name, tenant_id=_tenant_id_of(db, token),
-        user_id=body.user_id,
+        user_id=body.user_id, channel_id=channel.id,
     )
     from ...config import get_settings
 
