@@ -69,6 +69,37 @@ jobs:
       - name: Build
         run: pnpm build
 
+  dependency-scan:
+    # M47-A：依赖漏洞扫描（成熟度盘点 P1）。后端 pip-audit（uv.lock 导出后审计锁文件），
+    # 控制台 pnpm audit（仅 prod 依赖，high 级别即红）。失败即 job 红；
+    # 不被任何 job needs 串联——与 backend/frontend 并行，不阻塞它们。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Export backend lockfile (uv.lock -> requirements-txt)
+        run: |
+          uv export --format requirements-txt --no-dev --no-hashes \
+            --extra otel --extra docs --extra tokens -o requirements-audit.txt
+        working-directory: eap
+      - name: pip-audit (backend)
+        # 锁文件已全量钉版（含传递依赖），--no-deps 只审计清单内包，避免二次解析
+        run: uvx pip-audit -r requirements-audit.txt --no-deps
+        working-directory: eap
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: eap/frontend/pnpm-lock.yaml
+      - name: pnpm audit (console prod deps)
+        run: pnpm audit --prod --audit-level=high
+        working-directory: eap/frontend
+
   docker-build:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
