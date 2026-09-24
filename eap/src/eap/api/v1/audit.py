@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime  # 模块级：_parse_local_created_at 返回注解具名（ruff F821）
 
 import fastapi
 from sqlalchemy import select
@@ -77,6 +78,20 @@ def list_audit(
          "detail": a.detail, "trace_id": a.trace_id, "created_at": str(a.created_at)}
         for a in db.scalars(query).all()
     ]
+
+
+@router.get("/actions", dependencies=[fastapi.Depends(require_admin)])
+def list_audit_actions():
+    """审计动作目录（M50-B2）：供审计查询页动作过滤做 datalist 候选提示。
+
+    目录为文档性质（observability/audit_actions.AUDIT_ACTIONS，与全仓留痕调用点
+    静态核实同步，防漂移测试 tests/test_audit_actions.py）；查询端点的 action
+    过滤仍接受任意字符串（精确匹配），目录不构成白名单校验。
+    Harness 上报等动态动作名（harness.<客户端提供>）不在目录内属预期。
+    """
+    from ...observability.audit_actions import AUDIT_ACTIONS
+
+    return list(AUDIT_ACTIONS)
 
 
 # ---------- 审计导出（M47-B）：admin 流式 CSV/JSON，行数上限防拖库 ----------

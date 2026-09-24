@@ -1,10 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Braces, CircleCheck, CircleX, Plug, RefreshCw, Server, Wrench,
 } from 'lucide-react'
-import { Badge, Button, DialogContent, Input, Label, PageHeader, TabBar, Table, toast,
+import { Badge, Button, DialogContent, Input, Label, PageHeader, Select, TabBar, Table, toast,
   type BadgeTone } from '@/components/ui'
 import { api } from '@/lib/api'
 
@@ -142,6 +142,236 @@ export default function ExtensionsPage() {
   )
 }
 
+/* ---------- 工具试运行：JSON Schema → 结构化表单（M50-B2） ----------
+ * 支持矩阵（properties 逐字段）：
+ *   string → Input；string+enum → Select；number/integer → number Input；
+ *   boolean → checkbox；array(标量 items) → 逗号分隔 Input；array(string enum items) → chips；
+ *   required（schema.required 命中）→ 标星。
+ * 诚实降级（整体回退 textarea + 原因提示）：无 schema / 顶层非 object / 字段含
+ *   嵌套 object、anyOf/oneOf/allOf/$ref、非标量 items 数组、非字符串 enum、未知 type；
+ *   已有 JSON 反填进表单，JSON 暂态非法或值与字段类型不匹配 → 同样退 textarea（不丢数据）。
+ * schema 之外的多余键在表单模式下原样保留（仅提示，不可见编辑）。 */
+
+type ScalarItemType = 'string' | 'number' | 'boolean'
+
+interface SchemaField {
+  name: string
+  kind: 'string' | 'enum' | 'number' | 'boolean' | 'array'
+  description: string
+  required: boolean
+  /** kind=enum：字符串枚举候选 */
+  options?: string[]
+  /** kind=array：标量 items 类型（逗号分隔输入） */
+  itemType?: ScalarItemType
+  /** kind=array：字符串 enum items（chips 多选） */
+  itemEnum?: string[]
+}
+
+type SchemaAnalysis =
+  | { ok: true; fields: SchemaField[] }
+  | { ok: false; reason: 'no-schema' | 'unsupported' }
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** 解析工具 parameters JSON Schema → 可渲染字段清单；不支持的结构如实返回原因 */
+function analyzeToolSchema(params: unknown): SchemaAnalysis {
+  if (!isPlainObject(params) || Object.keys(params).length === 0) return { ok: false, reason: 'no-schema' }
+  if (params.type !== 'object' || !isPlainObject(params.properties)) return { ok: false, reason: 'unsupported' }
+  if (params.anyOf || params.oneOf || params.allOf || params.$ref) return { ok: false, reason: 'unsupported' }
+  const required = Array.isArray(params.required)
+    ? params.required.filter((r): r is string => typeof r === 'string')
+    : []
+  const fields: SchemaField[] = []
+  for (const [name, raw] of Object.entries(params.properties)) {
+    if (!isPlainObject(raw)) return { ok: false, reason: 'unsupported' }
+    if (raw.anyOf || raw.oneOf || raw.allOf || raw.$ref) return { ok: false, reason: 'unsupported' }
+    const description = typeof raw.description === 'string' ? raw.description : ''
+    const base = { name, description, required: required.includes(name) }
+    if (Array.isArray(raw.enum)) {
+      // 非字符串 enum（数字/布尔枚举）暂不支持 → 整体降级（保持诚实，不做隐式转换）
+      if (!raw.enum.every(v => typeof v === 'string')) return { ok: false, reason: 'unsupported' }
+      fields.push({ ...base, kind: 'enum', options: raw.enum as string[] })
+      continue
+    }
+    switch (raw.type) {
+      case 'string':
+        fields.push({ ...base, kind: 'string' })
+        break
+      case 'number':
+      case 'integer':
+        fields.push({ ...base, kind: 'number' })
+        break
+      case 'boolean':
+        fields.push({ ...base, kind: 'boolean' })
+        break
+      case 'array': {
+        const items = raw.items
+        if (!isPlainObject(items) || items.anyOf || items.oneOf || items.$ref)
+          return { ok: false, reason: 'unsupported' }
+        if (Array.isArray(items.enum)) {
+          if (!items.enum.every(v => typeof v === 'string')) return { ok: false, reason: 'unsupported' }
+          fields.push({ ...base, kind: 'array', itemEnum: items.enum as string[] })
+        } else if (items.type === 'string') {
+          fields.push({ ...base, kind: 'array', itemType: 'string' })
+        } else if (items.type === 'number' || items.type === 'integer') {
+          fields.push({ ...base, kind: 'array', itemType: 'number' })
+        } else if (items.type === 'boolean') {
+          fields.push({ ...base, kind: 'array', itemType: 'boolean' })
+        } else {
+          return { ok: false, reason: 'unsupported' }  // object/array items → 嵌套结构不支持
+        }
+        break
+      }
+      default:
+        return { ok: false, reason: 'unsupported' }  // object / 缺 type / 未知 type
+    }
+  }
+  return { ok: true, fields }
+}
+
+/** 已有 JSON 值能否反填进表单（逐字段类型核对；不匹配则整体退 textarea 不丢数据） */
+function valuesFillable(fields: SchemaField[], args: Record<string, unknown>): boolean {
+  return fields.every(f => {
+    const v = args[f.name]
+    if (v === undefined || v === null) return true
+    switch (f.kind) {
+      case 'string':
+      case 'enum':
+        return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+      case 'number':
+        return typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)))
+      case 'boolean':
+        return typeof v === 'boolean'
+      case 'array':
+        if (!Array.isArray(v)) return false
+        if (f.itemEnum) return v.every(x => typeof x === 'string')
+        return v.every(x => typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean')
+    }
+  })
+}
+
+/** 单字段控件（按 SchemaField.kind 分发） */
+function SchemaFieldControl({ field, value, onChange }: {
+  field: SchemaField
+  value: unknown
+  onChange: (v: unknown) => void  // undefined = 从 args 移除该键
+}) {
+  if (field.kind === 'enum') {
+    const cur = value === undefined || value === null ? '' : String(value)
+    return (
+      <Select value={cur}
+        onChange={e => onChange(e.target.value === '' ? undefined : e.target.value)}>
+        <option value="">{field.required ? '请选择…' : '（未设置）'}</option>
+        {cur !== '' && !(field.options ?? []).includes(cur) &&
+          <option value={cur}>{cur}（当前值）</option>}
+        {(field.options ?? []).map(o => <option key={o} value={o}>{o}</option>)}
+      </Select>
+    )
+  }
+  if (field.kind === 'number') {
+    return (
+      <Input type="number" value={value === undefined || value === null ? '' : String(value)}
+        onChange={e => {
+          const raw = e.target.value
+          if (raw === '') { onChange(undefined); return }
+          const n = Number(raw)
+          onChange(Number.isNaN(n) ? undefined : n)
+        }} />
+    )
+  }
+  if (field.kind === 'boolean') {
+    return (
+      <label className="flex h-9 cursor-pointer items-center gap-2 text-[13px] text-ink-2">
+        <input type="checkbox" className="size-4 accent-brand-500" checked={value === true}
+          onChange={e => onChange(e.target.checked)} />
+        {value === true ? '是' : '否'}
+      </label>
+    )
+  }
+  if (field.kind === 'array' && field.itemEnum) {
+    const selected = Array.isArray(value) ? value.map(String) : []
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {field.itemEnum.map(opt => {
+          const on = selected.includes(opt)
+          return (
+            <button key={opt} type="button"
+              onClick={() => {
+                const next = on ? selected.filter(v => v !== opt) : [...selected, opt]
+                onChange(next.length ? next : undefined)
+              }}
+              className={`cursor-pointer rounded-md border px-2 py-0.5 text-xs transition-colors ${
+                on ? 'border-brand-500 bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300'
+                   : 'border-line text-ink-3 hover:border-brand-300 hover:text-ink'}`}
+            >{opt}</button>
+          )
+        })}
+      </div>
+    )
+  }
+  if (field.kind === 'array') {
+    const text = Array.isArray(value) ? value.map(String).join(', ') : ''
+    return (
+      <Input value={text} placeholder="逗号分隔，如：a, b, c"
+        onChange={e => {
+          const parts = e.target.value.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+          if (!parts.length) { onChange(undefined); return }
+          if (field.itemType === 'number') {
+            const nums = parts.map(Number)
+            onChange(nums.some(Number.isNaN) ? parts : nums)  // 含非数字暂存字符串（编辑中间态）
+          } else if (field.itemType === 'boolean') {
+            onChange(parts.map(p => p === 'true'))
+          } else {
+            onChange(parts)
+          }
+        }} />
+    )
+  }
+  // string
+  return (
+    <Input value={value === undefined || value === null ? '' : String(value)}
+      onChange={e => onChange(e.target.value === '' ? undefined : e.target.value)} />
+  )
+}
+
+/** schema 驱动的参数表单：编辑结果实时序列化回 argsText（提交仍走既有试运行接口） */
+function ToolArgsSchemaForm({ fields, args, onArgs }: {
+  fields: SchemaField[]
+  args: Record<string, unknown>
+  onArgs: (next: Record<string, unknown>) => void
+}) {
+  if (!fields.length) {
+    return <p className="rounded-lg bg-surface-2 p-2.5 text-[11px] text-ink-3">该工具不接受参数（schema 无 properties 字段）</p>
+  }
+  const extraKeys = Object.keys(args).filter(k => !fields.some(f => f.name === k))
+  return (
+    <div className="space-y-2.5">
+      {fields.map(f => (
+        <div key={f.name}>
+          <Label>
+            {f.name}
+            {f.required && <span className="ml-0.5 text-red-400">*</span>}
+            {f.description && <span className="ml-1.5 font-normal text-ink-3">{f.description}</span>}
+          </Label>
+          <SchemaFieldControl field={f} value={args[f.name]}
+            onChange={v => {
+              const next = { ...args }
+              if (v === undefined) delete next[f.name]
+              else next[f.name] = v
+              onArgs(next)
+            }} />
+        </div>
+      ))}
+      {extraKeys.length > 0 && (
+        <p className="text-[11px] text-ink-3">
+          另有 schema 之外的 {extraKeys.length} 个参数（{extraKeys.join('、')}）将原样保留，切到 JSON 模式可编辑
+        </p>
+      )}
+    </div>
+  )
+}
+
 /* ---------- 工具：清单 + 试运行 ---------- */
 
 function ToolsPanel({ tools }: { tools: ToolItem[] }) {
@@ -149,6 +379,18 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
   const [argsText, setArgsText] = useState('{}')
   const [output, setOutput] = useState('')
   const [running, setRunning] = useState(false)
+  const [jsonMode, setJsonMode] = useState(false)  // 手动切换到原始 JSON 编辑（逃生舱）
+
+  // schema 解析 + 当前 JSON 反填判定（任一不成立 → 诚实降级 textarea）
+  const analysis = useMemo(() => (target ? analyzeToolSchema(target.parameters) : null), [target])
+  const parsedArgs = useMemo<Record<string, unknown> | null>(() => {
+    try {
+      const v = JSON.parse(argsText || '{}')
+      return isPlainObject(v) ? v : null
+    } catch { return null }  // 编辑中允许暂态非法 JSON
+  }, [argsText])
+  const formUsable = !!analysis?.ok && parsedArgs !== null && valuesFillable(analysis.fields, parsedArgs)
+  const showForm = formUsable && !jsonMode
 
   const invoke = async () => {
     if (!target) return
@@ -173,7 +415,7 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
         <Table<ToolItem>
           rowKey={t => t.name}
           data={tools}
-          onRowClick={t => { setTarget(t); setOutput('') }}
+          onRowClick={t => { setTarget(t); setOutput(''); setArgsText('{}'); setJsonMode(false) }}
           columns={[
             { key: 'name', title: '工具名', render: t => (
               <span className="font-medium">{t.name}</span>
@@ -204,13 +446,45 @@ function ToolsPanel({ tools }: { tools: ToolItem[] }) {
               {JSON.stringify(target.parameters, null, 2)}
             </pre>
             <div className="mt-3">
-              <Label>参数（JSON）</Label>
-              <textarea
-                value={argsText}
-                onChange={e => setArgsText(e.target.value)}
-                rows={4}
-                className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink focus:border-brand-500 focus:outline-none"
-              />
+              <div className="mb-1.5 flex items-center justify-between">
+                <Label className="mb-0">{showForm ? '参数' : '参数（JSON）'}</Label>
+                {formUsable && (
+                  <button type="button" className="cursor-pointer text-[11px] text-ink-3 hover:text-brand-500"
+                    onClick={() => setJsonMode(m => !m)}>
+                    {showForm ? '切换 JSON 编辑' : '切换表单编辑'}
+                  </button>
+                )}
+              </div>
+              {showForm ? (
+                <ToolArgsSchemaForm fields={analysis!.fields} args={parsedArgs!}
+                  onArgs={next => setArgsText(JSON.stringify(next, null, 2))} />
+              ) : (
+                <>
+                  <textarea
+                    value={argsText}
+                    onChange={e => setArgsText(e.target.value)}
+                    rows={4}
+                    className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink focus:border-brand-500 focus:outline-none"
+                  />
+                  {analysis && !analysis.ok && (
+                    <p className="mt-1 text-[11px] text-ink-3">
+                      {analysis.reason === 'no-schema'
+                        ? '该工具未提供参数 schema，直接编辑 JSON 传参'
+                        : '参数 schema 含不支持的结构（嵌套 object / anyOf / 非标量数组等），已降级为 JSON 编辑'}
+                    </p>
+                  )}
+                  {analysis?.ok && parsedArgs === null && (
+                    <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                      当前 JSON 暂不可解析——修正后可切回表单编辑（内容不会丢失）
+                    </p>
+                  )}
+                  {analysis?.ok && parsedArgs !== null && !valuesFillable(analysis.fields, parsedArgs) && (
+                    <p className="mt-1 text-[11px] text-ink-3">
+                      已有值与 schema 字段类型不匹配，保持 JSON 编辑（内容不丢失）
+                    </p>
+                  )}
+                </>
+              )}
               <Button variant="primary" className="mt-2 w-full" onClick={invoke} loading={running}>
                 <Braces className="size-3.5" /> 试运行
               </Button>

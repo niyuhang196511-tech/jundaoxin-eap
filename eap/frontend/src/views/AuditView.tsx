@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import { FileClock } from 'lucide-react'
 import {
   Badge, Button, Input, Label, PageHeader, Table, toast,
@@ -36,6 +36,15 @@ export default function AuditPage() {
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
+  // 动作目录（M50-B2）：datalist 候选提示；过滤语义不变（仍自由输入 + 后端精确匹配任意字符串）
+  const [actionCatalog, setActionCatalog] = useState<string[]>([])
+  const actionListId = useId()
+
+  useEffect(() => {
+    api<string[]>('GET', '/api/v1/audit/actions')
+      .then(list => { if (Array.isArray(list)) setActionCatalog(list) })
+      .catch(e => console.warn('[AuditView] 加载动作目录失败，动作过滤保持自由输入', e))
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -88,8 +97,12 @@ export default function AuditPage() {
       <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-6">
         <div>
           <Label>动作</Label>
-          <Input placeholder="release.promote" value={action}
+          {/* 目录（M50-B2）：datalist 候选提示，仍自由输入（过滤语义不变，后端精确匹配任意字符串） */}
+          <Input placeholder="release.promote" value={action} list={actionListId}
             onChange={e => { setAction(e.target.value); setOffset(0) }} />
+          <datalist id={actionListId}>
+            {actionCatalog.map(a => <option key={a} value={a} />)}
+          </datalist>
         </div>
         <div>
           <Label>操作者</Label>

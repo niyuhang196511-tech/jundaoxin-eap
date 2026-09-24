@@ -1,13 +1,18 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { BookOpen, FileText, Plus, Search, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import {
-  Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Skeleton,
-  Textarea, toast,
+  Badge, Button, Card, CardBody, DialogContent, EmptyState, Input, Label, PageHeader, Select,
+  Skeleton, Textarea, toast,
 } from '@/components/ui'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
+
+// ACL 角色主体候选（M50-B2）：平台约定角色——API Key 通道 = admin、嵌入会话 = embed
+// （api/deps.py），JWT 角色来自 IdP claim（member 为常规只读角色）。角色无目录端点，
+// datalist 仅作提示，仍支持自由输入任意角色名；'*' = 通配所有主体。
+const ACL_ROLE_SUGGESTIONS = ['*', 'admin', 'member', 'embed']
 
 interface KbItem {
   id: number
@@ -128,11 +133,10 @@ export default function KnowledgePage() {
           </div>
           <div>
             <Label>模板</Label>
-            <select value={form.template} onChange={e => setForm({ ...form, template: e.target.value })}
-              className="h-9 w-full rounded-lg border border-line bg-surface px-3 text-[13px] text-ink">
+            <Select value={form.template} onChange={e => setForm({ ...form, template: e.target.value })}>
               <option value="doc">doc（文档分块）</option>
               <option value="faq">faq（问答对）</option>
-            </select>
+            </Select>
           </div>
         </div>
       </DialogContent>
@@ -141,6 +145,7 @@ export default function KnowledgePage() {
 }
 
 function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
+  const subjectListId = useId()
   const [docs, setDocs] = useState<DocItem[]>([])
   const [loading, setLoading] = useState(true)
   const [ingestOpen, setIngestOpen] = useState(false)
@@ -291,13 +296,12 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
               <FileText className="size-4 text-ink-3" />文档（{docs.length}）
             </p>
             <div className="flex items-center gap-2">
-              <select value={parser} onChange={e => setParser(e.target.value)}
-                title="解析后端"
-                className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+              <Select value={parser} onChange={e => setParser(e.target.value)}
+                title="解析后端" className="w-40">
                 <option value="local">local（内置）</option>
                 <option value="mineru_cloud">MinerU 云端</option>
                 <option value="mineru_selfhosted">MinerU 自托管</option>
-              </select>
+              </Select>
               <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden"
                 onChange={e => {
                   const f = e.target.files?.[0]
@@ -427,35 +431,42 @@ function KbDetail({ name, onBack }: { name: string; onBack: () => void }) {
           <div className="grid grid-cols-[80px_90px_1fr_1fr_auto] items-end gap-2">
             <div>
               <Label>效果</Label>
-              <select value={aclForm.effect} onChange={e => setAclForm({ ...aclForm, effect: e.target.value })}
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+              <Select value={aclForm.effect} onChange={e => setAclForm({ ...aclForm, effect: e.target.value })}>
                 <option value="deny">deny</option>
                 <option value="allow">allow</option>
-              </select>
+              </Select>
             </div>
             <div>
               <Label>主体类型</Label>
-              <select value={aclForm.subject_type}
-                onChange={e => setAclForm({ ...aclForm, subject_type: e.target.value })}
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+              <Select value={aclForm.subject_type}
+                onChange={e => setAclForm({ ...aclForm, subject_type: e.target.value })}>
                 <option value="role">角色</option>
                 <option value="user">用户</option>
-              </select>
+              </Select>
             </div>
             <div>
               <Label>主体（* = 所有）</Label>
+              {/* role：datalist 给平台约定角色 + '*'（仍自由输入）；user：无目录端点，如实提示 */}
               <Input value={aclForm.subject}
+                list={aclForm.subject_type === 'role' ? subjectListId : undefined}
                 onChange={e => setAclForm({ ...aclForm, subject: e.target.value })}
-                placeholder="member / u-123 / *" />
+                placeholder={aclForm.subject_type === 'role' ? 'admin / member / *' : 'u-123（用户 ID）'} />
+              <datalist id={subjectListId}>
+                {ACL_ROLE_SUGGESTIONS.map(r => <option key={r} value={r} />)}
+              </datalist>
+              {aclForm.subject_type === 'user' && (
+                <p className="mt-1 text-[10px] leading-tight text-ink-3">
+                  用户 ID 来自 IdP 的 sub 声明，平台无用户目录端点，需手动填写精确值
+                </p>
+              )}
             </div>
             <div>
               <Label>文档（空=整库默认）</Label>
-              <select value={aclForm.document_id}
-                onChange={e => setAclForm({ ...aclForm, document_id: e.target.value })}
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs text-ink">
+              <Select value={aclForm.document_id}
+                onChange={e => setAclForm({ ...aclForm, document_id: e.target.value })}>
                 <option value="">整库默认</option>
                 {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
-              </select>
+              </Select>
             </div>
             <Button variant="primary" disabled={!aclForm.subject} loading={false}
               onClick={async () => {

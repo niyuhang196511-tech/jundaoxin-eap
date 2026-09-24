@@ -35,6 +35,29 @@ def _insert(action: str, target: str, *, detail: dict | None = None,
         return row.id
 
 
+# ---------- 动作目录（M50-B2）：GET /api/v1/audit/actions ----------
+
+
+def test_actions_catalog_shape(client: TestClient):
+    """动作目录端点：扁平数组 = AUDIT_ACTIONS 原样（文档性质，供过滤 datalist 提示）。"""
+    from eap.observability.audit_actions import AUDIT_ACTIONS
+
+    resp = client.get("/api/v1/audit/actions", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert isinstance(data, list) and data == list(AUDIT_ACTIONS)
+    # 代表性动作抽查（各域均有登记）
+    assert {"model.register", "release.promote", "trigger.create", "audit.export",
+            "eval.review.submit", "shadow.create", "memory.purge",
+            "workflow.version.publish"} <= set(data)
+
+
+def test_actions_requires_admin(client: TestClient, fake_idp):  # noqa: F811  fixture 再导出
+    """目录端点鉴权与该 router 查询端点一致：member JWT → 403。"""
+    member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
+    assert client.get("/api/v1/audit/actions", headers=member).status_code == 403
+
+
 # ---------- 导出：形态 ----------
 
 

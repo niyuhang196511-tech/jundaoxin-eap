@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { DrawerContent, FieldError, Input, Label, Select, Textarea, Button, Badge } from '@/components/ui'
-import { Plus, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { genStepId, type BodyStep, type Step } from './dsl'
@@ -336,34 +336,7 @@ function StepForm({ step, allIds, workflowName, catalog, onChange }: {
         </>
       )}
 
-      {step.type === 'interaction' && (
-        <>
-          <div>
-            <Label>表单标题</Label>
-            <Input value={step.ui_schema?.title ?? ''} placeholder="补货信息"
-              onChange={e => onChange({ ui_schema: { type: 'form', fields: step.ui_schema?.fields ?? [], ...step.ui_schema, title: e.target.value } })} />
-          </div>
-          <div>
-            <Label>表单字段（JSON 数组：type/id/label/required/options）</Label>
-            <Textarea rows={6} className="font-mono text-xs"
-              value={JSON.stringify(step.ui_schema?.fields ?? [], null, 2)}
-              onChange={e => {
-                try {
-                  const fields = JSON.parse(e.target.value || '[]')
-                  onChange({ ui_schema: { type: 'form', ...(step.ui_schema ?? {}), fields } })
-                } catch { /* 编辑中允许暂态非法 JSON */ }
-              }} />
-            <p className="mt-1 text-[11px] text-ink-3">
-              控件：text / textarea / number / select / multiselect / radio / checkbox / confirmation
-            </p>
-          </div>
-          <div>
-            <Label>提交值变量名（默认 input）</Label>
-            <Input value={step.input_var ?? 'input'}
-              onChange={e => onChange({ input_var: e.target.value })} />
-          </div>
-        </>
-      )}
+      {step.type === 'interaction' && <InteractionSchemaEditor step={step} onChange={onChange} />}
 
       {step.when && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/50 dark:bg-amber-950/20">
@@ -510,6 +483,222 @@ function BodyStepsEditor({ title, steps, existing, toolListId, kbListId, onChang
           <Plus className="size-3.5" /> 添加步骤
         </Button>
       </div>
+    </div>
+  )
+}
+
+/* ---------- interaction 表单字段结构化编辑器（M50-B2） ----------
+ * 控件类型对齐 components/chat/UISchemaRenderer 的 UIField 联合：
+ * text / textarea / number / select / multiselect / radio / checkbox / confirmation
+ * （'form' 仅顶层类型，fields 不允许内嵌——后端 validate_interaction_schema 同拒）。
+ * 渲染器实际行为（编辑器提示与之对齐）：select/radio → 下拉单选；multiselect/checkbox →
+ * 选项 chips 多选；confirmation → 布尔确认开关（label 即确认文案）；其余为文本/数字输入。
+ * 序列化回渲染器消费的 {type:'form', title?, description?, fields:[...]} 形状；
+ * 字段内未知键（data_source / description / placeholder 等）经 spread 原样保留不丢数据。
+ * 降级：fields 非数组 / 条目非对象 / 缺 id 或 type / 未知控件 → 回退裸 JSON textarea。 */
+
+const UI_FIELD_TYPES = [
+  { value: 'text', label: 'text 单行文本' },
+  { value: 'textarea', label: 'textarea 多行文本' },
+  { value: 'number', label: 'number 数字' },
+  { value: 'select', label: 'select 下拉单选' },
+  { value: 'multiselect', label: 'multiselect 多选' },
+  { value: 'radio', label: 'radio 单选' },
+  { value: 'checkbox', label: 'checkbox 复选组' },
+  { value: 'confirmation', label: 'confirmation 确认' },
+] as const
+
+/** 需要 options 选项列表的控件（渲染器 select/radio → 下拉，multiselect/checkbox → chips） */
+const UI_OPTIONS_TYPES = new Set<string>(['select', 'multiselect', 'radio', 'checkbox'])
+
+type UiFieldRecord = Record<string, unknown>
+
+/** fields 是否可结构化编辑（未知形状 → false，调用方降级 textarea 不丢数据） */
+function fieldsEditable(fields: unknown): fields is UiFieldRecord[] {
+  if (fields === undefined || fields === null) return true  // 缺省视为空列表（新建节点）
+  if (!Array.isArray(fields)) return false
+  return fields.every(f =>
+    typeof f === 'object' && f !== null && !Array.isArray(f)
+    && typeof (f as UiFieldRecord).id === 'string'
+    && UI_FIELD_TYPES.some(t => t.value === (f as UiFieldRecord).type))
+}
+
+function InteractionSchemaEditor({ step, onChange }: {
+  step: Step
+  onChange: (patch: Partial<Step>) => void
+}) {
+  const uiSchema = step.ui_schema
+  const rawFields = uiSchema?.fields
+  const structured = fieldsEditable(rawFields)
+  const fields: UiFieldRecord[] = structured ? (rawFields ?? []) : []
+
+  const writeFields = (next: UiFieldRecord[]) =>
+    onChange({ ui_schema: { type: 'form', ...(uiSchema ?? {}), fields: next } })
+
+  const addField = () => {
+    const used = fields.map(f => String(f.id ?? ''))
+    let n = fields.length + 1
+    let id = `field${n}`
+    while (used.includes(id)) { n += 1; id = `field${n}` }
+    writeFields([...fields, { type: 'text', id, label: '', required: false }])
+  }
+
+  const moveField = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= fields.length) return
+    const next = [...fields]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    writeFields(next)
+  }
+
+  return (
+    <>
+      <div>
+        <Label>表单标题</Label>
+        <Input value={uiSchema?.title ?? ''} placeholder="补货信息"
+          onChange={e => onChange({ ui_schema: { type: 'form', fields: rawFields ?? [], ...uiSchema, title: e.target.value } })} />
+      </div>
+      {structured ? (
+        <div>
+          <Label>表单字段（{fields.length}）</Label>
+          <div className="space-y-2">
+            {fields.length === 0 && (
+              <p className="rounded-lg bg-surface-2 p-2.5 text-[11px] text-ink-3">
+                暂无字段——交互表单至少需要一个字段（运行时校验 fields 非空）
+              </p>
+            )}
+            {fields.map((f, i) => (
+              <UiFieldRow key={i} field={f} index={i} total={fields.length}
+                onPatch={patch => writeFields(fields.map((x, j) => (j === i ? { ...x, ...patch } : x)))}
+                onRemove={() => writeFields(fields.filter((_, j) => j !== i))}
+                onMove={dir => moveField(i, dir)} />
+            ))}
+            <Button size="xs" variant="secondary" onClick={addField}>
+              <Plus className="size-3.5" /> 添加字段
+            </Button>
+            <p className="text-[11px] text-ink-3">
+              字段 id 须为小写字母开头的标识符（运行时校验 [a-z][a-z0-9_]，最长 64）
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <Label>表单字段（JSON 数组：type/id/label/required/options）</Label>
+          <Textarea rows={6} className="font-mono text-xs"
+            value={JSON.stringify(rawFields ?? [], null, 2)}
+            onChange={e => {
+              try {
+                const parsed = JSON.parse(e.target.value || '[]')
+                writeFields(parsed)
+              } catch { /* 编辑中允许暂态非法 JSON */ }
+            }} />
+          <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+            字段形状未知（非数组 / 缺 id / 未知控件类型），已降级 JSON 编辑——内容不丢失；
+            修正为受支持形状后自动恢复结构化编辑
+          </p>
+        </div>
+      )}
+      <div>
+        <Label>提交值变量名（默认 input）</Label>
+        <Input value={step.input_var ?? 'input'}
+          onChange={e => onChange({ input_var: e.target.value })} />
+      </div>
+    </>
+  )
+}
+
+/** 单字段行：id / label / type / required + 按 type 的条件配置 + 排序/删除 */
+function UiFieldRow({ field, index, total, onPatch, onRemove, onMove }: {
+  field: UiFieldRecord
+  index: number
+  total: number
+  onPatch: (patch: UiFieldRecord) => void
+  onRemove: () => void
+  onMove: (dir: -1 | 1) => void
+}) {
+  const type = String(field.type ?? 'text')
+  // options 规整为 {label, value} 对象行（历史数据可能是裸标量 → 展示时归一，写回时才落盘）
+  const rawOptions = Array.isArray(field.options) ? field.options : []
+  const options = rawOptions.map(o =>
+    typeof o === 'object' && o !== null && !Array.isArray(o)
+      ? o as UiFieldRecord
+      : { label: String(o), value: o })
+  const writeOptions = (next: UiFieldRecord[]) => onPatch({ options: next })
+  const hasDataSource = field.data_source !== undefined && field.data_source !== null
+
+  return (
+    <div className="rounded-lg border border-line bg-surface-2 p-2.5">
+      <div className="flex items-center gap-1.5">
+        <Input className="w-24 font-mono" value={String(field.id ?? '')} placeholder="field_id"
+          title="字段 id（提交值的键；小写字母开头）"
+          onChange={e => onPatch({ id: e.target.value })} />
+        <Input className="flex-1" value={String(field.label ?? '')}
+          placeholder={type === 'confirmation' ? '确认文案（label 即按钮文字）' : '字段标签'}
+          onChange={e => onPatch({ label: e.target.value })} />
+        <Select className="w-40" value={type} title="控件类型"
+          onChange={e => onPatch({ type: e.target.value })}>
+          {UI_FIELD_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </Select>
+        <label className="flex cursor-pointer items-center gap-1 whitespace-nowrap text-[11px] text-ink-3"
+          title="必填（提交前校验非空）">
+          <input type="checkbox" className="size-3.5 accent-brand-500" checked={field.required === true}
+            onChange={e => onPatch({ required: e.target.checked })} />必填
+        </label>
+        <div className="flex shrink-0">
+          <Button size="xs" variant="ghost" disabled={index === 0} title="上移" onClick={() => onMove(-1)}>
+            <ChevronUp className="size-3.5" />
+          </Button>
+          <Button size="xs" variant="ghost" disabled={index === total - 1} title="下移" onClick={() => onMove(1)}>
+            <ChevronDown className="size-3.5" />
+          </Button>
+          <Button size="xs" variant="ghost" title="删除字段" onClick={onRemove}>
+            <Trash2 className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      {UI_OPTIONS_TYPES.has(type) && (
+        <div className="mt-2 border-t border-line pt-2">
+          <p className="mb-1 text-[11px] text-ink-3">
+            选项列表（显示文案 / 提交值）{type === 'multiselect' || type === 'checkbox' ? '· 运行时渲染为 chips 多选' : '· 运行时渲染为下拉单选'}
+          </p>
+          <div className="space-y-1">
+            {options.map((o, oi) => (
+              <div key={oi} className="flex items-center gap-1.5">
+                <Input className="flex-1" value={String(o.label ?? '')} placeholder="显示文案"
+                  onChange={e => writeOptions(options.map((x, j) => (j === oi ? { ...x, label: e.target.value } : x)))} />
+                <Input className="flex-1 font-mono" value={String(o.value ?? '')} placeholder="提交值"
+                  onChange={e => writeOptions(options.map((x, j) => (j === oi ? { ...x, value: e.target.value } : x)))} />
+                <Button size="xs" variant="ghost" title="删除选项"
+                  onClick={() => writeOptions(options.filter((_, j) => j !== oi))}>
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+          <Button size="xs" variant="ghost" className="mt-1"
+            onClick={() => writeOptions([...options, { label: '', value: '' }])}>
+            <Plus className="size-3.5" /> 添加选项
+          </Button>
+          {hasDataSource && (
+            <p className="mt-1 text-[11px] text-ink-3">
+              该字段声明了动态数据源 data_source（原样保留）：运行时选项由后端调工具实时取值，上方列表为静态兜底
+            </p>
+          )}
+        </div>
+      )}
+
+      {type === 'confirmation' && (
+        <p className="mt-1.5 text-[11px] text-ink-3">
+          确认控件：label 即确认按钮文案，用户提交值为 true/false（required 时须勾选）
+        </p>
+      )}
+
+      {(type === 'text' || type === 'textarea' || type === 'number') && (
+        <Input className="mt-2" value={String(field.placeholder ?? '')}
+          placeholder="输入提示（placeholder，可选）"
+          onChange={e => onPatch({ placeholder: e.target.value || undefined })} />
+      )}
     </div>
   )
 }
