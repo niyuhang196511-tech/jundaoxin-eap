@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8300
     db_url: str = "sqlite:///./eap.db"
+    # RLS 角色收敛（M51-C）：非空时 JWT 租户通道在事务内 SET LOCAL ROLE 到该角色
+    # （NOLOGIN 角色，由迁移创建并授最小权限），使 RLS 策略真实生效；
+    # API Key/worker/触发器路径保持平台身份（owner 豁免）。空 = 关闭，行为与现状一致
+    db_app_role: str = ""
 
     # M47-C 启动 fail-fast：置 1 时存在开发默认密钥 / 必配密钥缺失即拒绝启动
     # （deploy/docker-compose.prod.yml 默认开启；开发保持 0 走警告不阻断）
@@ -44,6 +48,9 @@ class Settings(BaseSettings):
 
     # 嵌入外链：会话令牌签名密钥与时效（docs/04 §6）
     session_secret: str = "dev-session-secret-change-me"
+    # 会话密钥轮换（M51-D）：旧密钥列表（逗号分隔）——EAP_SESSION_SECRET 换新后把旧值放
+    # 这里，存量会话令牌验签自动回退（对齐 secret_key_previous 惯例）；轮换完成后移除本变量
+    session_secret_previous: str | None = None
     embed_session_ttl: int = 2 * 3600  # 秒
     embed_rate_limit: int = 60  # 每分钟每令牌请求数
 
