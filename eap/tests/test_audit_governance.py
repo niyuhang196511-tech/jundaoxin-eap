@@ -4,6 +4,10 @@
 导出动作落审计 audit.export 仅条数与过滤条件）。
 保留期：POST /api/v1/audit/purge（admin，对齐 memory /purge 模式；0=永久保留不删，
 动作落审计 audit.retention.purge 仅条数）。
+actor 目录：GET /api/v1/audit/actors（M52-A，动态 distinct actor，供过滤 datalist 提示）。
+
+脏库可重入约定（M52-A 起）：计数/等值断言的用例一律用 uuid 后缀的运行时唯一
+action/actor 名，断言只命中本遍插入的行；子集（>=/any/all）断言可安全用固定名。
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import csv as csv_mod
 import io
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -23,12 +28,12 @@ from eap.db import SessionLocal
 from eap.models import AuditLog
 
 
-def _insert(action: str, target: str, *, detail: dict | None = None,
+def _insert(action: str, target: str, *, actor: str = "m47b", detail: dict | None = None,
             created_at: datetime | None = None) -> int:
-    """直接造审计行（含保留期测试所需的超龄 created_at）。"""
+    """直接造审计行（含保留期测试所需的超龄 created_at）；actor 可指定（M52-A 目录用例）。"""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     with SessionLocal() as db:
-        row = AuditLog(action=action, actor="m47b", target=target, trace_id="m47b",
+        row = AuditLog(action=action, actor=actor, target=target, trace_id="m47b",
                        detail=detail or {}, created_at=created_at or now)
         db.add(row)
         db.commit()
@@ -58,14 +63,46 @@ def test_actions_requires_admin(client: TestClient, fake_idp):  # noqa: F811  fi
     assert client.get("/api/v1/audit/actions", headers=member).status_code == 403
 
 
+# ---------- actor 目录（M52-A）：GET /api/v1/audit/actors ----------
+
+
+def test_actors_catalog_shape(client: TestClient):
+    """actor 目录端点：扁平字符串数组（与 /actions 形态一致），distinct 升序、上限 500。
+
+    脏库可重入：探针 actor 名带 uuid 后缀每遍唯一，断言用「包含」而非全局计数/等长
+    （历史运行/其他用例行留下的 actor 也会出现在目录中，属预期）。
+    """
+    probe_a = f"m52a-probe-{uuid.uuid4().hex[:8]}"
+    probe_b = f"m52a-probe-{uuid.uuid4().hex[:8]}"
+    _insert("m52a.probe.op", "m52a-probe", actor=probe_a)
+    _insert("m52a.probe.op", "m52a-probe", actor=probe_b)
+    _insert("m52a.probe.op", "m52a-probe", actor=probe_a)  # 同 actor 多行 → distinct 去重
+
+    resp = client.get("/api/v1/audit/actors", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert isinstance(data, list) and all(isinstance(x, str) for x in data)  # 扁平字符串数组
+    assert {probe_a, probe_b} <= set(data)  # 含本遍插入的 actor（包含式断言，非等长）
+    assert len(data) == len(set(data))  # distinct：无重复
+    assert data == sorted(data)  # actor 升序
+    assert len(data) <= 500  # 上限截断
+
+
+def test_actors_requires_admin(client: TestClient, fake_idp):  # noqa: F811  fixture 再导出
+    """actor 目录端点鉴权与 /actions 一致：member JWT → 403。"""
+    member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
+    assert client.get("/api/v1/audit/actors", headers=member).status_code == 403
+
+
 # ---------- 导出：形态 ----------
 
 
 def test_export_csv_shape(client: TestClient):
     """CSV 导出：附件下载头 + UTF-8 BOM + 表头列序 + detail 为 JSON 字符串 + 过滤生效。"""
-    _insert("m47b.csv.op", "m47b-csv", detail={"k": "中文值", "n": 1})
+    action = f"m47b.csv.{uuid.uuid4().hex[:8]}"  # 每遍唯一：脏库可重入（rows[0] 必为本遍行）
+    _insert(action, "m47b-csv", detail={"k": "中文值", "n": 1})
     resp = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "csv", "action": "m47b.csv.op"})
+                      params={"format": "csv", "action": action})
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("text/csv")
     dispo = resp.headers["content-disposition"]
@@ -76,7 +113,7 @@ def test_export_csv_shape(client: TestClient):
     assert rows, "至少导出一条"
     assert list(rows[0].keys()) == ["id", "created_at", "action", "actor", "target",
                                     "trace_id", "detail"]
-    assert all(r["action"] == "m47b.csv.op" for r in rows)  # 过滤条件生效
+    assert all(r["action"] == action for r in rows)  # 过滤条件生效
     assert any(r["target"] == "m47b-csv" for r in rows)
     assert any(r["trace_id"] == "m47b" for r in rows)
     detail = json.loads(rows[0]["detail"])  # detail 列为 JSON 字符串
@@ -85,9 +122,10 @@ def test_export_csv_shape(client: TestClient):
 
 def test_export_json_shape(client: TestClient):
     """JSON 导出：对象数组，含全部导出列，detail 为对象。"""
-    _insert("m47b.json.op", "m47b-json", detail={"k": "v"})
+    action = f"m47b.json.{uuid.uuid4().hex[:8]}"  # 每遍唯一：脏库可重入
+    _insert(action, "m47b-json", detail={"k": "v"})
     resp = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "json", "action": "m47b.json.op"})
+                      params={"format": "json", "action": action})
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("application/json")
     assert "attachment" in resp.headers["content-disposition"]
@@ -95,7 +133,7 @@ def test_export_json_shape(client: TestClient):
     data = resp.json()
     assert isinstance(data, list) and data
     assert {"id", "created_at", "action", "actor", "target", "trace_id", "detail"} <= set(data[0])
-    assert all(r["action"] == "m47b.json.op" for r in data)
+    assert all(r["action"] == action for r in data)
     assert any(r["detail"] == {"k": "v"} for r in data)
 
 
@@ -127,15 +165,17 @@ def test_export_filters(client: TestClient):
 
 def test_export_row_limit(client: TestClient, monkeypatch):
     """行数上限：请求 limit 取更小值生效；EAP_AUDIT_EXPORT_LIMIT 为硬上限（monkeypatch 模拟收紧）。"""
+    # action 名每遍唯一（M52-A 修复）：audit_logs 跨运行累积，固定名会使计数断言在脏库第二遍必红
+    action = f"m47b.limit.{uuid.uuid4().hex[:8]}"
     for i in range(5):
-        _insert("m47b.limit.op", f"m47b-limit-{i}")
+        _insert(action, f"m47b-limit-{i}")
     # 显式 limit=2 → 恰好 2 条（最新优先）
     data = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "json", "action": "m47b.limit.op", "limit": 2}).json()
+                      params={"format": "json", "action": action, "limit": 2}).json()
     assert len(data) == 2
     # limit=0 视为未指定 → 回落配置上限（默认 50000，5 条全出）
     data = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "json", "action": "m47b.limit.op", "limit": 0}).json()
+                      params={"format": "json", "action": action, "limit": 0}).json()
     assert len(data) == 5
     # 硬上限不可关闭/突破：配置 3 → 即使不传 limit 也最多 3 条
     from eap.api.v1 import audit as audit_api
@@ -145,7 +185,7 @@ def test_export_row_limit(client: TestClient, monkeypatch):
 
     monkeypatch.setattr(audit_api, "get_settings", lambda: _Stub())
     data = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "json", "action": "m47b.limit.op"}).json()
+                      params={"format": "json", "action": action}).json()
     assert len(data) == 3
 
 
@@ -161,16 +201,18 @@ def test_export_requires_admin(client: TestClient, fake_idp):  # noqa: F811  fix
 
 def test_export_action_audited(client: TestClient):
     """导出动作自身落审计 audit.export：仅条数与过滤条件（format/count/limit），不含导出内容。"""
-    _insert("m47b.audited.op", "m47b-audited")
+    # action 名每遍唯一（M52-A 修复）：固定名在脏库第二遍会导出 2 条，count==1 断言必红
+    action = f"m47b.audited.{uuid.uuid4().hex[:8]}"
+    _insert(action, "m47b-audited")
     resp = client.get("/api/v1/audit/export", headers=AUTH,
-                      params={"format": "json", "action": "m47b.audited.op"})
+                      params={"format": "json", "action": action})
     assert resp.status_code == 200
     logs = client.get("/api/v1/audit", headers=AUTH, params={"action": "audit.export"}).json()
     assert logs
     entry = logs[0]  # 最新一条即本次导出
     assert entry["detail"]["format"] == "json"
     assert entry["detail"]["count"] == 1
-    assert entry["detail"]["action"] == "m47b.audited.op"
+    assert entry["detail"]["action"] == action
     assert entry["actor"] == "api-key"
 
 

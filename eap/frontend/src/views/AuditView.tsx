@@ -39,11 +39,20 @@ export default function AuditPage() {
   // 动作目录（M50-B2）：datalist 候选提示；过滤语义不变（仍自由输入 + 后端精确匹配任意字符串）
   const [actionCatalog, setActionCatalog] = useState<string[]>([])
   const actionListId = useId()
+  // actor 目录（M52-A）：运行时 distinct 数据（后端 /audit/actors），同为 datalist 提示；过滤语义不变
+  const [actorCatalog, setActorCatalog] = useState<string[]>([])
+  const actorListId = useId()
 
   useEffect(() => {
     api<string[]>('GET', '/api/v1/audit/actions')
       .then(list => { if (Array.isArray(list)) setActionCatalog(list) })
       .catch(e => console.warn('[AuditView] 加载动作目录失败，动作过滤保持自由输入', e))
+  }, [])
+
+  useEffect(() => {
+    api<string[]>('GET', '/api/v1/audit/actors')
+      .then(list => { if (Array.isArray(list)) setActorCatalog(list) })
+      .catch(e => console.warn('[AuditView] 加载 actor 目录失败，操作者过滤保持自由输入', e))
   }, [])
 
   const load = useCallback(async () => {
@@ -106,8 +115,12 @@ export default function AuditPage() {
         </div>
         <div>
           <Label>操作者</Label>
-          <Input placeholder="api-key" value={actor}
+          {/* 目录（M52-A）：datalist 候选提示，仍自由输入（过滤语义不变，后端精确匹配任意字符串） */}
+          <Input placeholder="api-key" value={actor} list={actorListId}
             onChange={e => { setActor(e.target.value); setOffset(0) }} />
+          <datalist id={actorListId}>
+            {actorCatalog.map(a => <option key={a} value={a} />)}
+          </datalist>
         </div>
         <div>
           <Label>对象（前缀）</Label>

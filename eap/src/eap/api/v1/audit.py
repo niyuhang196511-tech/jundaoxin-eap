@@ -2,6 +2,8 @@
 + Harness 审计上报（M41-B）。
 
 查询端点：admin 语义（action 精确 / actor 精确 / target 前缀 / 时间范围 + limit/offset 分页）；
+目录端点 GET /actions（静态动作目录，M50-B2）与 GET /actors（动态 distinct actor，M52-A）：
+admin 专用，供前端过滤 datalist 候选提示，提示性质不构成白名单；
 导出端点 GET /export：admin 专用流式 CSV/JSON（行数上限 EAP_AUDIT_EXPORT_LIMIT 防拖库），
 导出动作自身落审计 audit.export（仅条数与过滤条件）；
 保留期清理 POST /purge：admin 显式触发（对齐 memory /purge 模式，无启动/周期自动扫描），
@@ -16,7 +18,7 @@ import json
 from datetime import datetime  # 模块级：_parse_local_created_at 返回注解具名（ruff F821）
 
 import fastapi
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
@@ -92,6 +94,26 @@ def list_audit_actions():
     from ...observability.audit_actions import AUDIT_ACTIONS
 
     return list(AUDIT_ACTIONS)
+
+
+@router.get("/actors", dependencies=[fastapi.Depends(require_admin)])
+def list_audit_actors(db: Session = fastapi.Depends(get_db)) -> list[str]:
+    """审计 actor 目录（M52-A）：供审计查询页操作者过滤做 datalist 候选提示。
+
+    与 /actions 静态目录的差异：动作目录是源码常量（AUDIT_ACTIONS，可静态穷举），
+    而 actor 是**运行时数据**（observability/audit.py actor_of()：jwt:<user> / api-key /
+    embed / anonymous / harness 上报 harness:<device>:<user> / 空回落 system），无法静态穷举，
+    故走真查询：distinct actor 升序、上限 500，返回扁平字符串数组（与 /actions 返回形态一致）。
+    AuditLog 无 tenant 列：admin 全局视图，与查询端点 list_audit 语义一致。
+
+    目录为提示性质，不构成白名单：查询端点的 actor 过滤仍接受任意字符串（精确匹配）。
+    诚实局限：actor 列无索引，distinct 为全表扫描；审计表有 retention purge 机制
+    （EAP_AUDIT_RETENTION_DAYS + POST /purge），量级可控，不为此加索引。
+    """
+    query = (select(func.distinct(AuditLog.actor))
+             .order_by(AuditLog.actor)
+             .limit(500))
+    return list(db.scalars(query).all())
 
 
 # ---------- 审计导出（M47-B）：admin 流式 CSV/JSON，行数上限防拖库 ----------
