@@ -9,6 +9,15 @@
 可用 EAP_TEST_GATEWAY_REDIS_URL 覆盖。
 键清理纪律：redis 用例前后 SCAN+DELETE db6 内 eap:gw:* / eap:idem:* 键；
 用例自身全部使用唯一凭证/模型名/幂等键，双保险不污染共享实例。
+
+M54-A 时序加固（docs/progress-plan.md M53 遗留登记①）：并发计数用例在 PG 全量
+脏库复跑高负载下偶发红。机理 = src 的 Redis 操作预算（异步 0.5s / 熔断同步 0.2s）
+在负载下被打穿 → 静默回退进程内计数（共享语义前提丢失）。加固三板斧，均不削弱断言：
+1) redis_url 夹具内放大操作预算（环境抖动隔离，非语义放宽）；
+2) 关键批次前以 _poll_shared_value 做「共享态收敛等待」——deadline 内轮询 Redis
+   键值达预期才继续，超时才红；
+3) 该轮询同时是反向自证探针：若实现旁路 Redis 退化进程内计数（真 bug），键值
+   永远到不了预期 → 显式红且信息明确——用例仍能真正抓错，而非放宽成恒真。
 """
 
 from __future__ import annotations
@@ -52,6 +61,65 @@ def _cleanup_keys() -> None:
                 r.delete(k)
     finally:
         r.close()
+
+
+# ---------- M54-A 时序加固参数（见模块 docstring） ----------
+_TEST_REDIS_OP_TIMEOUT_S = 3.0  # 异步客户端操作预算：0.5s → 3s（隔离负载抖动）
+_TEST_CB_REDIS_TIMEOUT_S = 1.0  # 熔断同步客户端预算：0.2s → 1s（同上）
+_POLL_DEADLINE_S = 5.0  # 共享态收敛等待预算
+_POLL_INTERVAL_S = 0.02
+
+
+def _poll_shared_value(key: str, acceptable, *, url: str = REDIS_URL,
+                       timeout_s: float = _POLL_DEADLINE_S) -> str | None:
+    """deadline 内轮询共享键值直至 acceptable(val) 成立；超时返回最后观测值（调用方断言）。
+
+    M54-A 双重身份：收敛等待 + 共享路径反向自证探针——实现若旁路 Redis 退化
+    进程内计数（真 bug / 静默降级），键值到不了预期 → 超时后断言红且信息明确。
+    同步客户端轮询：仅用于被测任务已停泊（事件/槽位已定）的确定性时点，阻塞无碍。
+    """
+    import time as _time
+
+    import redis as redis_sync
+
+    r = redis_sync.from_url(url, decode_responses=True, socket_timeout=2.0,
+                            socket_connect_timeout=2.0)
+    try:
+        deadline = _time.monotonic() + timeout_s
+        val = None
+        while True:
+            val = r.get(key)
+            if acceptable(val):
+                return val
+            if _time.monotonic() >= deadline:
+                return val
+            _time.sleep(_POLL_INTERVAL_S)
+    finally:
+        r.close()
+
+
+async def _poll_inflight_marked(url: str, key_suffix: str,
+                                *, timeout_s: float = _POLL_DEADLINE_S) -> bool:
+    """deadline 内轮询等幂等在途标记（SETNX）可见于 Redis；超时返回 False。
+
+    M54-A：替代「固定 sleep 后假定先到者已抢到标记」的概率性时序——负载下
+    SETNX 完成时刻不定，后到者若先抢到标记会让 409/合并类断言失去前提。
+    标记始终不可见 = 共享路径未生效，调用方显式红（反向自证）。
+    """
+    from eap.observability import gateway
+
+    r = gateway._aioredis_client(url)
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            if await r.keys(f"eap:idem:inflight:*{key_suffix}"):
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(_POLL_INTERVAL_S)
+    finally:
+        await r.aclose()
 
 
 def _scope(method: str = "POST", path: str = "/x", headers: list[tuple[str, str]] | None = None) -> dict:
@@ -100,11 +168,21 @@ def gw_settings(monkeypatch):
 
 @pytest.fixture()
 def redis_url(gw_settings, monkeypatch):
-    """Redis 路径：配置指向测试 db6，用例前后清键。"""
+    """Redis 路径：配置指向测试 db6，用例前后清键。
+
+    M54-A：放大 src 的 Redis 操作预算（异步 0.5s→3s、熔断同步 0.2s→1s）——
+    预算是生产调优常数而非被测语义，负载下被打穿会静默回退进程内态（共享前提
+    丢失 → 偶发红）。共享路径是否真的走 Redis 不靠预算兜底，由用例内
+    _poll_shared_value 探针显式守门（退化即显式红）。
+    """
+    from eap.observability import gateway
+
     if not _redis_alive():
         pytest.skip("本机 Redis 不可达")
     _cleanup_keys()
     monkeypatch.setattr(gw_settings, "redis_url", REDIS_URL)
+    monkeypatch.setattr(gateway, "_REDIS_SOCK_TIMEOUT_S", _TEST_REDIS_OP_TIMEOUT_S)
+    monkeypatch.setattr(gateway, "_CB_REDIS_TIMEOUT_S", _TEST_CB_REDIS_TIMEOUT_S)
     yield REDIS_URL
     _cleanup_keys()
 
@@ -287,13 +365,20 @@ def test_unreachable_redis_degrades_to_inprocess_and_warns_once(gw_settings, mon
 
 @requires_redis
 def test_concurrency_shared_across_replicas(gw_settings, redis_url):
-    """副本 A 占满共享并发额度后副本 B 被拒（429 判定基于 Redis 计数）；释放后 B 放行、键归零带 TTL。"""
+    """副本 A 占满共享并发额度后副本 B 被拒（429 判定基于 Redis 计数）；释放后 B 放行、键归零带 TTL。
+
+    M54-A 时序加固：B 进场前先以探针轮询确认「A 的槽位已落 Redis 共享计数键」
+    （entered 事件只证明 A 的 acquire 已返回，不能区分走 Redis 还是静默降级进程内）；
+    释放后的归零断言同样改为 deadline 内轮询收敛。两处探针即反向自证：共享路径
+    被旁路（真 bug）时键值到不了预期 → 显式红，断言语义未被放宽。
+    """
     from eap.observability.gateway import ConcurrencyLimitMiddleware, credential_of
 
     gw_settings.gateway_max_concurrency = 1
     mw_a = ConcurrencyLimitMiddleware(app=None)
     mw_b = ConcurrencyLimitMiddleware(app=None)
     auth = [("authorization", "Bearer " + uuid.uuid4().hex)]  # 唯一凭证 → 唯一键
+    key = f"eap:gw:conc:{credential_of(Request(_scope(headers=auth)))}"
     entered, release = asyncio.Event(), asyncio.Event()
     calls = {"a": 0, "b": 0}
 
@@ -309,7 +394,10 @@ def test_concurrency_shared_across_replicas(gw_settings, redis_url):
 
     async def scenario():
         t = asyncio.create_task(mw_a.dispatch(Request(_scope(headers=auth)), slow_a))
-        await entered.wait()  # A 已 INCR 占住唯一槽位
+        await entered.wait()  # A 已完成 acquire（INCR 返回后才可能触达下游）
+        val = _poll_shared_value(key, lambda v: v == "1")
+        assert val == "1", \
+            f"A 的槽位应已写入 Redis 共享计数键（共享路径被旁路/降级？）：{val!r}"
         r = await mw_b.dispatch(Request(_scope(headers=auth)), fast_b)
         assert r.status_code == 429, "副本 A 占满共享额度后副本 B 应被拒"
         assert r.headers["retry-after"] == "1"
@@ -321,29 +409,32 @@ def test_concurrency_shared_across_replicas(gw_settings, redis_url):
 
     asyncio.run(scenario())
 
-    import redis as redis_sync
+    val = _poll_shared_value(key, lambda v: v in (None, "0"))
+    assert val in (None, "0"), f"在途计数应归零，实际 {val!r}"
+    if val == "0":
+        import redis as redis_sync
 
-    cred = credential_of(Request(_scope(headers=auth)))
-    key = f"eap:gw:conc:{cred}"
-    r = redis_sync.from_url(redis_url, decode_responses=True)
-    try:
-        val = r.get(key)
-        assert val in (None, "0"), f"在途计数应归零，实际 {val}"
-        if val == "0":
+        r = redis_sync.from_url(redis_url, decode_responses=True)
+        try:
             assert r.ttl(key) > 0  # TTL 防泄漏（崩溃残留计数自愈）
-    finally:
-        r.close()
+        finally:
+            r.close()
 
 
 @requires_redis
 def test_concurrency_limit_is_global_not_per_replica(gw_settings, redis_url):
-    """limit=2：A、B 各占 1 槽后，任一副本再来第 3 个请求被拒——全局额度而非每副本额度。"""
-    from eap.observability.gateway import ConcurrencyLimitMiddleware
+    """limit=2：A、B 各占 1 槽后，任一副本再来第 3 个请求被拒——全局额度而非每副本额度。
+
+    M54-A：第 3 请求进场前探针轮询「共享计数 == 2」——两副本的槽位都真实落在
+    Redis（而非任一实例静默降级进程内）才验证全局拒绝；降级时探针显式红。
+    """
+    from eap.observability.gateway import ConcurrencyLimitMiddleware, credential_of
 
     gw_settings.gateway_max_concurrency = 2
     mw_a = ConcurrencyLimitMiddleware(app=None)
     mw_b = ConcurrencyLimitMiddleware(app=None)
     auth = [("authorization", "Bearer " + uuid.uuid4().hex)]
+    key = f"eap:gw:conc:{credential_of(Request(_scope(headers=auth)))}"
     both_entered = asyncio.Event()
     hold = asyncio.Event()
     n = {"in": 0}
@@ -359,6 +450,9 @@ def test_concurrency_limit_is_global_not_per_replica(gw_settings, redis_url):
         ta = asyncio.create_task(mw_a.dispatch(Request(_scope(headers=auth)), hold_on))
         tb = asyncio.create_task(mw_b.dispatch(Request(_scope(headers=auth)), hold_on))
         await both_entered.wait()  # 两副本各占 1 槽，全局额度已满
+        val = _poll_shared_value(key, lambda v: v == "2")
+        assert val == "2", \
+            f"两副本槽位应都落在 Redis 共享计数（共享路径被旁路/降级？）：{val!r}"
         r = await mw_a.dispatch(Request(_scope(headers=auth)), hold_on)
         assert r.status_code == 429
         hold.set()
@@ -507,7 +601,12 @@ def test_idempotency_inflight_cross_replica_waits_and_replays(gw_settings, monke
 
 @requires_redis
 def test_idempotency_inflight_timeout_409_then_replay(gw_settings, redis_url, monkeypatch):
-    """首次执行超过等待上限：后到者 409+Retry-After（宁可短暂拒绝不重复执行副作用）；完成后重试重放。"""
+    """首次执行超过等待上限：后到者 409+Retry-After（宁可短暂拒绝不重复执行副作用）；完成后重试重放。
+
+    M54-A：原「sleep(0.05) 假定 A 已抢到在途标记」在负载下是概率性前提（B 反抢
+    标记 → B 执行 → 409 断言失效）；改为轮询等「标记可见于 Redis」这一共享态
+    收敛后再放 B 进场——语义不变，前提由概率变确定。
+    """
     from eap.observability import gateway
 
     monkeypatch.setattr(gateway, "_IDEM_INFLIGHT_WAIT_S", 0.2)
@@ -533,7 +632,8 @@ def test_idempotency_inflight_timeout_409_then_replay(gw_settings, redis_url, mo
 
     async def scenario():
         ta = asyncio.create_task(send(mw_a, slow_a))
-        await asyncio.sleep(0.05)  # A 先抢到在途标记
+        assert await _poll_inflight_marked(redis_url, key), \
+            "A 应已抢到跨副本在途标记（SETNX）——超时说明共享路径未生效"
         rb = await send(mw_b, next_b)
         assert rb.status_code == 409
         assert rb.headers["retry-after"] == "1"
