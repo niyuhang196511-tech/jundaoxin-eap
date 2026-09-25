@@ -33,13 +33,15 @@ F_BAD_DSL = f"wfver-bad-dsl-flow-{_SFX}"
 F_ROLL = f"wfver-rollback-flow-{_SFX}"
 F_ROLL_EMPTY = f"wfver-rollback-empty-{_SFX}"
 F_DIFF = f"wfver-diff-flow-{_SFX}"
+F_DIFF_DRAFT = f"wfver-diffdraft-flow-{_SFX}"
+F_DIFF_PAIR = f"wfver-diffpair-flow-{_SFX}"
 F_CHAIN = f"wfver-chain-flow-{_SFX}"
 F_LEGACY = f"wfver-legacy-flow-{_SFX}"
 F_AGENT = f"wfver-agent-flow-{_SFX}"
 F_RBAC = f"wfver-rbac-flow-{_SFX}"
 
 _ALL_FLOWS = (F_INC, F_PIPE, F_BAD_DSL, F_ROLL, F_ROLL_EMPTY,
-              F_DIFF, F_CHAIN, F_LEGACY, F_AGENT, F_RBAC)
+              F_DIFF, F_DIFF_DRAFT, F_DIFF_PAIR, F_CHAIN, F_LEGACY, F_AGENT, F_RBAC)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -90,10 +92,15 @@ def _publish(client: TestClient, name: str, version_id: int, env: str) -> dict:
 
 def _set_record_dsl(name: str, marker: str) -> None:
     """模拟画布编辑后保存：直接更新 WorkflowRecord.dsl（无 update 端点，存草稿从此取）。"""
+    _put_dsl(name, _dsl(name, marker))
+
+
+def _put_dsl(name: str, dsl: dict) -> None:
+    """覆写 WorkflowRecord.dsl 为任意 DSL（diff 测试需要带 edges/多步骤的定制 DSL）。"""
     with SessionLocal() as db:
         record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
         assert record is not None
-        record.dsl = _dsl(name, marker)
+        record.dsl = dsl
         db.commit()
 
 
@@ -223,6 +230,91 @@ def test_diff_endpoint(client: TestClient):
     assert resp.status_code == 404
 
 
+def test_diff_against_draft(client: TestClient):
+    """M54-B diff?against=draft：版本对当前草稿——修改/新增/删除步骤 + edges 差异各现形。
+
+    只读端点不落审计（平台惯例仅写操作记审计，与 GET /{name}/versions 一致），
+    本用例不触发任何 audit.record 断言即其佐证：无需 mock 审计写入。
+    """
+    _make(client, F_DIFF_DRAFT, "A")
+    _put_dsl(F_DIFF_DRAFT, {
+        "name": F_DIFF_DRAFT, "version": "1.0.0", "description": "diff 基准",
+        "steps": [
+            {"id": "mark", "type": "tool", "tool_name": "wfver.marker",
+             "tool_args": {"value": "A"}},
+            {"id": "old", "type": "llm", "system": "将被删除"},
+        ],
+        "edges": [{"id": "e-old", "source": "mark", "target": "old", "source_handle": None}],
+    })
+    v1 = _draft(client, F_DIFF_DRAFT)
+    _put_dsl(F_DIFF_DRAFT, {
+        "name": F_DIFF_DRAFT, "version": "1.0.0", "description": "diff 对比",
+        "steps": [
+            {"id": "mark", "type": "tool", "tool_name": "wfver.marker",
+             "tool_args": {"value": "B"}},  # 修改
+            {"id": "new", "type": "tool", "tool_name": "wfver.marker",
+             "tool_args": {"value": "C"}},  # 新增
+        ],  # old 步骤被删除
+        "edges": [{"id": "e-new", "source": "mark", "target": "new", "source_handle": None}],
+    })
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_DRAFT}/versions/{v1['id']}/diff"
+                      "?against=draft", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert (data["workflow"], data["from"], data["to"]) == (F_DIFF_DRAFT, v1["id"], "draft")
+    assert data["from_meta"]["version"] == 1 and data["to_meta"] is None  # 草稿侧无版本元信息
+    changes = {c["key"]: c for c in data["changes"]}
+    # 修改：tool_args 逐字段旧→新
+    assert changes["steps.mark.tool_args"]["from"] == {"value": "A"}
+    assert changes["steps.mark.tool_args"]["to"] == {"value": "B"}
+    # 删除（to=None）/ 新增（from=None）
+    assert changes["steps.old"]["to"] is None and changes["steps.old"]["from"]["id"] == "old"
+    assert changes["steps.new"]["from"] is None and changes["steps.new"]["to"]["id"] == "new"
+    # edges 差异
+    assert changes["edges.e-old"]["to"] is None and changes["edges.e-new"]["from"] is None
+    # 顶层元信息（description）也在 diff 内
+    assert changes["description"]["from"] == "diff 基准" and changes["description"]["to"] == "diff 对比"
+
+
+def test_diff_against_version_and_errors(client: TestClient):
+    """M54-B diff?against={id}：版本对版本（带 to_meta 元信息）；同版本空差异；404/400 语义。"""
+    _make(client, F_DIFF_PAIR, "A")
+    _put_dsl(F_DIFF_PAIR, {
+        "name": F_DIFF_PAIR, "version": "1.0.0", "description": "v1",
+        "steps": [{"id": "mark", "type": "tool", "tool_name": "wfver.marker",
+                   "tool_args": {"value": "A"}}],
+    })
+    v1 = _draft(client, F_DIFF_PAIR)
+    _put_dsl(F_DIFF_PAIR, {
+        "name": F_DIFF_PAIR, "version": "1.0.0", "description": "v2",
+        "steps": [{"id": "mark", "type": "tool", "tool_name": "wfver.marker",
+                   "tool_args": {"value": "B"}}],
+    })
+    v2 = _draft(client, F_DIFF_PAIR)
+    # 版本对版本：to 侧带版本元信息
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_PAIR}/versions/{v1['id']}/diff"
+                      f"?against={v2['id']}", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["to"] == v2["id"]
+    assert data["to_meta"]["version"] == 2 and data["to_meta"]["state"] == "draft"
+    assert "steps.mark.tool_args" in {c["key"] for c in data["changes"]}
+    # 同版本自比：无差异（空列表 → 前端空态）
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_PAIR}/versions/{v1['id']}/diff"
+                      f"?against={v1['id']}", headers=AUTH)
+    assert resp.status_code == 200 and resp.json()["changes"] == []
+    # 不存在的 against 版本 → 404；不存在的基础版本 → 404；非法 against → 400
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_PAIR}/versions/{v1['id']}/diff"
+                      "?against=99999999", headers=AUTH)
+    assert resp.status_code == 404
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_PAIR}/versions/99999999/diff"
+                      "?against=draft", headers=AUTH)
+    assert resp.status_code == 404
+    resp = client.get(f"/api/v1/workflows/{F_DIFF_PAIR}/versions/{v1['id']}/diff"
+                      "?against=nonsense", headers=AUTH)
+    assert resp.status_code == 400
+
+
 # ---------- 执行解析链：显式 version > env 指定 > prod 指针 > dsl 兜底 ----------
 
 def test_resolution_chain(client: TestClient):
@@ -301,12 +393,16 @@ def test_workflow_agent_hot_update(client: TestClient):
 # ---------- RBAC ----------
 
 def test_member_cannot_write_versions(client: TestClient, fake_idp):  # noqa: F811
-    """member 角色可读版本列表，写操作（存草稿/发布/回滚）403。"""
+    """member 角色可读版本列表与 diff，写操作（存草稿/发布/回滚）403。"""
     _make(client, F_RBAC, "A")
+    v = _draft(client, F_RBAC)
     member = _make_id_token({"iss": ISSUER, "sub": "member-wfver@corp", "exp": int(time.time()) + 600,
                              "tenant_id": 1, "roles": ["member"]})
     m = {"Authorization": f"Bearer {member}"}
     assert client.get(f"/api/v1/workflows/{F_RBAC}/versions", headers=m).status_code == 200
+    # diff 只读端点鉴权对齐版本列表（无需 admin，M54-B）
+    assert client.get(f"/api/v1/workflows/{F_RBAC}/versions/{v['id']}/diff?against=draft",
+                      headers=m).status_code == 200
     assert client.post(f"/api/v1/workflows/{F_RBAC}/versions", headers=m,
                        json={"note": ""}).status_code == 403
     assert client.post(f"/api/v1/workflows/{F_RBAC}/versions/1/publish", headers=m,

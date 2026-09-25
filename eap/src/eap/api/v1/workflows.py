@@ -282,6 +282,58 @@ def diff_workflow_versions(name: str, version_a: int, version_b: int,
     return {"workflow": name, "from": version_a, "to": version_b, "changes": changes}
 
 
+def _version_meta(row: WorkflowVersionRecord) -> dict:
+    """版本元信息视图（diff 两侧各带一份：version 号/created_at/说明/state）。"""
+    return {"id": row.id, "version": row.version, "state": row.state, "note": row.note,
+            "created_at": str(row.created_at)}
+
+
+@router.get("/{name}/versions/{version_id}/diff")
+def diff_workflow_version_against(name: str, version_id: int, against: str,
+                                  db: Session = fastapi.Depends(get_db)):
+    """版本与另一版本或当前草稿的 DSL 结构化差异（M54-B，画布版本对比数据源）。
+
+    - against 取值："draft" = 与 WorkflowRecord.dsl（画布当前保存的 DSL）比较，to 侧无版本
+      元信息（to_meta=null）；数字 = 另一版本记录 id（与 GET /{name}/versions 列表 id 同义）
+    - 方向语义：from = {version_id}，to = against；changes 仅报告不同项（形态对齐既有
+      diff/{version_b} 端点与 agent diff 端点）：steps/edges 按节点/边 id 对齐，
+      逐字段比较 type/system/prompt_name/tool_name/ui_schema 等全部字段
+    - 鉴权对齐既有只读版本端点（版本列表/详情/diff 均无需 admin，仅 router 级租户+API key）
+    - 只读端点不落审计（平台惯例：仅写操作记审计，与 GET /{name}/versions 一致）
+    - 不做语义级移动检测：同 id 的步骤/边任一字段不同即记「修改」；节点位移（position
+      变化）属普通字段差异，不作特殊判定
+    """
+    record = _require_workflow(db, name)
+    row = db.scalar(select(WorkflowVersionRecord)
+                    .where(WorkflowVersionRecord.workflow_id == record.id,
+                           WorkflowVersionRecord.id == version_id))
+    if row is None:
+        raise fastapi.HTTPException(status_code=404,
+                                    detail=f"EAP-4004 工作流 {name} 版本 {version_id} 不存在")
+    if against == "draft":
+        to_dsl = record.dsl or {}
+        other_id: int | str = "draft"
+        to_meta = None
+    else:
+        try:
+            other_id = int(against)
+        except ValueError:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail=f"EAP-4000 against 需为版本 id 或 draft，收到 {against!r}") from None
+        other = db.scalar(select(WorkflowVersionRecord)
+                          .where(WorkflowVersionRecord.workflow_id == record.id,
+                                 WorkflowVersionRecord.id == other_id))
+        if other is None:
+            raise fastapi.HTTPException(status_code=404,
+                                        detail=f"EAP-4004 工作流 {name} 版本 {other_id} 不存在")
+        to_dsl = other.dsl or {}
+        to_meta = _version_meta(other)
+    changes = workflow_versions.diff_dsl(row.dsl or {}, to_dsl)
+    return {"workflow": name, "from": version_id, "to": other_id,
+            "from_meta": _version_meta(row), "to_meta": to_meta, "changes": changes}
+
+
 @router.post("/reload", dependencies=[fastapi.Depends(require_admin)])
 async def reload_workflows(request: fastapi.Request):
     """从 DB 重新加载启用的 DSL 工作流（幂等注册）。"""

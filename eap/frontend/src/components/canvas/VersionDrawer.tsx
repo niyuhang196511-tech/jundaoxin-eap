@@ -1,11 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { RotateCcw, Save } from 'lucide-react'
+import { GitCompareArrows, RotateCcw, Save } from 'lucide-react'
 import {
   Badge, Button, DrawerContent, Label, Select, toast,
 } from '@/components/ui'
 import { workflowVersionsApi, type WorkflowVersion, type WorkflowVersionsPayload, type WfEnv } from '@/lib/api'
+import { WfVersionDiffDialog } from './VersionDiffDialog'
 
 const STATE_TONE: Record<WorkflowVersion['state'], 'green' | 'gray' | 'blue'> = {
   published: 'green', draft: 'gray', archived: 'blue',
@@ -26,6 +27,7 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
 }) {
   const [data, setData] = useState<WorkflowVersionsPayload | null>(null)
   const [env, setEnv] = useState<WfEnv>('prod')
+  const [diffOpen, setDiffOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -55,9 +57,10 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
     data?.versions.find(v => v.state === 'published' && v.env === e)
 
   return (
-    <DrawerContent
-      title={`版本 · ${workflow}`}
-      description={data?.published_version_id
+    <>
+      <DrawerContent
+        title={`版本 · ${workflow}`}
+        description={data?.published_version_id
         ? `当前生产版本：v${data.versions.find(v => v.id === data.published_version_id)?.version ?? '?'}`
         : '未发布生产版本（按草稿 DSL 运行）'}
       width={480}
@@ -70,6 +73,12 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
               await workflowVersionsApi.saveDraft(workflow, '')
             }, '已保存草稿（版本号自动递增）')}>
             <Save className="size-3.5" />存草稿
+          </Button>
+          {/* M54-B：版本 diff 可视化入口 */}
+          <Button variant="ghost" title="对比两个版本（或当前草稿）的 DSL 差异"
+            disabled={!data?.versions.length}
+            onClick={() => setDiffOpen(true)}>
+            <GitCompareArrows className="size-3.5" />对比
           </Button>
           <Button variant="secondary" title={`回滚 ${env} 环境到上一版`}
             disabled={!currentOnEnv(env)}
@@ -116,6 +125,14 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
           </div>
         ))}
       </div>
-    </DrawerContent>
+      </DrawerContent>
+      {/* M54-B 版本对比弹窗：从版本列表选两侧（to 侧可为草稿），结构化渲染 diff */}
+      <WfVersionDiffDialog
+        workflow={workflow}
+        versions={data?.versions ?? []}
+        open={diffOpen}
+        onOpenChange={setDiffOpen}
+      />
+    </>
   )
 }

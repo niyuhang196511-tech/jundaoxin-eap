@@ -554,6 +554,40 @@ export const agentsApi = {
 
 export const workflowsApi = {
   list: () => api<{ name: string; version?: number; enabled?: boolean }[]>('GET', '/api/v1/workflows'),
+  /** 版本与另一版本/草稿的结构化 diff（M54-B，画布版本对比） */
+  diff: (name: string, versionId: number, against: number | 'draft') =>
+    api<WorkflowDiffPayload>(
+      'GET',
+      `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/diff`
+        + `?against=${typeof against === 'number' ? against : 'draft'}`,
+    ),
+}
+
+/* ---------- 画布版本 diff 载荷（M54-B） ---------- */
+
+/** diff 两侧的版本元信息（to 侧为草稿时后端回 null——草稿无版本记录） */
+export type WorkflowDiffMeta = {
+  id: number
+  version: number
+  state: WfVersionState
+  note: string
+  created_at: string
+}
+
+/** 单条差异：key 形如 name / steps.<id>[.<field>] / edges.<id>[.<field>]；from/to 为 null 表示新增/删除 */
+export type WorkflowDiffChange = {
+  key: string
+  from?: unknown
+  to?: unknown
+}
+
+export type WorkflowDiffPayload = {
+  workflow: string
+  from: number
+  to: number | 'draft'
+  from_meta: WorkflowDiffMeta
+  to_meta: WorkflowDiffMeta | null
+  changes: WorkflowDiffChange[]
 }
 
 /* ---------- 连接器编辑流类型（M52-C） ---------- */
