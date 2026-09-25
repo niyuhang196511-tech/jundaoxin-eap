@@ -48,6 +48,13 @@ async def _serve() -> None:
     from .db import init_db
 
     init_db()
+    # M55-A（双进程压测发现）：独立 worker 同样需要注册引导——registry.bootstrap
+    # 原先只在 API 进程 lifespan 执行，HA 形态（API EAP_WORKER_COUNT=0 + 独立 worker，
+    # deploy/docker-compose.ha.yml）下 worker 注册表为空，agent.invoke/hitl 任务
+    # 全数 FAILED（"智能体 faq-agent 未注册"）。与 lifespan 同序：init_db → bootstrap → 引擎。
+    from .agents.registry import registry
+
+    await registry.bootstrap()
     engine = create_task_engine()
     await engine.start(workers=s.worker_count)
     log.info("EAP worker v%s 就绪：workers=%d lease=%ds backend=%s db=%s",
