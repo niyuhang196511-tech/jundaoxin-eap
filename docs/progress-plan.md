@@ -19,7 +19,7 @@
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
 | 最新里程碑 | M56（perf-M56 gateway Redis 连接池共享——每请求 2+ 次 TCP 建连/销毁 → 按 (url,预算,loop) 复用池，7 调用点收口） |
-| 代码 commit |  |
+| 代码 commit | 6cbd3e1 |
 | 快照日期 | 2026-09-25 |
 | 测试基线 | **SQLite 569 passed + 21 skipped**（fresh，含 M56 池共享回归用例）+ **同库脏复跑两连遍全绿**（可重入纪律保持） + MCP/Redis 集成 6 passed + **PG 实测 582 passed + 8 skipped（fresh）+ PG 同库全量复跑全绿** + **ruff F/E9 全树零错** + 控制台 typecheck/vitest 14 条 + **E2E（Playwright）12 条全绿** + check_docs/check_observability（8 PASS）绿（openapi 无接口变化未重导出，177 paths/214 endpoints 沿 M55 版本）；CI run 待推送后确认 |
 | 下一主线 | 账本可代码化项持续清零（M56 性能优化项消化）；余量见「M56 遗留登记」行；外部条件项（⑦-Knowledge 用户主体目录/SDK 发布/seal/i18n 全量/移动端/alertmanager 真实渠道/L 组）不变；Mimosa git-gate 门禁遗留定性项见 M52 遗留登记⑥ |
