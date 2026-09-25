@@ -7,6 +7,10 @@ PATCH /{name} 局部更新（name/kind 不可变；secret 三态：缺省保留 
 合并后逐 kind 校验；base_url/config/endpoints 变更 → status 重置 pending；审计 connector.update）。
 M53-B 增量：DELETE /{name} 硬删除（触发器规则引用 → 409 阻断不级联；工具池实时读库即删即消失；
 密钥/令牌列随行删除；审计 connector.delete）。
+M55-D 增量：sql kind dialect=postgresql（psycopg 运行时）——config.database 须为
+env:VAR_NAME 引用形态：config 列是 JSON 明文落库（api_key/oauth 才走 Fernet 加密链），
+DSN 含密码直接落库即泄密面，故经环境变量注入不落库；create/PATCH 合并后值共用
+_sql_database_violation 校验（EAP-7003）。
 """
 
 from __future__ import annotations
@@ -48,13 +52,37 @@ class ConnectorCreate(BaseModel):
     api_key: str | None = None
     endpoints: list[EndpointDef] = Field(min_length=1, max_length=32)
     enabled: bool = True
-    # sql kind 类型专属配置：{"dialect": "sqlite", "database": "<path>"}
+    # sql kind 类型专属配置：{"dialect": "sqlite", "database": "<库文件路径>"}
+    # 或 {"dialect": "postgresql", "database": "env:VAR_NAME"}（M55-D：DSN 经环境变量
+    # 注入不落库——config 列明文，直接填 DSN 会被 EAP-7003 拒绝）
     config: dict | None = None
     # OAuth2 凭证托管（M31 任务组 C）：secret Fernet 加密落库，查询不回显
     oauth_client_id: str | None = Field(default=None, max_length=256)
     oauth_client_secret: str | None = Field(default=None, max_length=512)
     oauth_token_url: str | None = Field(default=None, max_length=512)
     oauth_scopes: str | None = Field(default=None, max_length=512)
+
+
+def _sql_database_violation(config: dict | None) -> str | None:
+    """sql kind config.database 校验文案（None = 通过）；create 与 PATCH 合并后值共用。
+
+    - 必填（EAP-7003，与历史语义一致）；
+    - M55-D：dialect=postgresql 时须为 env:VAR_NAME 引用形态——config 列为 JSON 明文
+      落库（api_key/oauth 才走 Fernet 加密链），DSN 含密码直接落库即泄密面，
+      故要求经环境变量注入（运行时 os.environ 取值，DSN 不落库）。
+    """
+    cfg = config or {}
+    database = str(cfg.get("database") or "")
+    if not database:
+        return "EAP-7003 sql 连接器必须提供 config.database"
+    if str(cfg.get("dialect") or "sqlite").lower() == "postgresql":
+        from ...runtime.connectors import pg_env_var_name
+
+        if pg_env_var_name(database) is None:
+            return ("EAP-7003 postgresql 连接器 config.database 须为 env:VAR_NAME 引用形态"
+                    "（config 明文落库，DSN 含密码须经环境变量注入不落库；"
+                    "示例见 deploy/.env.example.prod）")
+    return None
 
 
 def _view(r: ConnectorRecord) -> dict:
@@ -78,9 +106,9 @@ def create_connector(body: ConnectorCreate, request: fastapi.Request, db: Sessio
     if body.kind == "rest" and not body.base_url.lower().startswith(("http://", "https://")):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7002 rest 连接器必须提供 http(s) base_url")
     if body.kind == "sql":
-        if not (body.config or {}).get("database"):
-            raise fastapi.HTTPException(status_code=400,
-                                        detail="EAP-7003 sql 连接器必须提供 config.database")
+        err = _sql_database_violation(body.config)
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=err)
         if any(not e.query for e in body.endpoints):
             raise fastapi.HTTPException(status_code=400,
                                         detail="EAP-7003 sql 连接器每个端点必须提供 query")
@@ -289,9 +317,9 @@ def update_connector(name: str, body: ConnectorUpdate, request: fastapi.Request,
     if record.kind == "rest" and not base_url.lower().startswith(("http://", "https://")):
         raise fastapi.HTTPException(status_code=400, detail="EAP-7002 rest 连接器必须提供 http(s) base_url")
     if record.kind == "sql":
-        if not (config or {}).get("database"):
-            raise fastapi.HTTPException(status_code=400,
-                                        detail="EAP-7003 sql 连接器必须提供 config.database")
+        err = _sql_database_violation(config)  # 合并后最终值校验（M52-C 语义不变）
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=err)
         if any(not (e or {}).get("query") for e in endpoints):
             raise fastapi.HTTPException(status_code=400,
                                         detail="EAP-7003 sql 连接器每个端点必须提供 query")

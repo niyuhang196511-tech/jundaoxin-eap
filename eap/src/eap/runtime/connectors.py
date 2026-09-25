@@ -3,7 +3,10 @@
 - rest：httpx 按 endpoint 的 method/path 调外部系统（GET → query，POST/PUT → JSON body）
 - mock-erp：内置离线演示 ERP（库存查询/下单），供开发与测试
 - sql（M31 任务组 C）：只读 SELECT 查询（白名单校验 + 命名参数绑定 + 行数上限），
-  sqlite 首要落地；其它 dialect 未装驱动时运行时报清晰错误
+  sqlite 首要落地；postgresql 走 psycopg sync 连接（M55-D：postgres extra 提供驱动，
+  分支内惰性 import；DSN 经 config.database=env:VAR_NAME 环境变量引用注入，不落库——
+  config 列为 JSON 明文，DSN 含密码直接落库即泄密面）；其它 dialect 未装驱动时
+  运行时报清晰错误
 - OAuth2 凭证托管（M31 任务组 C）：client_credentials / authorization_code / refresh_token，
   token HTTP 经可注入 transport（http_client_factory，测试替换为离线假件）
 
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -121,7 +125,8 @@ def _rest_handler(record: ConnectorRecord, endpoint: dict):
     return handler
 
 
-# ---------- SQL 连接器 kind（M31 任务组 C）：只读白名单 + 命名参数绑定 + 行数上限 ----------
+# ---------- SQL 连接器 kind（M31 任务组 C；M55-D 增 postgresql/psycopg 运行时）：
+#            只读白名单 + 命名参数绑定 + 行数上限 ----------
 
 # 写关键字词边界匹配（防 xxxSELECT 之类的绕过由首词校验兜底；此处防语句中出现写动作。
 # 不含 replace：replace() 是合法读函数，REPLACE INTO 写语句已被首词校验拒绝）
@@ -131,7 +136,9 @@ _SQL_FORBIDDEN = re.compile(
 _SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _SQL_FIRST_WORD = re.compile(r"^[a-zA-Z_]+")
-_SQL_NAMED_PARAM = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
+_SQL_NAMED_PARAM = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
+# 负向后行 (?<!:)：postgresql 的 ::type 强转（如 id::text）不被误当命名占位
+# （sqlite 无 :: 语法，既有查询不受影响）
 
 
 def _validate_readonly_sql(query: str) -> str:
@@ -160,8 +167,12 @@ def _validate_readonly_sql(query: str) -> str:
     return body
 
 
-def _sql_bind(query: str, args: dict) -> tuple[str, list]:
-    """命名占位（:name）→ sqlite ? 位置绑定：值不进 SQL 文本，杜绝注入。"""
+def _sql_bind(query: str, args: dict, marker: str = "?") -> tuple[str, list]:
+    """命名占位（:name）→ 位置绑定（sqlite ``?`` / postgresql ``%s``）：值不进 SQL 文本，杜绝注入。
+
+    marker="%s"（psycopg）时先把查询里的字面 ``%`` 转义为 ``%%``（psycopg 参数化规则），
+    再插 %s 占位——LIKE 'A%' 之类的字面百分号不会被误当占位前缀。
+    """
     values: list = []
     missing: set[str] = set()
 
@@ -169,11 +180,12 @@ def _sql_bind(query: str, args: dict) -> tuple[str, list]:
         key = m.group(1)
         if key in args:
             values.append(args[key])
-            return "?"
+            return marker
         missing.add(key)
         return m.group(0)
 
-    converted = _SQL_NAMED_PARAM.sub(_repl, query)
+    source = query.replace("%", "%%") if marker != "?" else query
+    converted = _SQL_NAMED_PARAM.sub(_repl, source)
     if missing:
         raise ValueError(f"EAP-7000 SQL 端点缺少命名参数: {', '.join(sorted(missing))}")
     return converted, values
@@ -190,13 +202,51 @@ def _sql_max_rows() -> int:
 
 
 def _sqlite_config(record: ConnectorRecord) -> tuple[str, str]:
-    """取 SQL 连接器配置：返回 (dialect, database)。"""
+    """取 SQL 连接器配置：返回 (dialect, database)。
+
+    database 语义随 dialect：sqlite 为库文件路径；postgresql 为 env:VAR_NAME 引用
+    （DSN 经环境变量注入不落库，见 _resolve_pg_dsn）。函数名保留 sqlite 沿革。
+    """
     cfg = record.config or {}
     dialect = str(cfg.get("dialect") or "sqlite").lower()
     database = str(cfg.get("database") or "")
     if not database:
         raise ValueError("EAP-7003 SQL 连接器 config.database 未配置")
     return dialect, database
+
+
+# postgresql config.database 只接受 env:VAR_NAME 引用形态（M55-D 安全取舍）：
+# config 列是 JSON 明文落库（api_key/oauth 才走 Fernet 加密链），DSN 含密码若直接
+# 落库即泄密面——故一律经环境变量引用，运行时 os.environ 取值，DSN 不落库。
+# 取舍理由：不动 sqlite 现状、零迁移、密钥面最小（方案 b 把 database 纳入加密需改列语义）。
+_PG_ENV_DB = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def pg_env_var_name(database: str) -> str | None:
+    """postgresql config.database 的 env:VAR 形态校验：合法返回变量名，否则 None。
+
+    api/v1/connectors.py create/PATCH 校验与运行时解析共用同一规则（fail-closed 一致）。
+    """
+    m = _PG_ENV_DB.match(database or "")
+    return m.group(1) if m else None
+
+
+def _resolve_pg_dsn(database: str) -> str:
+    """解析 postgresql DSN：env:VAR → os.environ 取值。
+
+    缺变量 → EAP-7003 清晰报错（先于驱动 import 触发，无 psycopg 的环境同样可诊断）。
+    """
+    var = pg_env_var_name(database)
+    if var is None:
+        raise ValueError(
+            "EAP-7003 postgresql 连接器 config.database 须为 env:VAR_NAME 引用形态"
+            "（config 明文落库，DSN 含密码须经环境变量注入不落库；示例见 .env.example.prod）")
+    dsn = os.environ.get(var)
+    if not dsn:
+        raise ValueError(
+            f"EAP-7003 环境变量 {var} 未设置：postgresql 连接器 DSN 经 env:{var} 引用注入"
+            "（在部署环境配置该变量后重启生效；URL 或 key=value 串均可）")
+    return dsn
 
 
 def _run_sqlite_query(database: str, sql: str, values: list, max_rows: int) -> dict:
@@ -214,14 +264,42 @@ def _run_sqlite_query(database: str, sql: str, values: list, max_rows: int) -> d
         conn.close()
 
 
-def _require_dialect_driver(dialect: str) -> None:
-    """非 sqlite dialect：运行时报清晰错误（不新增依赖；sqlite 为首要落地）。"""
+def _run_pg_query(dsn: str, sql: str, values: list, max_rows: int) -> dict:
+    """postgresql 只读查询（psycopg sync 连接，线程内执行供 to_thread/wait_for）。
+
+    执行形态对齐 _run_sqlite_query：短连接 + 单语句 + fetchmany(max_rows+1) 判截断；
+    连接阶段 connect_timeout=5s，查询阶段由外层 wait_for 兜底。只读纪律不靠驱动：
+    上游 _validate_readonly_sql 白名单已拦截写语句/多语句，本层不再放行。
+    驱动惰性 import：psycopg 不进基础依赖（postgres extra 提供），缺失 → 清晰错误。
+    """
     try:
-        import psycopg  # noqa: F401
+        import psycopg
     except ImportError:
         raise ValueError(
-            f"EAP-7003 dialect={dialect} 需要 psycopg 驱动（当前环境未安装，不随平台引入依赖）") from None
-    raise ValueError(f"EAP-7003 SQL 连接器当前仅支持 sqlite（dialect={dialect} 的 psycopg 运行时未启用）")
+            "EAP-7003 dialect=postgresql 需要 psycopg 驱动（当前环境未安装；"
+            "平台经 postgres extra 提供，安装后重启生效）") from None
+
+    conn = psycopg.connect(dsn, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, values)
+            columns = [d.name for d in cur.description] if cur.description else []
+            rows = [list(r) for r in cur.fetchmany(max_rows + 1)]  # 多取 1 行判断截断
+            truncated = len(rows) > max_rows
+            return {"columns": columns, "rows": rows[:max_rows], "truncated": truncated}
+    finally:
+        conn.close()
+
+
+def _require_dialect_driver(dialect: str) -> None:
+    """sqlite/postgresql 之外的 dialect：运行时报清晰错误（不新增依赖）。
+
+    sqlite 内置首要落地；postgresql 走 psycopg 运行时（M55-D）。其余 dialect 需先
+    引入对应驱动并接入运行时（保持「驱动未安装/未接入」报错语义，不静默失败）。
+    """
+    raise ValueError(
+        f"EAP-7003 SQL 连接器 dialect={dialect} 驱动未安装或未接入运行时"
+        "（当前支持 sqlite 与 postgresql）")
 
 
 def _sql_handler(record: ConnectorRecord, endpoint: dict):
@@ -234,13 +312,23 @@ def _sql_handler(record: ConnectorRecord, endpoint: dict):
         if not isinstance(args, dict):
             raise ValueError("EAP-7000 SQL 端点参数须为 JSON 对象")
         dialect, database = _sqlite_config(record)
-        if dialect != "sqlite":
+        if dialect == "sqlite":
+            converted, values = _sql_bind(sql, args, "?")
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_run_sqlite_query, database, converted, values,
+                                  _sql_max_rows()),
+                timeout=_TIMEOUT)
+        elif dialect == "postgresql":
+            dsn = _resolve_pg_dsn(database)  # env:VAR → DSN；缺 env 先于驱动 import 报错
+            converted, values = _sql_bind(sql, args, "%s")
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_run_pg_query, dsn, converted, values,
+                                  _sql_max_rows()),
+                timeout=_TIMEOUT)
+        else:
             _require_dialect_driver(dialect)
-        converted, values = _sql_bind(sql, args)
-        result = await asyncio.wait_for(
-            asyncio.to_thread(_run_sqlite_query, database, converted, values, _sql_max_rows()),
-            timeout=_TIMEOUT)
-        return json.dumps(result, ensure_ascii=False)
+        # default=str：postgresql 原生类型（timestamp/Decimal 等）可序列化（sqlite 原本全可序列化）
+        return json.dumps(result, ensure_ascii=False, default=str)
 
     return handler
 
@@ -264,15 +352,25 @@ register_connector_kind("sql", _sql_tools)
 
 
 async def sql_health_probe(record: ConnectorRecord) -> tuple[bool, str]:
-    """SQL 连接器健康探测：执行 SELECT 1（5s 超时）。返回 (ok, detail)。"""
+    """SQL 连接器健康探测：执行 SELECT 1（5s 超时）。返回 (ok, detail)。
+
+    sqlite / postgresql（psycopg，M55-D）均支持。detail 只含 sqlite 库路径或
+    env:VAR 引用字面量，**不回显 DSN**（防密码泄漏到响应/审计）。
+    """
     try:
         dialect, database = _sqlite_config(record)
-        if dialect != "sqlite":
-            _require_dialect_driver(dialect)
-        await asyncio.wait_for(
-            asyncio.to_thread(_run_sqlite_query, database, "SELECT 1", [], 1),
-            timeout=_HEALTH_TIMEOUT)
-        return True, f"sqlite SELECT 1 正常（{database}）"
+        if dialect == "sqlite":
+            await asyncio.wait_for(
+                asyncio.to_thread(_run_sqlite_query, database, "SELECT 1", [], 1),
+                timeout=_HEALTH_TIMEOUT)
+            return True, f"sqlite SELECT 1 正常（{database}）"
+        if dialect == "postgresql":
+            dsn = _resolve_pg_dsn(database)
+            await asyncio.wait_for(
+                asyncio.to_thread(_run_pg_query, dsn, "SELECT 1", [], 1),
+                timeout=_HEALTH_TIMEOUT)
+            return True, f"postgresql SELECT 1 正常（{database}）"  # database=env:VAR 字面量，非 DSN
+        _require_dialect_driver(dialect)
     except Exception as e:
         return False, str(e)[:200]
 

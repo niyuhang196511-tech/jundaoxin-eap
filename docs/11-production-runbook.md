@@ -393,4 +393,46 @@ detected fields（metadata）中。当前 `grafana-dashboard-eap.json` 全部面
 ### 9.6 依赖漏洞扫描
 
 CI `dependency-scan` job（[.github/workflows/ci.yml](../.github/workflows/ci.yml)）：
-`pip-audit`（后端锁文件）+ `pnpm audit --prod --audit-level=high`（控制台），高危即红。
+`pip-audit`（后端锁文件）+ `pnpm audit --prod --audit-level=high`（高危即红）。
+
+### 9.7 chunked 请求体收口（M55-B，`EAP_GATEWAY_CHUNKED_MODE`）
+
+应用网关的请求体上限（`EAP_GATEWAY_MAX_BODY_BYTES`，默认 10MB → 413）只校验
+Content-Length 头；chunked 传输（无 Content-Length）的请求体按
+`EAP_GATEWAY_CHUNKED_MODE` 两档策略治理：
+
+- **proxy（缺省，向后兼容）**：网关不拦 chunked 请求，长度界定**信任前置反代收口**——
+  这是平台与反代之间的运维契约：前置 nginx 必须设置 `client_max_body_size`
+  （[deploy/nginx.conf](../deploy/nginx.conf) 已设 16m，对 chunked 请求体同样强制，
+  超限 413）；**自建反代/上层 LB 必须复制该配置**，否则 chunked 请求体在整条链路上
+  无上限（慢速/巨体攻击面）。启动日志会写明该契约（`网关 chunked 请求体策略=proxy`）。
+- **reject**：无法前置收口的部署（反代不可控、直连暴露、多级代理难逐层对齐）把开关
+  置 `reject`，应用网关在读体之前对带 `Transfer-Encoding: chunked` 的请求直接
+  **411 Length Required**（错误码 `EAP-411`，计数 `eap_gateway_rejected_total{reason="chunked_body"}`）。
+  语义选择：拒绝原因是「缺长度界定」而非「体过大」，411 比 413 准确；拒绝不消费请求体，
+  无慢速读体攻击面。带 Content-Length 的请求行为两档完全一致（既有 413 语义不变）。
+  客户端侧适配：改用带 Content-Length 的请求（如 SDK/网关客户端重写帧）。
+
+配置非法值（如 `block`）回落 proxy 并告警一次（对齐 `EAP_AUDIT_EXPORT_LIMIT` 非法回落
+惯例）。注意边界：平台判定只看本层 scope 头的 `Transfer-Encoding`——若前置反代已把
+chunked 请求体解帧为带 Content-Length 再转发（nginx 默认即此行为），reject 模式不会误伤
+正常反代流量；同理反代若伪造/透传异常头，平台只对直连形态负责。
+
+### 9.8 SQL 连接器 postgresql 运行时（M55-D）
+
+sql kind 连接器（只读 SELECT 白名单）在 sqlite 之外支持 postgresql（psycopg sync 连接）：
+
+- **DSN 经环境变量注入，不落库**：`config.database` 只接受 `env:VAR_NAME` 引用形态——
+  连接器 config 列是 JSON 明文落库（api_key/OAuth secret 才走 Fernet 加密链），DSN 含
+  密码直接落库即泄密面。登记/PATCH 提交裸 DSN（URL 或 key=value 串）直接 400（EAP-7003）；
+  变量名示例见 [deploy/.env.example.prod](../deploy/.env.example.prod)。
+- 运行时从 `os.environ[VAR]` 取 DSN（`postgresql://…` URL 或 `host=… dbname=…` 串均可），
+  变量缺失 → 工具调用/健康探测返回 EAP-7003 清晰报错（配置后重启生效）。
+- 只读纪律与 sqlite 完全一致（复用同一校验）：首词必须 SELECT、写关键字词边界拦截
+  （INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/ATTACH/DETACH/PRAGMA/VACUUM/GRANT/REVOKE）、
+  拒绝多语句、行数上限 `EAP_CONNECTOR_SQL_MAX_ROWS`（默认 200）、命名参数 `:name` 绑定。
+  跨租户数据隔离由 DSN 指向的库/角色（admin 配置）决定。
+- 驱动不随平台基础依赖引入：postgres extra 提供（`psycopg[binary]`，backend-postgres CI
+  job 同款），缺驱动时运行时报清晰错误。
+- 健康探测（`POST /api/v1/connectors/{name}/health`、`/{name}/validate`）对 postgresql 执行
+  `SELECT 1`；响应 detail 只含 `env:VAR` 字面量，不回显 DSN。
