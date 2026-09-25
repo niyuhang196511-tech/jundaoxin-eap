@@ -5332,6 +5332,47 @@
       }
     },
     "/api/v1/connectors/{name}": {
+      "delete": {
+        "description": "删除连接器（M53-B，admin + 审计 connector.delete）。\n\n引用语义与取舍（全仓消费点调研结论）：\n\n- **触发器规则硬引用 → 409 阻断，不级联**：trigger_rules(target_type=connector)\n  以 target_name 按名引用，连接器删除后规则悬空——每次触发都落\n  EAP-4004 error 审计噪音，且规则可被随时重新启用。触发器有独立生命周期\n  （自己的 CRUD/审计页），平台无级联改动独立对象的先例（webhook 端点删除只清\n  **自有子表** deliveries，M49-C；影子配置删除明确**保留**历史 shadow_runs），\n  故不代删/代停规则，409 EAP-2002 列出全部引用规则（**含停用规则**——停用可再\n  启用，留悬空即埋雷），要求管理员先在触发器页删除或改绑。\n- **agent/workflow 的 tool_name 软引用不阻断**：工具池实时读库\n  （load_connector_tools / resolve_tool / collect_option_tools），删除即工具自然\n  消失；运行中任务持旧引用会在下一次解析时「工具未注册」失败/降级——可见的\n  降级路径，不为此阻塞删除（如实记录于本 docstring）。\n- **密钥随行删除**：api_key / OAuth client_secret / access/refresh token 均为\n  本表列（无子表，无级联问题），整行删除即密文一并消失、不可恢复；事件日志\n  connector.invoked 与审计历史**保留**（历史记录不随配置删除，对齐 shadow_runs\n  先例）。",
+        "operationId": "delete_connector_api_v1_connectors__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Connector"
+      },
       "get": {
         "description": "连接器详情（M52-C，admin）：编辑对话框回填用完整视图，secret 不回显。",
         "operationId": "connector_detail_api_v1_connectors__name__get",
