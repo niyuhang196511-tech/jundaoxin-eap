@@ -1,13 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
   Badge, Button, Checkbox, ChipPicker, ConfirmDialog, DegradeNote, DialogContent, Input, Label, PageHeader, Select, Table, TabBar, Textarea, toast,
   type BadgeTone,
 } from '@/components/ui'
 import {
   agentsApi, api, connectorsApi, triggersApi, webhooksApi, workflowsApi,
+  type ConnectorDetail, type ConnectorPatch,
   type TriggerRule, type WebhookDelivery, type WebhookEndpoint,
 } from '@/lib/api'
 
@@ -24,6 +25,8 @@ type ImChannel = { name: string; platform: string; agent: string; enabled: boole
 
 const STATUS_TONE: Record<string, BadgeTone> = {
   verified: 'green', unreachable: 'red', registered: 'blue',
+  // M52-C：PATCH 变更 base_url/config/endpoints 后连接目标变了 → 后端重置 pending 待重新验证
+  pending: 'amber',
 }
 
 const WH_STATUS_TONE: Record<string, BadgeTone> = {
@@ -89,6 +92,19 @@ function serializeEndpointRows(rows: EndpointRow[], kind: string): Record<string
   })
 }
 
+/** 值级 JSON 对比（键序不敏感，M52-C）：编辑模式「只发改动过的字段」的判定基础 */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm)
+    if (v && typeof v === 'object') {
+      return Object.keys(v as Record<string, unknown>).sort()
+        .map(k => [k, norm((v as Record<string, unknown>)[k])] as const)
+    }
+    return v
+  }
+  return JSON.stringify(norm(a)) === JSON.stringify(norm(b))
+}
+
 /** 企业集成：连接器（业务系统 API）+ IM 渠道（群机器人 webhook）+ 对外 Webhook 推送 + 事件触发器 */
 export default function IntegrationsPage() {
   return (
@@ -107,11 +123,24 @@ export default function IntegrationsPage() {
 function ConnectorsTab() {
   const [list, setList] = useState<Connector[]>([])
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ name: '', kind: 'rest', description: '', baseUrl: '' })
+  // 双模式对话框（M52-C）：editing 非空 = 编辑该连接器，null = 注册新连接器
+  const [editing, setEditing] = useState<string | null>(null)
+  // 详情回填快照：编辑模式「只发改动过的字段」的对比基准 + has_* secret 存在性
+  const [detail, setDetail] = useState<ConnectorDetail | null>(null)
+  const [form, setForm] = useState({
+    name: '', kind: 'rest', description: '', baseUrl: '', headerName: 'Authorization',
+    apiKey: '', oauthClientId: '', oauthSecret: '', oauthTokenUrl: '', oauthScopes: '',
+  })
   // endpoints 行编辑（null = 解析失败降级回 JSON textarea，诚实降级不丢数据）
   const [epRows, setEpRows] = useState<EndpointRow[] | null>(null)
   const [epRaw, setEpRaw] = useState(DEFAULT_ENDPOINTS)
   const [epNote, setEpNote] = useState('')
+  // endpoints 改动对比基线（M52-C）：行模式 = 回填行的序列化结果（行不保留的
+  // description/params 不误判为改动）；JSON 模式 = 详情原样。null = 注册模式不对比
+  const [epBaseline, setEpBaseline] = useState<unknown>(null)
+  // secret 三态显式清除入口（M52-C）：勾选 → 提交 ""（后端置 None）；输入框留空 = 保留
+  const [clearApiKey, setClearApiKey] = useState(false)
+  const [clearOauthSecret, setClearOauthSecret] = useState(false)
   // sql kind 专属 config（M50-B1）：后端只消费 dialect（缺省 sqlite）与 database
   // （必填，缺了 400 EAP-7003）两个键——runtime/connectors.py _sqlite_config 为准，
   // 不存在 host/port/user/password 键，不虚构
@@ -128,13 +157,54 @@ function ConnectorsTab() {
   useEffect(() => { load() }, [load])
 
   const openCreate = () => {
-    setForm({ name: '', kind: 'rest', description: '', baseUrl: '' })
+    setEditing(null)
+    setDetail(null)
+    setEpBaseline(null)
+    setClearApiKey(false)
+    setClearOauthSecret(false)
+    setForm({
+      name: '', kind: 'rest', description: '', baseUrl: '', headerName: 'Authorization',
+      apiKey: '', oauthClientId: '', oauthSecret: '', oauthTokenUrl: '', oauthScopes: '',
+    })
     const rows = parseEndpointRows(DEFAULT_ENDPOINTS)
     setEpRows(rows)
     setEpRaw(DEFAULT_ENDPOINTS)
     setEpNote(rows ? '' : 'Endpoints 模板解析失败，已降级为 JSON 编辑')
     setSqlCfg({ dialect: 'sqlite', database: '' })
     setOpen(true)
+  }
+
+  /** 编辑入口（M52-C）：详情端点回填表单；secret 不回显——输入框留空 = 保留原值 */
+  const openEdit = async (name: string) => {
+    setBusy(`edit-${name}`)
+    try {
+      const d = await connectorsApi.detail(name)
+      setEditing(name)
+      setDetail(d)
+      setForm({
+        name: d.name, kind: d.kind, description: d.description ?? '', baseUrl: d.base_url ?? '',
+        headerName: d.header_name || 'Authorization',
+        apiKey: '', oauthClientId: d.oauth_client_id ?? '', oauthSecret: '',
+        oauthTokenUrl: d.oauth_token_url ?? '', oauthScopes: d.oauth_scopes ?? '',
+      })
+      setClearApiKey(false)
+      setClearOauthSecret(false)
+      // endpoints 行编辑器直接吃全对象；解析失败降级 JSON 编辑（全字段保留不丢数据）
+      const eps = d.endpoints ?? []
+      const raw = JSON.stringify(eps, null, 2)
+      const rows = parseEndpointRows(raw)
+      setEpRows(rows)
+      setEpRaw(raw)
+      setEpNote(rows ? '' : 'Endpoints 解析失败，已降级为 JSON 编辑')
+      setEpBaseline(rows ? serializeEndpointRows(rows, d.kind) : eps)
+      const cfg = (d.config ?? {}) as Record<string, unknown>
+      setSqlCfg({ dialect: String(cfg.dialect ?? 'sqlite'), database: String(cfg.database ?? '') })
+      setOpen(true)
+    } catch (e) {
+      toast.error(`加载连接器详情失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
   }
 
   /** 行编辑 ⇄ JSON 编辑切换：双向序列化，不丢已录数据 */
@@ -158,50 +228,103 @@ function ConnectorsTab() {
     setEpRows(rows => (rows ?? []).map((r, j) => (j === i ? { ...r, ...patch } : r)))
   }
 
-  const create = async () => {
-    let endpoints: unknown
+  /** 校验并提取 endpoints（注册/编辑双模式共用，M49-E1 行编辑器语义不变）：失败 toast 并返回 null */
+  const collectEndpoints = (): unknown | null => {
     if (epRows) {
-      if (!epRows.length) { toast.error('请至少添加一个端点'); return }
+      if (!epRows.length) { toast.error('请至少添加一个端点'); return null }
       if (epRows.some(r => !r.name.trim() || !r.tool_name.trim())) {
         toast.error('每个端点的 name 与 tool_name 不能为空')
-        return
+        return null
       }
       if (form.kind === 'sql' && epRows.some(r => !r.query.trim())) {
         toast.error('sql 连接器每个端点必须提供只读 SELECT query（后端 400 EAP-7003）')
-        return
+        return null
       }
-      endpoints = serializeEndpointRows(epRows, form.kind)
-    } else {
-      try {
-        endpoints = JSON.parse(epRaw)
-      } catch {
-        toast.error('Endpoints 不是合法 JSON')
-        return
-      }
-      if (form.kind === 'sql' && Array.isArray(endpoints)
-        && endpoints.some((e: any) => !String(e?.query ?? '').trim())) {
-        toast.error('sql 连接器每个端点必须提供只读 SELECT query（后端 400 EAP-7003）')
-        return
-      }
+      return serializeEndpointRows(epRows, form.kind)
     }
+    let endpoints: unknown
+    try {
+      endpoints = JSON.parse(epRaw)
+    } catch {
+      toast.error('Endpoints 不是合法 JSON')
+      return null
+    }
+    if (form.kind === 'sql' && Array.isArray(endpoints)
+      && endpoints.some((e: any) => !String(e?.query ?? '').trim())) {
+      toast.error('sql 连接器每个端点必须提供只读 SELECT query（后端 400 EAP-7003）')
+      return null
+    }
+    return endpoints
+  }
+
+  /** 编辑模式提交（M52-C）：对比回填快照只发用户改动过的字段；
+   * secret 三态——勾选「清除」发 ""、输入非空发新值、留空不发该字段 = 保留原值。
+   * 返回 false = 未提交（无改动），对话框保持打开 */
+  const submitPatch = async (endpoints: unknown): Promise<boolean> => {
+    if (!editing || !detail) return false
+    const d = detail
+    const body: ConnectorPatch = {}
+    if (form.description !== (d.description ?? '')) body.description = form.description
+    if (form.baseUrl !== (d.base_url ?? '')) body.base_url = form.baseUrl
+    const headerName = form.headerName.trim() || 'Authorization'
+    if (headerName !== (d.header_name || 'Authorization')) body.header_name = headerName
+    if (form.oauthClientId.trim() !== (d.oauth_client_id ?? '')) body.oauth_client_id = form.oauthClientId.trim()
+    if (form.oauthTokenUrl.trim() !== (d.oauth_token_url ?? '')) body.oauth_token_url = form.oauthTokenUrl.trim()
+    if (form.oauthScopes.trim() !== (d.oauth_scopes ?? '')) body.oauth_scopes = form.oauthScopes.trim()
+    if (!jsonEqual(endpoints, epBaseline)) body.endpoints = endpoints as Record<string, unknown>[]
+    if (form.kind === 'sql') {
+      const cfg = { dialect: sqlCfg.dialect, database: sqlCfg.database.trim() }
+      const old = {
+        dialect: String((d.config as Record<string, unknown> | undefined)?.dialect ?? 'sqlite'),
+        database: String((d.config as Record<string, unknown> | undefined)?.database ?? ''),
+      }
+      if (!jsonEqual(cfg, old)) body.config = cfg
+    }
+    if (clearApiKey) body.api_key = ''
+    else if (form.apiKey.trim()) body.api_key = form.apiKey.trim()
+    if (clearOauthSecret) body.oauth_client_secret = ''
+    else if (form.oauthSecret.trim()) body.oauth_client_secret = form.oauthSecret.trim()
+
+    if (!Object.keys(body).length) {
+      toast.error('没有改动：修改字段或勾选清除密钥后再保存')
+      return false
+    }
+    await connectorsApi.patch(editing, body)
+    toast.success('连接器已更新')
+    return true
+  }
+
+  const submit = async () => {
+    const endpoints = collectEndpoints()
+    if (endpoints === null) return
     // sql kind：config.database 必填（后端 400 EAP-7003），dialect 缺省 sqlite
     if (form.kind === 'sql' && !sqlCfg.database.trim()) {
       toast.error('sql 连接器必须提供 config.database（后端 400 EAP-7003）')
       return
     }
     try {
-      await api('POST', '/api/v1/connectors', {
-        name: form.name.trim(), kind: form.kind, description: form.description,
-        base_url: form.baseUrl, endpoints,
-        ...(form.kind === 'sql'
-          ? { config: { dialect: sqlCfg.dialect, database: sqlCfg.database.trim() } }
-          : {}),
-      })
-      toast.success('连接器已注册')
+      if (editing) {
+        if (!await submitPatch(endpoints)) return
+      } else {
+        await api('POST', '/api/v1/connectors', {
+          name: form.name.trim(), kind: form.kind, description: form.description,
+          base_url: form.baseUrl, endpoints,
+          header_name: form.headerName.trim() || 'Authorization',
+          ...(form.apiKey.trim() ? { api_key: form.apiKey.trim() } : {}),
+          ...(form.kind === 'sql'
+            ? { config: { dialect: sqlCfg.dialect, database: sqlCfg.database.trim() } }
+            : {}),
+          ...(form.oauthClientId.trim() ? { oauth_client_id: form.oauthClientId.trim() } : {}),
+          ...(form.oauthSecret.trim() ? { oauth_client_secret: form.oauthSecret.trim() } : {}),
+          ...(form.oauthTokenUrl.trim() ? { oauth_token_url: form.oauthTokenUrl.trim() } : {}),
+          ...(form.oauthScopes.trim() ? { oauth_scopes: form.oauthScopes.trim() } : {}),
+        })
+        toast.success('连接器已注册')
+      }
       setOpen(false)
       load()
     } catch (e) {
-      toast.error(`注册失败：${(e as Error).message}`)
+      toast.error(`${editing ? '保存' : '注册'}失败：${(e as Error).message}`)
     }
   }
 
@@ -247,31 +370,46 @@ function ConnectorsTab() {
               </Button>
             ) },
             { key: 'validate', title: '操作', render: c => (
-              <Button size="xs" variant="secondary" loading={busy === c.name} onClick={() => validate(c.name)}>
-                <RefreshCw className="size-3" />验证
-              </Button>
+              <span className="flex gap-1.5">
+                <Button size="xs" variant="secondary" loading={busy === c.name} onClick={() => validate(c.name)}>
+                  <RefreshCw className="size-3" />验证
+                </Button>
+                {/* M52-C：编辑复用注册对话框（双模式），详情端点回填、secret 不回显 */}
+                <Button size="xs" variant="secondary" loading={busy === `edit-${c.name}`}
+                  onClick={() => openEdit(c.name)}>
+                  <Pencil className="size-3" />编辑
+                </Button>
+              </span>
             ) },
           ]}
           empty="连接器把企业系统 API 暴露为工具；requires_approval 的出站调用需人工审批"
         />
       </div>
 
-      <DialogContent open={open} onOpenChange={setOpen} title="注册连接器"
-        description="endpoints 声明出站端点 → 自动暴露为工具"
+      {/* M52-C 双模式对话框：editing 非空 = 编辑（name/kind 不可变，secret 留空保留） */}
+      <DialogContent open={open} onOpenChange={setOpen}
+        title={editing ? `编辑连接器 ${editing}` : '注册连接器'}
+        description={editing
+          ? 'name/kind 不可变；密钥不回显——留空保留原值，勾选「清除已存密钥」提交空值'
+          : 'endpoints 声明出站端点 → 自动暴露为工具'}
         footer={<>
           <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
-          <Button variant="primary" onClick={create} disabled={!form.name.trim()}>注册</Button>
+          <Button variant="primary" onClick={submit} disabled={!editing && !form.name.trim()}>
+            {editing ? '保存' : '注册'}
+          </Button>
         </>}>
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label>名称</Label>
-              <Input value={form.name} placeholder="erp-connector" onChange={e => setForm({ ...form, name: e.target.value })} />
+              <Label>名称{editing ? '（不可变）' : ''}</Label>
+              <Input value={form.name} disabled={!!editing} placeholder="erp-connector"
+                onChange={e => setForm({ ...form, name: e.target.value })} />
             </div>
             <div>
               {/* bug 修复（M49-E1）：kind 此前在 state 里静默提交 rest 而无任何 UI 控件 */}
-              <Label>类型（kind）</Label>
-              <Select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value })}>
+              <Label>类型（kind）{editing ? '（不可变）' : ''}</Label>
+              <Select value={form.kind} disabled={!!editing}
+                onChange={e => setForm({ ...form, kind: e.target.value })}>
                 {CONNECTOR_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
               </Select>
             </div>
@@ -279,10 +417,55 @@ function ConnectorsTab() {
           <div>
             <Label>Base URL{form.kind === 'rest' ? '（rest 必填 http/https）' : ''}</Label>
             <Input value={form.baseUrl} placeholder="http://erp.internal/api" onChange={e => setForm({ ...form, baseUrl: e.target.value })} />
+            {editing && form.baseUrl !== (detail?.base_url ?? '') && (
+              <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                连接目标变更：保存后状态将重置为 pending，需重新「验证」
+              </p>
+            )}
           </div>
           <div>
             <Label>描述</Label>
             <Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+          </div>
+          {/* 鉴权凭证（M52-C 编辑流补齐；secret 加密落库一律不回显） */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>鉴权 Header 名</Label>
+              <Input value={form.headerName} placeholder="Authorization"
+                onChange={e => setForm({ ...form, headerName: e.target.value })} />
+            </div>
+            <div>
+              <Label>API Key{editing ? '（不回显）' : '（可空，加密落库不回显）'}</Label>
+              <Input type="password" value={form.apiKey}
+                placeholder={editing && detail?.has_api_key ? '已保存（留空保留）' : ''}
+                onChange={e => setForm({ ...form, apiKey: e.target.value })} />
+              {editing && detail?.has_api_key && (
+                <Checkbox size="sm" labelClassName="mt-1.5" checked={clearApiKey}
+                  onChange={e => setClearApiKey(e.target.checked)}
+                  label="清除已存密钥（提交空值覆盖）" />
+              )}
+            </div>
+          </div>
+          <div>
+            <Label>OAuth2 凭证托管（可空：client_credentials / authorization_code）</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <Input placeholder="oauth_client_id" value={form.oauthClientId}
+                onChange={e => setForm({ ...form, oauthClientId: e.target.value })} />
+              <Input type="password" value={form.oauthSecret}
+                placeholder={editing && detail?.has_oauth_secret
+                  ? 'client_secret 已保存（留空保留）' : 'oauth_client_secret（加密落库不回显）'}
+                onChange={e => setForm({ ...form, oauthSecret: e.target.value })} />
+              <Input placeholder="oauth_token_url（https://idp.example/oauth/token）"
+                value={form.oauthTokenUrl}
+                onChange={e => setForm({ ...form, oauthTokenUrl: e.target.value })} />
+              <Input placeholder="oauth_scopes（空格分隔，如 read write）" value={form.oauthScopes}
+                onChange={e => setForm({ ...form, oauthScopes: e.target.value })} />
+            </div>
+            {editing && detail?.has_oauth_secret && (
+              <Checkbox size="sm" labelClassName="mt-1.5" checked={clearOauthSecret}
+                onChange={e => setClearOauthSecret(e.target.checked)}
+                label="清除已存 OAuth client_secret（提交空值覆盖）" />
+            )}
           </div>
           {form.kind === 'sql' && (
             <div>
@@ -355,6 +538,11 @@ function ConnectorsTab() {
                   className="font-mono !text-[12px] resize-none" />
                 {epNote && <DegradeNote>{epNote}</DegradeNote>}
               </div>
+            )}
+            {/* M52-C 诚实降级提示：行编辑器只承载 name/tool_name/method/path/
+                requires_approval/query，原 endpoints 的 description/params 会被丢弃 */}
+            {editing && epRows && (detail?.endpoints ?? []).some(e => e.description || e.params) && (
+              <DegradeNote>原 endpoints 含 description/params 字段，行编辑不保留；如需保留请切换「JSON 编辑」</DegradeNote>
             )}
             {form.kind === 'sql' && (
               <p className="mt-1 text-[11px] text-ink-3">

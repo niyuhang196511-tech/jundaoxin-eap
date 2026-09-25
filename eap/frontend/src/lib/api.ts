@@ -556,8 +556,75 @@ export const workflowsApi = {
   list: () => api<{ name: string; version?: number; enabled?: boolean }[]>('GET', '/api/v1/workflows'),
 }
 
+/* ---------- 连接器编辑流类型（M52-C） ---------- */
+
+/** 后端 EndpointDef 全对象（api/v1/connectors.py）：详情视图 endpoints 数组元素 */
+export type ConnectorEndpoint = {
+  name: string
+  tool_name: string
+  method: string
+  path: string
+  description?: string
+  requires_approval?: boolean
+  params?: Record<string, unknown> | null
+  query?: string | null
+}
+
+/** GET /api/v1/connectors/{name} 完整可编辑视图：secret 不回显，仅 has_* 存在性布尔 */
+export type ConnectorDetail = {
+  name: string
+  kind: string
+  description: string
+  base_url: string
+  header_name: string
+  enabled: boolean
+  status: string
+  config: Record<string, unknown>
+  endpoints: ConnectorEndpoint[]
+  has_api_key: boolean
+  oauth_client_id: string | null
+  oauth_token_url: string | null
+  oauth_scopes: string | null
+  has_oauth_secret: boolean
+}
+
+/** PATCH 响应 = 后端列表视图 _view 原样 */
+export type ConnectorView = {
+  name: string
+  kind: string
+  description: string
+  base_url: string
+  status: string
+  enabled: boolean
+  endpoints: string[]
+  created_at: string
+  last_health_at: string | null
+  last_health_ok: boolean | null
+}
+
+/** PATCH 入参（M52-C）：全可选，只发用户改动过的字段；name/kind 不可变故不收。
+ * secret（api_key/oauth_client_secret）三态：缺省=保留，""=清除，非空=加密覆盖 */
+export type ConnectorPatch = {
+  description?: string
+  base_url?: string
+  header_name?: string
+  api_key?: string
+  endpoints?: Record<string, unknown>[]
+  enabled?: boolean
+  config?: Record<string, unknown>
+  oauth_client_id?: string
+  oauth_client_secret?: string
+  oauth_token_url?: string
+  oauth_scopes?: string
+}
+
 export const connectorsApi = {
   list: () => api<{ name: string; kind: string }[]>('GET', '/api/v1/connectors'),
+  /** 详情（M52-C，admin）：编辑对话框回填；api_key/oauth_client_secret 不回显（has_* 布尔） */
+  detail: (name: string) => api<ConnectorDetail>('GET', `/api/v1/connectors/${name}`),
+  /** 局部更新（M52-C，admin）：只发显式改动字段；base_url/config/endpoints 变更 → status 重置 pending */
+  patch: (name: string, body: ConnectorPatch) =>
+    api<ConnectorView>('PATCH', `/api/v1/connectors/${name}`, body),
 }
 
 export const kbApi = {

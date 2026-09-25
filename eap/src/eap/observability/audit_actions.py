@@ -38,6 +38,7 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     "connector.oauth.callback",
     "connector.oauth.token",
     "connector.toggle",
+    "connector.update",
     # embed —— 嵌入会话渠道（api/v1/embed.py）
     "embed.create",
     "embed.disable",

@@ -2,6 +2,9 @@
 
 M31 任务组 C 增量：sql kind 登记（config={dialect, database}）、OAuth2 凭证托管
 （authorize/callback/token 端点，secret Fernet 加密落库）、Health Check（探测落库 + 审计）。
+M52-C 增量：GET /{name} 详情（编辑回填，secret 不回显仅出 has_* 布尔）+
+PATCH /{name} 局部更新（name/kind 不可变；secret 三态：缺省保留 / "" 清除 / 非空加密覆盖；
+合并后逐 kind 校验；base_url/config/endpoints 变更 → status 重置 pending；审计 connector.update）。
 """
 
 from __future__ import annotations
@@ -206,7 +209,124 @@ async def health_check(name: str, request: fastapi.Request, db: Session = fastap
     audit.record("connector.health", actor=audit.actor_of(request), target=name,
                  detail={"ok": ok, "detail": detail}, trace_id=getattr(request.state, "trace_id", ""))
     return {"name": record.name, "ok": ok, "detail": detail,
-            "last_health_at": str(record.last_health_at), "last_health_ok": ok}
+            "last_health_at": str(record.last_health_at), "last_health_ok": record.last_health_ok}
+
+
+# ---------- PATCH 编辑流（M52-C）：详情回填 + 局部更新 ----------
+
+def _edit_view(r: ConnectorRecord) -> dict:
+    """GET /{name} 完整可编辑视图（M52-C）：编辑对话框回填用。
+
+    - endpoints 回**全对象数组**（列表页 _view 只回 tool_name 摘要）；
+    - oauth_client_id/token_url/scopes 明文回显（对齐 create 入参，本就非回显禁忌）；
+    - **secret 一律不回显**：api_key / oauth_client_secret_enc 不出现在响应里，
+      改出 has_api_key / has_oauth_secret 存在性布尔。
+    """
+    return {"name": r.name, "kind": r.kind, "description": r.description,
+            "base_url": r.base_url, "header_name": r.header_name,
+            "enabled": r.enabled, "status": r.status, "config": r.config or {},
+            "endpoints": r.endpoints or [],
+            "has_api_key": bool(r.api_key),
+            "oauth_client_id": r.oauth_client_id,
+            "oauth_token_url": r.oauth_token_url,
+            "oauth_scopes": r.oauth_scopes,
+            "has_oauth_secret": bool(r.oauth_client_secret_enc)}
+
+
+class ConnectorUpdate(BaseModel):
+    """PATCH 入参（M52-C）：全字段可选，只有显式提交的字段被应用（exclude_unset）。
+
+    - **name/kind 不可变**：模型不收这两个字段（多传按 pydantic 默认忽略）。
+    - **secret 三态**（api_key / oauth_client_secret）：字段缺省 = 保留原值；
+      显式提交空串 ``""`` = 清除（置 None）；非空 = encrypt_secret 加密覆盖。
+    """
+
+    description: str | None = Field(default=None, max_length=256)
+    base_url: str | None = Field(default=None, max_length=256)
+    header_name: str | None = None
+    api_key: str | None = None
+    endpoints: list[EndpointDef] | None = Field(default=None, min_length=1, max_length=32)
+    enabled: bool | None = None
+    config: dict | None = None
+    oauth_client_id: str | None = Field(default=None, max_length=256)
+    oauth_client_secret: str | None = Field(default=None, max_length=512)
+    oauth_token_url: str | None = Field(default=None, max_length=512)
+    oauth_scopes: str | None = Field(default=None, max_length=512)
+
+
+@router.get("/{name}", dependencies=[fastapi.Depends(require_admin)])
+def connector_detail(name: str, db: Session = fastapi.Depends(get_db)):
+    """连接器详情（M52-C，admin）：编辑对话框回填用完整视图，secret 不回显。"""
+    return _edit_view(_get_record(db, name))
+
+
+@router.patch("/{name}", dependencies=[fastapi.Depends(require_admin)])
+def update_connector(name: str, body: ConnectorUpdate, request: fastapi.Request,
+                     db: Session = fastapi.Depends(get_db)):
+    """局部更新连接器（M52-C，admin + 审计 connector.update）。
+
+    语义：
+
+    - name/kind 不可变（ConnectorUpdate 不收这两个字段，多传忽略）。
+    - secret 三态：缺省 = 保留；显式 ``""`` = 清除（置 None）；非空 = encrypt_secret 覆盖。
+    - 逐 kind 校验复用 create 语义，用**合并后的最终值**（现有记录 + 显式提交字段）：
+      rest 须 http(s) base_url（EAP-7002）；sql 须 config.database 且每个端点有
+      query（EAP-7003）。
+    - **status 重置**：base_url/config/endpoints 任一变更 → status="pending"——
+      连接目标变了须重新 validate，旧验证结果不再可信（诚实语义）。
+    - 工具池无需刷新：runtime/connectors.load_connector_tools 实时读库，PATCH 即生效。
+    - 审计 detail 只记提交的**字段名**，绝不记 secret 值。
+    """
+    record = _get_record(db, name)
+    data = body.model_dump(exclude_unset=True)
+
+    # 合并后最终值（显式提交覆盖库存），用于逐 kind 校验
+    base_url = record.base_url if data.get("base_url") is None else data["base_url"]
+    config = (record.config or {}) if data.get("config") is None else data["config"]
+    endpoints = (record.endpoints or []) if data.get("endpoints") is None else data["endpoints"]
+    if record.kind == "rest" and not base_url.lower().startswith(("http://", "https://")):
+        raise fastapi.HTTPException(status_code=400, detail="EAP-7002 rest 连接器必须提供 http(s) base_url")
+    if record.kind == "sql":
+        if not (config or {}).get("database"):
+            raise fastapi.HTTPException(status_code=400,
+                                        detail="EAP-7003 sql 连接器必须提供 config.database")
+        if any(not (e or {}).get("query") for e in endpoints):
+            raise fastapi.HTTPException(status_code=400,
+                                        detail="EAP-7003 sql 连接器每个端点必须提供 query")
+
+    from ...security_crypto import encrypt_secret
+
+    # 连接目标变更判定（须在赋值前对比库存旧值）
+    target_changed = (
+        (data.get("base_url") is not None and data["base_url"] != record.base_url)
+        or (data.get("config") is not None and data["config"] != (record.config or {}))
+        or (body.endpoints is not None and "endpoints" in data
+            and [e.model_dump() for e in body.endpoints] != (record.endpoints or []))
+    )
+
+    for field in ("description", "base_url", "header_name",
+                  "oauth_client_id", "oauth_token_url", "oauth_scopes"):
+        if data.get(field) is not None:
+            setattr(record, field, data[field])
+    if data.get("enabled") is not None:
+        record.enabled = data["enabled"]
+    if data.get("config") is not None:
+        record.config = data["config"]
+    if body.endpoints is not None and "endpoints" in data:
+        record.endpoints = [e.model_dump() for e in body.endpoints]  # 对齐 create 存储
+    # secret 三态：键出现在显式提交集才动；空串/None = 清除，非空 = 加密覆盖
+    if "api_key" in data:
+        record.api_key = encrypt_secret(data["api_key"]) if data["api_key"] else None
+    if "oauth_client_secret" in data:
+        record.oauth_client_secret_enc = (encrypt_secret(data["oauth_client_secret"])
+                                          if data["oauth_client_secret"] else None)
+    if target_changed:
+        record.status = "pending"  # 连接目标变了须重新 validate
+    db.commit()
+    audit.record("connector.update", actor=audit.actor_of(request), target=name,
+                 detail={"fields": sorted(data), "has_oauth": bool(record.oauth_token_url)},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return _view(record)
 
 
 # ---------- OAuth2 凭证托管（M31 任务组 C）：authorize / callback / token ----------
