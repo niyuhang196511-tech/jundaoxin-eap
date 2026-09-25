@@ -27,12 +27,54 @@ class LocalVectorStore:
     M15 跨请求缓存 + M17 持久化：矩阵按 (kb_id, chunk 数, 首/尾 chunk id) 做失效键缓存在
     进程内，并落盘 EAP_MEDIA_DIR/../vector-cache/{kb_id}.npz（矩阵+chunk id 序）——进程重启
     后首次检索直接加载，仅当 chunk 集合变化时重建。
+
+    M53-A 磁盘缓存内容指纹（跨库碰撞真 bug 修复，M52-D 批次实测登记）：
+    - 碰撞根因：磁盘层旧失效键 (chunk 数, 首/尾 chunk id) 全是**每库各自的自增 id**，且
+      npz 文件名只有 kb_id。换库（EAP_TEST_DB_URL 切换）或同路径重建库（rm db 重新 init）
+      时 id 序列完全复现，磁盘上的旧库 npz 键恰好匹配 → 加载**别的库的向量矩阵**，余弦分
+      张冠李戴 → 融合排序头部翻转（实证：stale 缓存下 test_rerank 长文/短文头名互换）。
+      进程内缓存不受此害（单进程单库，且摄入 upsert 即失效），故仅升级磁盘层校验。
+    - 指纹方案：加载/落盘前对**当前库实算**内容指纹 sha256（版本前缀 + kb_id + chunk 数 +
+      嵌入配置身份 + 全部 chunk 有序 (id, 嵌入维度, content 原文)），存入 npz 内部
+      fingerprint 字段；加载时与实算值比对，不一致 → 视为 miss 重建。chunks 为调用方已
+      载入的 ORM 对象，指纹零额外查询、O(chunk 总字节) 一次哈希，且仅在进程内缓存 miss
+      时计算（每进程每库至多一次，热路径查询零开销）。
+    - 旧格式 npz（无 fingerprint 字段，M53-A 之前落盘）一律视为 miss 重建——向后兼容
+      即安全失效；重建后以新格式原子覆写（tmp + os.replace，防半截文件）。
+    - 诚实局限：指纹覆盖 id/文本/维度/全局嵌入配置，不含嵌入向量数值本身——同 id 同文本
+      同维度同配置下若嵌入值仍不同（KB 级 embedding_provider 覆盖切换、嵌入服务对同一
+      文本非确定输出、绕过平台直改 DB 的 embedding 列），磁盘缓存无法察觉。默认 hash
+      嵌入为纯函数（文本+维度 → 向量确定），该盲区实际不可达；切 openai 嵌入的库若改
+      KB 级 provider，建议手动清理 vector-cache/。Milvus 路径不经此缓存，不受影响。
     """
 
     _cache: dict[int, tuple[tuple, object, list]] = {}  # kb_id -> (失效键, 归一化矩阵, chunk_id 序)
 
-    def _persisted(self, kb_id: int, cache_key: tuple):
-        """从磁盘 npz 加载（存在且失效键匹配），加载成功回填进程缓存。"""
+    def _fingerprint(self, kb_id: int, chunks) -> str:
+        """当前库内容指纹：sha256(版本前缀:kb_id:chunk 数:嵌入配置: 有序 (id, 嵌入维度, 原文))。
+
+        取代旧 (chunk 数, 首/尾 id) 键做磁盘校验——id 序列跨库/重建复现时旧键必撞，
+        内容原文入摘要后「同键不同内容」必然失配（见类 docstring M53-A）。
+        """
+        import hashlib
+
+        from ..config import get_settings
+
+        settings = get_settings()
+        h = hashlib.sha256()
+        h.update(f"eap-vecfp-v1:{kb_id}:{len(chunks)}"
+                 f":{settings.embedding_provider}:{settings.embed_dim}".encode())
+        for c in chunks:
+            h.update(f":{c.id}:{len(c.embedding or ())}".encode())
+            h.update((c.content or "").encode("utf-8", "replace"))
+        return h.hexdigest()
+
+    def _persisted(self, kb_id: int, fingerprint: str):
+        """从磁盘 npz 加载（存在且内容指纹与当前库实算值一致才命中）。
+
+        M53-A：无 fingerprint 字段的旧格式 npz 一律 miss（安全失效）；指纹不符
+        （跨库 id 复现 / 同路径重建内容变化）同样 miss，由调用方重建。
+        """
         import os
 
         import numpy as np
@@ -43,17 +85,17 @@ class LocalVectorStore:
         if not os.path.exists(path):
             return None
         try:
-            data = np.load(path)
-            if tuple(data["cache_key"]) != cache_key:
-                return None
-            matrix = data["matrix"]
-            chunk_ids = data["chunk_ids"].tolist()
-            self._cache[kb_id] = (cache_key, matrix, chunk_ids)
-            return matrix, chunk_ids
+            with np.load(path) as data:
+                if "fingerprint" not in data.files:
+                    return None  # 旧格式（仅 cache_key 校验）：视为 miss 重建
+                if str(data["fingerprint"]) != fingerprint:
+                    return None  # 内容指纹不符：磁盘是别的库/旧内容的矩阵
+                return data["matrix"], data["chunk_ids"].tolist()
         except Exception:
             return None
 
-    def _persist(self, kb_id: int, cache_key: tuple, matrix, chunk_ids: list) -> None:
+    def _persist(self, kb_id: int, fingerprint: str, matrix, chunk_ids: list) -> None:
+        """原子落盘（M53-A）：先写同目录 pid 命名 tmp 再 os.replace，防崩溃留半截文件。"""
         import os
 
         import numpy as np
@@ -61,17 +103,23 @@ class LocalVectorStore:
         from ..config import get_settings
 
         cache_dir = os.path.abspath(os.path.join(get_settings().media_dir, "..", "vector-cache"))
+        tmp = os.path.join(cache_dir, f".{kb_id}.{os.getpid()}.tmp.npz")
         try:
             os.makedirs(cache_dir, exist_ok=True)
             np.savez_compressed(
-                os.path.join(cache_dir, f"{kb_id}.npz"),
+                tmp,
                 matrix=matrix, chunk_ids=np.asarray(chunk_ids, dtype="int64"),
-                cache_key=np.asarray(list(cache_key), dtype="int64"),
+                fingerprint=np.asarray(fingerprint),
             )
+            os.replace(tmp, os.path.join(cache_dir, f"{kb_id}.npz"))
         except Exception as e:
             import logging
 
             logging.getLogger("eap.vector").warning("向量索引持久化失败: %s", e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def scores_for(self, chunks, query_vec) -> list[float]:
         try:
@@ -92,9 +140,12 @@ class LocalVectorStore:
         if cached is not None and cached[0] == cache_key:
             _, matrix, chunk_ids = cached
         else:
-            loaded = self._persisted(kb_id, cache_key)
+            # M53-A：磁盘层以内容指纹校验（进程内热路径仍用轻量键，单进程单库语义不变）
+            fingerprint = self._fingerprint(kb_id, chunks)
+            loaded = self._persisted(kb_id, fingerprint)
             if loaded is not None:
                 matrix, chunk_ids = loaded
+                self._cache[kb_id] = (cache_key, matrix, chunk_ids)
             else:
                 rows = []
                 ids = []
@@ -109,7 +160,7 @@ class LocalVectorStore:
                 matrix = np.vstack(rows)
                 chunk_ids = ids
                 self._cache[kb_id] = (cache_key, matrix, chunk_ids)
-                self._persist(kb_id, cache_key, matrix, chunk_ids)
+                self._persist(kb_id, fingerprint, matrix, chunk_ids)
                 if len(self._cache) > 64:  # 防无界增长：超出即全清（下次检索重建）
                     self._cache.clear()
 
