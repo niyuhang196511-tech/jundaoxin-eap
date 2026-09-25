@@ -656,6 +656,146 @@
         "title": "ConnectorCreate",
         "type": "object"
       },
+      "ConnectorUpdate": {
+        "description": "PATCH 入参（M52-C）：全字段可选，只有显式提交的字段被应用（exclude_unset）。\n\n- **name/kind 不可变**：模型不收这两个字段（多传按 pydantic 默认忽略）。\n- **secret 三态**（api_key / oauth_client_secret）：字段缺省 = 保留原值；\n  显式提交空串 ``\"\"`` = 清除（置 None）；非空 = encrypt_secret 加密覆盖。",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "endpoints": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EndpointDef"
+                },
+                "maxItems": 32,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoints"
+          },
+          "header_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Name"
+          },
+          "oauth_client_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Client Id"
+          },
+          "oauth_client_secret": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Client Secret"
+          },
+          "oauth_scopes": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Scopes"
+          },
+          "oauth_token_url": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Token Url"
+          }
+        },
+        "title": "ConnectorUpdate",
+        "type": "object"
+      },
       "DocIngest": {
         "properties": {
           "source": {
@@ -4457,6 +4597,34 @@
         "summary": "List Audit Actions"
       }
     },
+    "/api/v1/audit/actors": {
+      "get": {
+        "description": "审计 actor 目录（M52-A）：供审计查询页操作者过滤做 datalist 候选提示。\n\n与 /actions 静态目录的差异：动作目录是源码常量（AUDIT_ACTIONS，可静态穷举），\n而 actor 是**运行时数据**（observability/audit.py actor_of()：jwt:<user> / api-key /\nembed / anonymous / harness 上报 harness:<device>:<user> / 空回落 system），无法静态穷举，\n故走真查询：distinct actor 升序、上限 500，返回扁平字符串数组（与 /actions 返回形态一致）。\nAuditLog 无 tenant 列：admin 全局视图，与查询端点 list_audit 语义一致。\n\n目录为提示性质，不构成白名单：查询端点的 actor 过滤仍接受任意字符串（精确匹配）。\n诚实局限：actor 列无索引，distinct 为全表扫描；审计表有 retention purge 机制\n（EAP_AUDIT_RETENTION_DAYS + POST /purge），量级可控，不为此加索引。",
+        "operationId": "list_audit_actors_api_v1_audit_actors_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Response List Audit Actors Api V1 Audit Actors Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Audit Actors"
+      }
+    },
     "/api/v1/audit/export": {
       "get": {
         "description": "审计日志导出（M47-B）：admin 专用，过滤语义与查询端点完全一致。\n\n- format=csv（默认，UTF-8 BOM，列 id/created_at/action/actor/target/trace_id/detail(JSON 字符串)）\n  | json（对象数组）；\n- StreamingResponse 分块流式响应，避免大结果集全量进内存；\n- 行数上限 EAP_AUDIT_EXPORT_LIMIT（默认 50000）：硬上限不可关闭（防拖库），\n  请求可传更小的 limit；Content-Disposition 为附件下载，文件名含 UTC 时间戳；\n- 导出动作本身落审计 audit.export（仅条数 + 过滤条件 + format，不含导出内容）。",
@@ -5161,6 +5329,100 @@
           }
         ],
         "summary": "Create Connector"
+      }
+    },
+    "/api/v1/connectors/{name}": {
+      "get": {
+        "description": "连接器详情（M52-C，admin）：编辑对话框回填用完整视图，secret 不回显。",
+        "operationId": "connector_detail_api_v1_connectors__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Connector Detail"
+      },
+      "patch": {
+        "description": "局部更新连接器（M52-C，admin + 审计 connector.update）。\n\n语义：\n\n- name/kind 不可变（ConnectorUpdate 不收这两个字段，多传忽略）。\n- secret 三态：缺省 = 保留；显式 ``\"\"`` = 清除（置 None）；非空 = encrypt_secret 覆盖。\n- 逐 kind 校验复用 create 语义，用**合并后的最终值**（现有记录 + 显式提交字段）：\n  rest 须 http(s) base_url（EAP-7002）；sql 须 config.database 且每个端点有\n  query（EAP-7003）。\n- **status 重置**：base_url/config/endpoints 任一变更 → status=\"pending\"——\n  连接目标变了须重新 validate，旧验证结果不再可信（诚实语义）。\n- 工具池无需刷新：runtime/connectors.load_connector_tools 实时读库，PATCH 即生效。\n- 审计 detail 只记提交的**字段名**，绝不记 secret 值。",
+        "operationId": "update_connector_api_v1_connectors__name__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Connector"
       }
     },
     "/api/v1/connectors/{name}/enabled": {
@@ -10452,6 +10714,7 @@
     },
     "/api/v1/tasks": {
       "get": {
+        "description": "任务列表（created_at 倒序）。分页（M52-B）：limit 钳制 [1,200]、offset 钳制 ≥0，默认 50/0 向后兼容。",
         "operationId": "list_tasks_api_v1_tasks_get",
         "parameters": [
           {
@@ -10468,6 +10731,26 @@
                 }
               ],
               "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
             }
           }
         ],
