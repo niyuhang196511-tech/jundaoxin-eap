@@ -242,7 +242,8 @@ prod 栈默认开启：存在开发默认密钥（dev api key / session secret�
 
 Prometheus（M49-D 补入：抓 eap `/metrics`，加载 [deploy/prometheus.yml](../deploy/prometheus.yml)
 + [deploy/prometheus-alerts.yml](../deploy/prometheus-alerts.yml) 规则并推 Alertmanager）+
-Loki + Promtail（采 Docker 容器日志，EAP 结构化日志的 level/trace_id 提炼为标签）+
+Loki + Promtail（采 Docker 容器日志，EAP 结构化日志的 level 提炼为标签、trace_id 走
+structured metadata——M54-C）+
 Grafana（预置数据源与 `grafana-dashboard-eap.json` 仪表盘：请求速率/p95 延迟/Agent 调用/
 Token 用量/队列深度/熔断状态/沙箱违规/网关拒绝）+ Alertmanager 路由样例。
 
@@ -332,8 +333,58 @@ eap-prod_default` 建同名空网络，prometheus 能起但 eap target 为 down�
    有误），真正删除依赖 `compactor.retention_enabled: true`。摄入/查询限额
    （`ingestion_rate_mb`、`max_query_series`、`max_global_streams_per_user`）同文件；
    改后 `docker compose -f deploy/observability/docker-compose.observability.yml restart loki`。
-   注意 promtail 把 trace_id 提升为标签会放大流基数，大流量环境的根治方案见
-   `loki-config.yml` 内注释（降级为 structured metadata）。
+   注意 promtail 曾把 trace_id 提升为标签放大流基数（M49-D 时期被迫放宽
+   `max_global_streams_per_user` 的原因），M54-C 已根治（structured metadata），
+   查询方式变化与兼容性见下节。
+
+#### trace_id 查询方式变化（M54-C：标签 → structured metadata）
+
+**为什么**：M47-C 起 promtail 把 EAP 结构化日志的 `trace_id` 与 `level` 一并提炼为
+Loki **标签**。`level` 低基数无妨；`trace_id` 每请求唯一，是高基数标签——每条 trace
+一个独立流，索引基数随流量线性增长（Loki anti-pattern：TSDB 索引膨胀、查询变慢，
+`max_global_streams_per_user` 也因此被迫放宽到 20000）。M54-C 根治：
+
+- [deploy/observability/promtail-config.yml](../deploy/observability/promtail-config.yml)：
+  `trace_id` 从 `labels` stage 迁到 **`structured_metadata` stage**（metadata 不进索引，
+  无流基数成本）；`level` 保留为标签。
+- [deploy/observability/loki-config.yml](../deploy/observability/loki-config.yml)：
+  显式 `limits_config.allow_structured_metadata: true`（Loki 3.x 默认已为 true，写出防
+  上游漂移；为 false 时含 metadata 的推送会被拒收）。
+- `scripts/check_observability.py` 新增双向断言（`trace_id` 不得出现在 labels stage、
+  必须出现在 structured_metadata stage，`level` 必须保留标签），防配置回退。
+
+**查询方式**：Loki 3.x 的 LogQL 行过滤语法对标签与 structured metadata 同样生效，
+写法不变——按请求追踪在查询末尾接 `| trace_id="..."` 即可：
+
+```logql
+{service="eap"} | trace_id="a1b2c3d4e5f6"          # 精确匹配某请求的全链路日志
+{service="eap"} | trace_id=~"a1b2.*"               # 正则同样可用
+{service="eap", level="ERROR"} | trace_id="a1b2c3d4e5f6"   # level 仍是标签，选择器内组合
+```
+
+promtail 采 Docker 日志实际产出的索引标签为 `container` / `compose_project` /
+`service` / `level`（生产栈后端服务为 `eap`，故按 `{service="eap"}` 或
+`{container="..."}` 圈定范围；3.2.0 的 docker_sd 不产生 `job` 标签，勿按
+`{job="docker"}` 写选择器）。另注意：查询**响应**的流标签映射在 Loki 3.x 会把
+structured metadata（trace_id/detected_level 等）合并展示出来，肉眼易误以为
+trace_id 仍是标签——以 `GET /loki/api/v1/labels`（索引标签列表）为准，其中不含
+trace_id。
+
+Grafana Explore（Loki 数据源）中旧的 `| trace_id="..."` 查询**无需任何修改**即可继续
+命中；唯一可见差异是 `trace_id` 不再出现在流标签列表/label 自动补全里，而在
+detected fields（metadata）中。当前 `grafana-dashboard-eap.json` 全部面板为 Prometheus
+指标查询，无 trace_id/LogQL 用点，故仪表盘无需迁移。
+
+**兼容性与诚实局限**：
+
+- 查询语法完全兼容：`| trace_id="..."` 行过滤器对标签形态与 metadata 形态都能命中，
+  迁移不要求改任何既有查询/面板。
+- 迁移只对**新流入**日志生效：已入库的存量索引里 trace_id 仍是标签形态（旧流继续按
+  标签可查），按 30d 保留期（`retention_period: 720h`）滚动过期后彻底消失；过渡期
+  标签基数不再增长，但旧流仍在索引中。
+- 升级既有观测栈时先重启 loki（拿到 `allow_structured_metadata: true`）再重启
+  promtail：顺序颠倒的话，promtail 会向未开此项的 Loki 推 metadata 而被拒收（4xx）。
+  另外把新 promtail 指向 Loki 2.x 老栈同理会被拒收（2.x 无 metadata 概念）。
 
 **诚实局限**：真实通知触达（SMTP 凭据、IM 机器人 webhook/中转服务）属外部条件，
 仓库内只给注释样例与联调步骤，未做真实外发验证；本小节链路验证止于 Alertmanager

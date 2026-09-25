@@ -27,7 +27,8 @@ scrape_configs:
       - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
         target_label: service
     pipeline_stages:
-      # EAP 结构化日志为 JSON 行（observability/middleware）：解析后 level/trace_id 可作标签查询
+      # EAP 结构化日志为 JSON 行（observability/middleware）：解析后 level 作标签
+      # （低基数正当），trace_id 走 structured_metadata（M54-C，见下）
       - json:
           expressions:
             level: level
@@ -35,5 +36,11 @@ scrape_configs:
             event: event
       - labels:
           level:
-      - labels:
+      # M54-C：trace_id 从 labels stage 迁到 structured_metadata stage——
+      # trace_id 每请求唯一，作标签会为每条 trace 建一个流，索引基数随流量线性
+      # 增长（Loki anti-pattern：TSDB 索引撑爆/慢查询）。metadata 不进索引；
+      # LogQL 行过滤语法不变，仍可 {job="docker"} | trace_id="abc123" 检索
+      # （Loki 3.x 对 structured metadata 同样生效，需 loki-config 的
+      # allow_structured_metadata: true 配合）。
+      - structured_metadata:
           trace_id:

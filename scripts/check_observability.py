@@ -15,9 +15,14 @@
                    deploy/prometheus.yml 主配置与规则目录，且接入 external 后端网络
                    （跨 compose 项目抓 eap:8300 的前提）；
                 ④ loki-config.yml 含 retention 调优（limits_config.retention_period
-                   + compactor.retention_enabled），且 compose loki 服务实际挂载它；
+                   + compactor.retention_enabled）与 allow_structured_metadata: true
+                   （M54-C），且 compose loki 服务实际挂载它；
                 ⑤ alertmanager 路由树（含嵌套）引用的 receiver 均有定义；
                 ⑥ 告警规则 expr 非空、alert 名全局唯一；
+                ⑦ promtail 采数管线（M54-C trace_id 根治的双向断言，防漂移回退）：
+                   trace_id 不得被 labels stage 提升为标签（高基数反模式），必须出现在
+                   structured_metadata stage（不进索引，LogQL | trace_id="..." 仍可过滤）；
+                   level 保留为标签（低基数正当，按级别检索依赖它）；
   [--docker]    promtool check config（连带规则文件）/ amtool check-config /
                 loki -verify-config；docker 不可用或镜像拉取失败打印 SKIP（不计失败）。
 
@@ -46,6 +51,7 @@ COMPOSE = OBS / "docker-compose.observability.yml"
 PROM_YML = DEPLOY / "prometheus.yml"
 ALERTS_YML = DEPLOY / "prometheus-alerts.yml"
 LOKI_YML = OBS / "loki-config.yml"
+PROMTAIL_YML = OBS / "promtail-config.yml"
 AM_YML = OBS / "alertmanager.yml"
 
 PROM_CONTAINER_PATH = "/etc/prometheus/prometheus.yml"
@@ -306,6 +312,13 @@ def check_loki_config(docs: dict) -> str:
     retention = limits.get("retention_period")
     if not retention:
         raise CheckError("limits_config.retention_period 未配置——回到内置默认的永久保留")
+    # M54-C：trace_id 已采为 structured metadata（不进索引），此项须显式 true——
+    # Loki 3.x 默认 true，但被上游/误改回 false 时含 metadata 的推送会被拒收
+    if limits.get("allow_structured_metadata") is not True:
+        raise CheckError(
+            "limits_config.allow_structured_metadata 未显式为 true——structured metadata "
+            "写入会被拒收（M54-C：promtail 把 trace_id 采为 metadata 依赖此项）"
+        )
     compactor = cfg.get("compactor") or {}
     if not compactor.get("retention_enabled"):
         raise CheckError("compactor.retention_enabled 非 true——retention_period 不会真正删除 chunk")
@@ -328,8 +341,61 @@ def check_loki_config(docs: dict) -> str:
     if prefix and not prefix.startswith("/loki"):
         raise CheckError(f"common.path_prefix={prefix} 与数据卷挂载点 /loki 不一致")
     return (
-        f"retention_period={retention}，compactor.retention_enabled=true，"
+        f"retention_period={retention}，allow_structured_metadata=true，"
+        f"compactor.retention_enabled=true，"
         f"delete_request_store={compactor['delete_request_store']}，挂载 {target} 与 command 一致"
+    )
+
+
+def pipeline_stage_keys(scrape: dict, stage_kind: str) -> set[str]:
+    """收集单个 scrape job 管线中指定 stage（labels/structured_metadata）的全部键。
+
+    promtail 管线 stage 是单键映射（如 {"labels": {"level": None}}）；非映射/多键
+    形态跳过（不属本检查范围）。
+    """
+    keys: set[str] = set()
+    for stage in scrape.get("pipeline_stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        for kind, body in stage.items():
+            if kind == stage_kind and isinstance(body, dict):
+                keys |= set(body.keys())
+    return keys
+
+
+def check_promtail_trace_id(docs: dict) -> str:
+    """M54-C 双向断言：trace_id 不得作标签提取，必须在 structured_metadata stage。
+
+    背景：trace_id 每请求唯一，作 Loki 标签会为每条 trace 建一个流，索引基数随
+    流量线性增长（TSDB 撑爆/慢查询）；structured metadata 不进索引，LogQL 行过滤
+    `| trace_id="..."` 对其同样生效。level 低基数，保留为标签（按级别检索依赖）。
+    """
+    cfg = get_doc(docs, PROMTAIL_YML, "promtail 配置")
+    scrapes = cfg.get("scrape_configs") or []
+    if not isinstance(scrapes, list) or not scrapes:
+        raise CheckError("scrape_configs 缺失或为空——promtail 无任何采数目标")
+    label_keys: set[str] = set()
+    meta_keys: set[str] = set()
+    for sc in scrapes:
+        if not isinstance(sc, dict):
+            raise CheckError("scrape_configs 中存在非映射条目")
+        label_keys |= pipeline_stage_keys(sc, "labels")
+        meta_keys |= pipeline_stage_keys(sc, "structured_metadata")
+    if "trace_id" in label_keys:
+        raise CheckError(
+            "trace_id 仍被 labels stage 提升为标签（高基数反模式：每请求一个流，索引膨胀）"
+            "——M54-C 已迁移为 structured_metadata，禁止回退"
+        )
+    if "trace_id" not in meta_keys:
+        raise CheckError(
+            'trace_id 未出现在任何 structured_metadata stage——M54-C 要求采为 metadata'
+            '（不进索引，LogQL | trace_id="..." 过滤）'
+        )
+    if "level" not in label_keys:
+        raise CheckError("level 未作为标签提取——低基数正当标签，按级别检索依赖它")
+    return (
+        f"labels={sorted(label_keys)}（无 trace_id），structured_metadata={sorted(meta_keys)}"
+        "——trace_id 已出索引，level 保留标签（M54-C）"
     )
 
 
@@ -521,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     run_check("prom-alerting", lambda: check_prometheus_alerting(docs))
     run_check("compose-prometheus", lambda: check_compose_prometheus_service(docs))
     run_check("loki-retention", lambda: check_loki_config(docs))
+    run_check("promtail-trace-id", lambda: check_promtail_trace_id(docs))
     run_check("am-route-receivers", lambda: check_alertmanager_routes(docs))
     run_check("alert-rules", lambda: check_alert_rules(docs))
 
