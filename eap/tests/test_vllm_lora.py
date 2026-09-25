@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from types import SimpleNamespace
 
 import httpx
@@ -36,6 +37,23 @@ from .test_oidc import fake_idp  # noqa: F401,F811 复用模拟 IdP 夹具（fix
 HEADERS = {**AUTH, "Content-Type": "application/json"}
 VLLM_BASE = "http://vllm.local:8000/v1"  # OpenAI 兼容惯例：base_url 含 /v1
 VLLM_ROOT = "http://vllm.local:8000"
+
+# ---------- M52-D 可重入命名（样板=test_connector_v2._SFX） ----------
+# adapter/模型名跨运行唯一：脏库重跑不撞 LoraAdapter.name 409（EAP-2002）与
+# UNIQUE models.name；注册的 provider=vllm 模型用后照旧收尾禁用（路由链不残留高优模型）。
+_SFX = uuid.uuid4().hex[:8]
+
+ADAPTER_A = f"m42-adapter-a-{_SFX}"
+ADAPTER_A2 = f"m42-adapter-a2-{_SFX}"
+SERVED_ALIAS = f"m42-served-alias-{_SFX}"
+ADAPTER_B = f"m42-adapter-b-{_SFX}"
+ADAPTER_C = f"m42-adapter-c-{_SFX}"
+ADAPTER_D = f"m42-adapter-d-{_SFX}"
+ADAPTER_DEL = f"m42-adapter-del-{_SFX}"
+ADAPTER_JWT = f"m42-adapter-jwt-{_SFX}"
+ADAPTER_ROUTER = f"m42-adapter-router-{_SFX}"
+MODEL_D = f"m42-vllm-d-{_SFX}"
+MODEL_ROUTER = f"m42-vllm-router-{_SFX}"
 
 
 # ---------- 假 transport / 假 provider（禁真实网络） ----------
@@ -68,7 +86,8 @@ class _FakeVllm:
 
     async def health(self, base_url):
         self.calls.append({"op": "health", "base_url": base_url})
-        return {"healthy": True, "models": ["base-model", "m42-adapter-b"]}
+        # served 清单含本运行的唯一 adapter 名（health 端点据此判定 served=True）
+        return {"healthy": True, "models": ["base-model", ADAPTER_B]}
 
 
 def _register_lora(client: TestClient, name: str, **overrides) -> dict:
@@ -184,13 +203,14 @@ def test_get_provider_vllm_registered():
 # ---------- LoRA 注册 CRUD + RBAC ----------
 
 def test_lora_crud_register_list_delete(client: TestClient):
-    view = _register_lora(client, "m42-adapter-a")
-    assert view["name"] == "m42-adapter-a"
-    assert view["served_as"] == "m42-adapter-a", "served_as 默认=name"
+    view = _register_lora(client, ADAPTER_A)
+    assert view["name"] == ADAPTER_A
+    assert view["served_as"] == ADAPTER_A, "served_as 默认=name"
     assert view["status"] == "registered"
 
+    # 首建名唯一化后，同名重复提交 → 409（M52-D 守则 3）
     dup = client.post("/api/v1/lora", headers=HEADERS, json={
-        "name": "m42-adapter-a", "base_model": "x", "source_path": "/x"})
+        "name": ADAPTER_A, "base_model": "x", "source_path": "/x"})
     assert dup.status_code == 409
 
     bad = client.post("/api/v1/lora", headers=HEADERS, json={
@@ -198,30 +218,30 @@ def test_lora_crud_register_list_delete(client: TestClient):
     assert bad.status_code == 422
 
     listing = client.get("/api/v1/lora", headers=AUTH).json()
-    assert any(a["name"] == "m42-adapter-a" for a in listing)
+    assert any(a["name"] == ADAPTER_A for a in listing)
 
     # served_as 显式指定
-    view2 = _register_lora(client, "m42-adapter-a2", served_as="m42-served-alias")
-    assert view2["served_as"] == "m42-served-alias"
+    view2 = _register_lora(client, ADAPTER_A2, served_as=SERVED_ALIAS)
+    assert view2["served_as"] == SERVED_ALIAS
 
-    resp = client.delete("/api/v1/lora/m42-adapter-a2", headers=AUTH)
+    resp = client.delete(f"/api/v1/lora/{ADAPTER_A2}", headers=AUTH)
     assert resp.status_code == 200 and resp.json()["deleted"] is True
-    assert client.delete("/api/v1/lora/m42-adapter-a2", headers=AUTH).status_code == 404
+    assert client.delete(f"/api/v1/lora/{ADAPTER_A2}", headers=AUTH).status_code == 404
 
 
 def test_lora_delete_blocked_while_loaded(client: TestClient, monkeypatch):
     fake = _FakeVllm()
     monkeypatch.setattr(lora_mod, "get_vllm_provider", lambda: fake)
-    _register_lora(client, "m42-adapter-del")
+    _register_lora(client, ADAPTER_DEL)
     with SessionLocal() as db:
-        record = db.scalar(select(LoraAdapter).where(LoraAdapter.name == "m42-adapter-del"))
+        record = db.scalar(select(LoraAdapter).where(LoraAdapter.name == ADAPTER_DEL))
         record.status = "loaded"
         db.commit()
-    resp = client.delete("/api/v1/lora/m42-adapter-del", headers=AUTH)
+    resp = client.delete(f"/api/v1/lora/{ADAPTER_DEL}", headers=AUTH)
     assert resp.status_code == 409, "加载中的 adapter 必须先 unload 才能删除"
-    client.post("/api/v1/lora/m42-adapter-del/unload", headers=HEADERS,
+    client.post(f"/api/v1/lora/{ADAPTER_DEL}/unload", headers=HEADERS,
                 json={"base_url": VLLM_BASE})
-    assert client.delete("/api/v1/lora/m42-adapter-del", headers=AUTH).status_code == 200
+    assert client.delete(f"/api/v1/lora/{ADAPTER_DEL}", headers=AUTH).status_code == 200
 
 
 def test_lora_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参数仅为激活夹具（模块级导入供 pytest 发现）
@@ -229,13 +249,13 @@ def test_lora_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参�
     member = {"Authorization": f"Bearer {_access_token(roles=['member'])}"}
     assert client.post("/api/v1/lora", headers=member, json={
         "name": "m42-denied", "base_model": "x", "source_path": "/x"}).status_code == 403
-    assert client.delete("/api/v1/lora/m42-adapter-a", headers=member).status_code == 403
-    assert client.post("/api/v1/lora/m42-adapter-a/load", headers=member, json={}).status_code == 403
-    # admin JWT 放行（可注册成功）
+    assert client.delete(f"/api/v1/lora/{ADAPTER_A}", headers=member).status_code == 403
+    assert client.post(f"/api/v1/lora/{ADAPTER_A}/load", headers=member, json={}).status_code == 403
+    # admin JWT 放行（可注册成功；名字唯一化 → 脏库重跑不撞 409）
     admin = {"Authorization": f"Bearer {_access_token(roles=['admin'])}",
              "Content-Type": "application/json"}
     resp = client.post("/api/v1/lora", headers=admin, json={
-        "name": "m42-adapter-jwt", "base_model": "x", "source_path": "/x"})
+        "name": ADAPTER_JWT, "base_model": "x", "source_path": "/x"})
     assert resp.status_code == 200, resp.text
     # member 只读列表放行（require_api_key 允许 jwt 通道）
     assert client.get("/api/v1/lora", headers=member).status_code == 200
@@ -246,95 +266,95 @@ def test_lora_rbac_member_403(client: TestClient, fake_idp):  # noqa: F811 参�
 def test_lora_load_unload_state_machine_and_audit(client: TestClient, monkeypatch):
     fake = _FakeVllm()
     monkeypatch.setattr(lora_mod, "get_vllm_provider", lambda: fake)
-    _register_lora(client, "m42-adapter-b")
+    _register_lora(client, ADAPTER_B)
 
-    resp = client.post("/api/v1/lora/m42-adapter-b/load", headers=HEADERS,
+    resp = client.post(f"/api/v1/lora/{ADAPTER_B}/load", headers=HEADERS,
                        json={"base_url": VLLM_BASE})
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "loaded"
     assert fake.calls[0] == {"op": "load", "base_url": VLLM_BASE,
-                             "lora_name": "m42-adapter-b",
-                             "lora_path": "/mnt/c/adapters/m42-adapter-b"}
-    assert _adapter_status("m42-adapter-b").status == "loaded"
+                             "lora_name": ADAPTER_B,
+                             "lora_path": f"/mnt/c/adapters/{ADAPTER_B}"}
+    assert _adapter_status(ADAPTER_B).status == "loaded"
 
     # 审计 lora.load（成功）
     with SessionLocal() as db:
         log = db.scalar(select(AuditLog).where(AuditLog.action == "lora.load",
-                                               AuditLog.target == "m42-adapter-b"))
+                                               AuditLog.target == ADAPTER_B))
     assert log is not None and log.detail["ok"] is True and log.detail["base_url"] == VLLM_BASE
 
     # health 透出：vLLM 服务清单含本 adapter
-    health = client.get("/api/v1/lora/m42-adapter-b/health", headers=AUTH,
+    health = client.get(f"/api/v1/lora/{ADAPTER_B}/health", headers=AUTH,
                         params={"base_url": VLLM_BASE}).json()
     assert health["healthy"] is True and health["served"] is True
     assert fake.calls[-1]["base_url"] == VLLM_BASE
 
-    resp = client.post("/api/v1/lora/m42-adapter-b/unload", headers=HEADERS,
+    resp = client.post(f"/api/v1/lora/{ADAPTER_B}/unload", headers=HEADERS,
                        json={"base_url": VLLM_BASE})
     assert resp.status_code == 200 and resp.json()["status"] == "unloaded"
-    assert _adapter_status("m42-adapter-b").status == "unloaded"
+    assert _adapter_status(ADAPTER_B).status == "unloaded"
     with SessionLocal() as db:
         log = db.scalar(select(AuditLog).where(AuditLog.action == "lora.unload",
-                                               AuditLog.target == "m42-adapter-b"))
+                                               AuditLog.target == ADAPTER_B))
     assert log is not None and log.detail["ok"] is True
 
 
 def test_lora_load_failure_marks_failed(client: TestClient, monkeypatch):
     fake = _FakeVllm(fail=True)
     monkeypatch.setattr(lora_mod, "get_vllm_provider", lambda: fake)
-    _register_lora(client, "m42-adapter-c")
+    _register_lora(client, ADAPTER_C)
 
-    resp = client.post("/api/v1/lora/m42-adapter-c/load", headers=HEADERS,
+    resp = client.post(f"/api/v1/lora/{ADAPTER_C}/load", headers=HEADERS,
                        json={"base_url": VLLM_BASE})
     assert resp.status_code == 502
-    failed = _adapter_status("m42-adapter-c")
+    failed = _adapter_status(ADAPTER_C)
     assert failed.status == "failed" and "显存不足" in failed.note
     with SessionLocal() as db:
         log = db.scalar(select(AuditLog).where(AuditLog.action == "lora.load",
-                                               AuditLog.target == "m42-adapter-c"))
+                                               AuditLog.target == ADAPTER_C))
     assert log is not None and log.detail["ok"] is False and "显存不足" in log.detail["error"]
 
     # 失败后可重试成功 → loaded（状态机允许 failed → loaded 往返）
     fake.fail = False
-    resp = client.post("/api/v1/lora/m42-adapter-c/load", headers=HEADERS,
+    resp = client.post(f"/api/v1/lora/{ADAPTER_C}/load", headers=HEADERS,
                        json={"base_url": VLLM_BASE})
     assert resp.status_code == 200 and resp.json()["status"] == "loaded"
 
     # unload 失败同样置 failed
     fake.fail = True
-    resp = client.post("/api/v1/lora/m42-adapter-c/unload", headers=HEADERS,
+    resp = client.post(f"/api/v1/lora/{ADAPTER_C}/unload", headers=HEADERS,
                        json={"base_url": VLLM_BASE})
     assert resp.status_code == 502
-    assert _adapter_status("m42-adapter-c").status == "failed"
+    assert _adapter_status(ADAPTER_C).status == "failed"
 
 
 def test_lora_base_url_resolution(client: TestClient, monkeypatch):
     """vLLM 地址解析：显式 base_url > 模型中心 provider=vllm 且模型名匹配记录 > 400。"""
     fake = _FakeVllm()
     monkeypatch.setattr(lora_mod, "get_vllm_provider", lambda: fake)
-    _register_lora(client, "m42-adapter-d")
+    _register_lora(client, ADAPTER_D)
 
     # 无显式 base_url 且模型中心无匹配记录 → 400
-    no_addr = client.post("/api/v1/lora/m42-adapter-d/load", headers=HEADERS, json={})
+    no_addr = client.post(f"/api/v1/lora/{ADAPTER_D}/load", headers=HEADERS, json={})
     assert no_addr.status_code == 400
     assert "base_url" in no_addr.json()["detail"]
 
     # 模型中心注册 provider=vllm 记录（remote_model = adapter 服务名）
     resp = client.post("/api/v1/models", headers=HEADERS, json={
-        "name": "m42-vllm-d", "capabilities": ["chat"], "provider": "vllm",
-        "base_url": VLLM_BASE, "remote_model": "m42-adapter-d", "priority": 90})
+        "name": MODEL_D, "capabilities": ["chat"], "provider": "vllm",
+        "base_url": VLLM_BASE, "remote_model": ADAPTER_D, "priority": 90})
     assert resp.status_code == 200, resp.text
 
-    resp = client.post("/api/v1/lora/m42-adapter-d/load", headers=HEADERS, json={})
+    resp = client.post(f"/api/v1/lora/{ADAPTER_D}/load", headers=HEADERS, json={})
     assert resp.status_code == 200, resp.text
     assert fake.calls[-1]["base_url"] == VLLM_BASE, "应从模型中心记录解析出 vLLM 地址"
 
     # 显式 base_url 优先于模型中心解析
     explicit = "http://other-vllm.local:8000/v1"
-    client.post("/api/v1/lora/m42-adapter-d/unload", headers=HEADERS,
+    client.post(f"/api/v1/lora/{ADAPTER_D}/unload", headers=HEADERS,
                 json={"base_url": explicit})
     assert fake.calls[-1]["base_url"] == explicit
-    _disable_model(client, "m42-vllm-d")  # 收尾禁用：不污染后续测试的路由链
+    _disable_model(client, MODEL_D)  # 收尾禁用：不污染后续测试的路由链
 
 
 def _disable_model(client: TestClient, name: str) -> None:
@@ -360,17 +380,17 @@ def test_vllm_model_routes_through_hub(client: TestClient, monkeypatch):
     monkeypatch.setattr(vllm_mod, "_VLLM", fake_vllm)  # get_provider("vllm") 单例注入
 
     resp = client.post("/api/v1/models", headers=HEADERS, json={
-        "name": "m42-vllm-router", "capabilities": ["chat"], "provider": "vllm",
-        "base_url": VLLM_BASE, "remote_model": "m42-adapter-router", "priority": 1})
+        "name": MODEL_ROUTER, "capabilities": ["chat"], "provider": "vllm",
+        "base_url": VLLM_BASE, "remote_model": ADAPTER_ROUTER, "priority": 1})
     assert resp.status_code == 200, resp.text
 
     resp = client.post("/v1/chat/completions", headers=HEADERS, json={
         "messages": [{"role": "user", "content": "走 vLLM 供应商"}]})
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["model"] == "m42-vllm-router", "应路由到 provider=vllm 的模型（priority=1 置顶）"
+    assert data["model"] == MODEL_ROUTER, "应路由到 provider=vllm 的模型（priority=1 置顶）"
     assert "由 vLLM adapter 回答" in data["choices"][0]["message"]["content"]
     assert calls, "调用应到达 vLLM provider"
     assert calls[0]["url"] == f"{VLLM_BASE}/chat/completions"
-    assert calls[0]["body"]["model"] == "m42-adapter-router", "请求模型名 = LoRA adapter 服务名"
-    _disable_model(client, "m42-vllm-router")  # 收尾禁用：不污染后续测试的路由链
+    assert calls[0]["body"]["model"] == ADAPTER_ROUTER, "请求模型名 = LoRA adapter 服务名"
+    _disable_model(client, MODEL_ROUTER)  # 收尾禁用：不污染后续测试的路由链

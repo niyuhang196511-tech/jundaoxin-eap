@@ -1,10 +1,16 @@
-"""OIDC/SSO：模拟 IdP 端到端（discovery/换码/JWKS 验签/用户换发 API Key）+ 异常分支（docs/06 §1）。"""
+"""OIDC/SSO：模拟 IdP 端到端（discovery/换码/JWKS 验签/用户换发 API Key）+ 异常分支（docs/06 §1）。
+
+M52-D 可重入：登录 sub/email 加模块级 uuid 后缀——callback 按 sub 复用用户与
+API Key（脏库残留同 sub 用户时换发返回 None，「首登可见明文 key」断言必炸）；
+唯一 sub 保证每轮都是首登路径，模块结束删除自造 user/api_key 行不残留。
+"""
 
 from __future__ import annotations
 
 import base64
 import json
 import time
+import uuid
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -14,6 +20,25 @@ from .conftest import AUTH
 HEADERS = {**AUTH, "Content-Type": "application/json"}
 ISSUER = "https://idp.example"
 CLIENT_ID = "eap-console"
+
+_SFX = uuid.uuid4().hex[:8]
+OIDC_SUB = f"user-oidc-1-{_SFX}"
+OIDC_EMAIL = f"alice-{_SFX}@corp.cn"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_oidc_user():
+    """模块结束后删除本轮换发落库的 user/api_key 行（按唯一 sub/note 定位）。"""
+    yield
+    from sqlalchemy import delete
+
+    from eap.db import SessionLocal
+    from eap.models import ApiKey, UserRecord
+
+    with SessionLocal() as db:
+        db.execute(delete(ApiKey).where(ApiKey.note == f"oidc:{OIDC_SUB}"))
+        db.execute(delete(UserRecord).where(UserRecord.sub == OIDC_SUB))
+        db.commit()
 
 # ---- 模拟 IdP 密钥与签名 ----
 
@@ -47,8 +72,8 @@ def _make_id_token(claims: dict, kid: str = _KID, alg: str = "RS256") -> str:
 
 
 def _good_claims(**overrides) -> dict:
-    claims = {"iss": ISSUER, "aud": CLIENT_ID, "sub": "user-oidc-1",
-              "email": "alice@corp.cn", "name": "Alice", "exp": int(time.time()) + 600,
+    claims = {"iss": ISSUER, "aud": CLIENT_ID, "sub": OIDC_SUB,
+              "email": OIDC_EMAIL, "name": "Alice", "exp": int(time.time()) + 600,
               "iat": int(time.time())}
     claims.update(overrides)
     return claims
@@ -101,7 +126,7 @@ def test_oidc_callback_mints_api_key(client, fake_idp):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["api_key"].startswith("eap_u_")
-    assert body["user"]["email"] == "alice@corp.cn"
+    assert body["user"]["email"] == OIDC_EMAIL
     # 换发的 key 真能调用平台（租户 1 的 API Key）
     r2 = client.get("/api/v1/models", headers={"Authorization": f"Bearer {body['api_key']}"})
     assert r2.status_code == 200

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from .conftest import AUTH
 
 
-def test_skill_crud_and_progressive_disclosure(client: TestClient):
+def test_skill_crud_and_progressive_disclosure(client: TestClient, uname):
     # 种子技能在 L1 目录只暴露 name+description
     resp = client.get("/api/v1/skills", headers=AUTH)
     assert resp.status_code == 200
@@ -21,15 +21,16 @@ def test_skill_crud_and_progressive_disclosure(client: TestClient):
     assert resp.status_code == 200
     assert "工单" in resp.json()["instructions"]
 
-    # 新建 + 重名 409
+    # 新建 + 重名 409（M52-D：首建唯一名，409 用同一唯一名重复提交）
+    skill = uname("excel-report")
     assert client.post("/api/v1/skills", headers=AUTH, json={
-        "name": "excel-report", "description": "周报生成",
+        "name": skill, "description": "周报生成",
         "instructions": "生成带图表的 Excel 周报。"}).status_code == 200
     assert client.post("/api/v1/skills", headers=AUTH, json={
-        "name": "excel-report", "instructions": "dup"}).status_code == 409
+        "name": skill, "instructions": "dup"}).status_code == 409
 
     # 停用后 skill_context 不再注入
-    assert client.patch("/api/v1/skills/excel-report", params={"enabled": False},
+    assert client.patch(f"/api/v1/skills/{skill}", params={"enabled": False},
                         headers=AUTH).status_code == 200
 
 

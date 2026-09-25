@@ -21,31 +21,33 @@ def test_seeded_mock_erp_and_tool_schema(client):
     assert fn_names == MOCK_ERP_TOOLS
 
 
-def test_rest_connector_register_validate_toggle(client):
+def test_rest_connector_register_validate_toggle(client, uname):
     # rest 连接器必须给 http(s) base_url
     r = client.post("/api/v1/connectors", headers=HEADERS, json={
         "name": "bad-erp", "kind": "rest", "base_url": "ftp://x",
         "endpoints": [{"name": "ping", "tool_name": "bad.ping"}]})
     assert r.status_code == 400
 
-    # 登记一个不可达的 rest 连接器 → 验证为 unreachable
+    # 登记一个不可达的 rest 连接器 → 验证为 unreachable（M52-D：唯一名可重入；
+    # 种子 mock-erp 幂等不受影响，其成员断言保持固定名）
+    name = uname("corp-erp")
     r = client.post("/api/v1/connectors", headers=HEADERS, json={
-        "name": "corp-erp", "kind": "rest", "base_url": "http://127.0.0.1:9",
+        "name": name, "kind": "rest", "base_url": "http://127.0.0.1:9",
         "description": "企业 ERP（演示用不可达地址）",
         "endpoints": [{"name": "order.create", "tool_name": "erp2.order.create",
                        "method": "POST", "path": "/orders"}]})
     assert r.status_code == 200
-    r = client.post("/api/v1/connectors/corp-erp/validate", headers=HEADERS)
+    r = client.post(f"/api/v1/connectors/{name}/validate", headers=HEADERS)
     assert r.json()["status"] == "unreachable"
 
-    # 停用后不再注入工具；重名 409
-    assert client.post("/api/v1/connectors/corp-erp/enabled?enabled=false",
+    # 停用后不再注入工具；重名 409（同一唯一名重复提交）
+    assert client.post(f"/api/v1/connectors/{name}/enabled?enabled=false",
                        headers=HEADERS).json()["enabled"] is False
     assert client.post("/api/v1/connectors", headers=HEADERS, json={
-        "name": "corp-erp", "kind": "rest", "base_url": "http://127.0.0.1:9",
+        "name": name, "kind": "rest", "base_url": "http://127.0.0.1:9",
         "endpoints": [{"name": "ping", "tool_name": "erp2.ping"}]}).status_code == 409
     # 未启用连接器 tools 为空
-    assert client.get("/api/v1/connectors/corp-erp/tools", headers=HEADERS).json() == []
+    assert client.get(f"/api/v1/connectors/{name}/tools", headers=HEADERS).json() == []
 
 
 def test_order_agent_uses_connector_erp(client):

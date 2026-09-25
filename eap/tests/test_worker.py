@@ -19,11 +19,24 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from .conftest import AUTH
+
+# ---------- M52-D 可重入命名/清理 ----------
+# 手工落库的 TaskRecord id 与幂等键跨运行唯一：tasks.id 为主键，固定 id 脏库重跑
+# 必撞 UNIQUE；幂等键唯一化防上一遍残留 PENDING 行被「同 key 在途」误命中。
+# 纯后端用例（不经引擎执行）的行测后删除——残留 PENDING 会被下一遍引擎启动恢复
+# 扫描误捞（_recover_pending），污染别的模块。
+_SFX = uuid.uuid4().hex[:8]
+
+LEASE_EXP_ID = f"lease-exp-{_SFX}"
+PRIO_IDS = [f"prio-low-{_SFX}", f"prio-high-1-{_SFX}", f"prio-high-2-{_SFX}"]
+IDEM_KEY = f"idem-k1-{_SFX}"
+API_IDEM_KEY = f"api-idem-{_SFX}"
 
 # Redis 用例 skip 机制（照抄 test_tasks_redis.py）：redis 包缺失整文件 skip，
 # 本机 Redis 不可达仅跳过 Redis 用例
@@ -100,7 +113,7 @@ def test_lease_scan_recovers_expired_running_task(client):
     engine.register_handler("echo", echo)
 
     with SessionLocal() as db:
-        db.add(TaskRecord(id="lease-exp-1", type="echo", state="RUNNING",
+        db.add(TaskRecord(id=LEASE_EXP_ID, type="echo", state="RUNNING",
                           payload={"text": "hi"}, lease_expires_at=_now() - timedelta(seconds=10)))
         db.commit()
 
@@ -110,7 +123,7 @@ def test_lease_scan_recovers_expired_running_task(client):
             deadline = asyncio.get_running_loop().time() + 5
             while asyncio.get_running_loop().time() < deadline:
                 with SessionLocal() as db:
-                    task = db.get(TaskRecord, "lease-exp-1")
+                    task = db.get(TaskRecord, LEASE_EXP_ID)
                     if task.state == "COMPLETED":
                         return task
                 await asyncio.sleep(0.1)
@@ -121,7 +134,7 @@ def test_lease_scan_recovers_expired_running_task(client):
     task = asyncio.run(scenario())
     assert task is not None and task.state == "COMPLETED", "过期租约任务应被恢复重跑"
     with SessionLocal() as db:
-        assert db.get(TaskRecord, "lease-exp-1").lease_expires_at is None  # 终态清租约
+        assert db.get(TaskRecord, LEASE_EXP_ID).lease_expires_at is None  # 终态清租约
 
 
 def test_lease_scan_leaves_running_task_with_valid_lease(client):
@@ -254,12 +267,12 @@ def test_idempotency_key_dedup_and_rebuild(client):
             return await engine.submit(db, task_type, {"text": key}, idempotency_key=key)
 
     async def scenario():
-        first = await submit_with_session("echo", "idem-k1")
+        first = await submit_with_session("echo", IDEM_KEY)
         assert first.existing is False
         # 并发提交同 key：命中同一在途任务
         second, third = await asyncio.gather(
-            submit_with_session("echo", "idem-k1"),
-            submit_with_session("echo", "idem-k1"))
+            submit_with_session("echo", IDEM_KEY),
+            submit_with_session("echo", IDEM_KEY))
         assert str(second) == str(first) == str(third), "同 key 在途任务应命中同一 id"
         assert second.existing and third.existing
 
@@ -269,11 +282,19 @@ def test_idempotency_key_dedup_and_rebuild(client):
             task.state = "COMPLETED"
             task.lease_expires_at = None
             db.commit()
-        fourth = await submit_with_session("echo", "idem-k1")
+        fourth = await submit_with_session("echo", IDEM_KEY)
         assert str(fourth) != str(first)
         assert fourth.existing is False
+        return str(first), str(fourth)
 
-    asyncio.run(scenario())
+    first_id, fourth_id = asyncio.run(scenario())
+    # 测后自清理：引擎未 start，两行滞留 PENDING/COMPLETED——删除防下一遍启动恢复误捞
+    with SessionLocal() as db:
+        for tid in (first_id, fourth_id):
+            row = db.get(TaskRecord, tid)
+            if row is not None:
+                db.delete(row)
+        db.commit()
 
 
 def test_api_idempotency_key_and_priority(client):
@@ -292,14 +313,14 @@ def test_api_idempotency_key_and_priority(client):
 
     r1 = client.post("/api/v1/tasks", headers=AUTH,
                      json={"type": "test.gate", "payload": {}, "priority": 7,
-                           "idempotency_key": "api-idem-1"})
+                           "idempotency_key": API_IDEM_KEY})
     assert r1.status_code == 200, r1.text
     body1 = r1.json()
     assert body1["existing"] is False
 
     r2 = client.post("/api/v1/tasks", headers=AUTH,
                      json={"type": "test.gate", "payload": {}, "priority": 7,
-                           "idempotency_key": "api-idem-1"})
+                           "idempotency_key": API_IDEM_KEY})
     body2 = r2.json()
     assert body2["task_id"] == body1["task_id"], "同 key 应命中同一任务"
     assert body2["existing"] is True
@@ -307,7 +328,7 @@ def test_api_idempotency_key_and_priority(client):
     with SessionLocal() as db:
         task = db.get(TaskRecord, body1["task_id"])
         assert task.priority == 7, "priority 应透传落库"
-        assert task.idempotency_key == "api-idem-1"
+        assert task.idempotency_key == API_IDEM_KEY
 
     # 置终态（取消在途慢任务）→ 同 key 可再建
     assert client.post(f"/api/v1/tasks/{body1['task_id']}/cancel",
@@ -316,7 +337,7 @@ def test_api_idempotency_key_and_priority(client):
 
     r3 = client.post("/api/v1/tasks", headers=AUTH,
                      json={"type": "test.gate", "payload": {},
-                           "idempotency_key": "api-idem-1"})
+                           "idempotency_key": API_IDEM_KEY})
     body3 = r3.json()
     assert body3["existing"] is False
     assert body3["task_id"] != body1["task_id"]
@@ -336,9 +357,9 @@ def test_asyncio_backend_priority_order(client):
 
     with SessionLocal() as db:
         db.add_all([
-            TaskRecord(id="prio-low", type="echo", state="PENDING", payload={}, priority=0),
-            TaskRecord(id="prio-high-1", type="echo", state="PENDING", payload={}, priority=5),
-            TaskRecord(id="prio-high-2", type="echo", state="PENDING", payload={}, priority=5),
+            TaskRecord(id=PRIO_IDS[0], type="echo", state="PENDING", payload={}, priority=0),
+            TaskRecord(id=PRIO_IDS[1], type="echo", state="PENDING", payload={}, priority=5),
+            TaskRecord(id=PRIO_IDS[2], type="echo", state="PENDING", payload={}, priority=5),
         ])
         db.commit()
 
@@ -347,15 +368,25 @@ def test_asyncio_backend_priority_order(client):
         await backend.start()
         try:
             # priority 缺省：由后端从 TaskRecord 读取
-            await backend.enqueue("prio-low")
-            await backend.enqueue("prio-high-1")
-            await backend.enqueue("prio-high-2")
+            await backend.enqueue(PRIO_IDS[0])
+            await backend.enqueue(PRIO_IDS[1])
+            await backend.enqueue(PRIO_IDS[2])
             order = [(await backend.get())[0] for _ in range(3)]
-            assert order == ["prio-high-1", "prio-high-2", "prio-low"], order
+            assert order == [PRIO_IDS[1], PRIO_IDS[2], PRIO_IDS[0]], order
         finally:
             await backend.stop()
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        # 测后自清理：纯后端用例不经引擎执行，三行滞留 PENDING——删除防下一遍
+        # 引擎启动恢复扫描误捞（type=echo 无 handler 会被置 FAILED，污染任务表）
+        with SessionLocal() as db:
+            for tid in PRIO_IDS:
+                row = db.get(TaskRecord, tid)
+                if row is not None:
+                    db.delete(row)
+            db.commit()
 
 
 # ---------- Redis 双流（hi/lo 分流 + XAUTOCLAIM 接管） ----------
@@ -372,11 +403,12 @@ def test_redis_dual_stream_priority_and_reclaim(client):
 
     r = redis_sync.from_url(REDIS_URL, decode_responses=True)
     r.delete("eap:tasks:hi", "eap:tasks")  # db6 测试键清理（含消费组）
+    lo_id, hi_id = f"redis-lo-{_SFX}", f"redis-hi-{_SFX}"
     try:
         with SessionLocal() as db:
             db.add_all([
-                TaskRecord(id="redis-lo-1", type="echo", state="PENDING", payload={}, priority=0),
-                TaskRecord(id="redis-hi-1", type="echo", state="PENDING", payload={}, priority=5),
+                TaskRecord(id=lo_id, type="echo", state="PENDING", payload={}, priority=0),
+                TaskRecord(id=hi_id, type="echo", state="PENDING", payload={}, priority=5),
             ])
             db.commit()
 
@@ -384,10 +416,10 @@ def test_redis_dual_stream_priority_and_reclaim(client):
             # 副本 A：消费两条但不 ACK（模拟处理中崩溃，pending 遗留）
             backend_a = RedisStreamBackend(REDIS_URL, min_idle_ms=60_000)
             await backend_a.start()
-            await backend_a.enqueue("redis-lo-1")   # priority=0 → lo 流
-            await backend_a.enqueue("redis-hi-1")   # priority=5 → hi 流
+            await backend_a.enqueue(lo_id)   # priority=0 → lo 流
+            await backend_a.enqueue(hi_id)   # priority=5 → hi 流
             got = [(await backend_a.get())[0] for _ in range(2)]
-            assert got == ["redis-hi-1", "redis-lo-1"], f"hi 流应先被消费: {got}"
+            assert got == [hi_id, lo_id], f"hi 流应先被消费: {got}"
             await backend_a.stop()
 
             await asyncio.sleep(0.3)  # pending 空闲超过副本 B 的接管阈值
@@ -400,7 +432,7 @@ def test_redis_dual_stream_priority_and_reclaim(client):
                     task_id, receipt = await backend_b.get()
                     recovered.append(task_id)
                     await backend_b.ack(receipt)
-                assert recovered == ["redis-hi-1", "redis-lo-1"], \
+                assert recovered == [hi_id, lo_id], \
                     f"接管重投应保留优先级（hi 在先）: {recovered}"
             finally:
                 await backend_b.stop()
@@ -409,6 +441,13 @@ def test_redis_dual_stream_priority_and_reclaim(client):
     finally:
         r.delete("eap:tasks:hi", "eap:tasks")
         r.close()
+        # 测后自清理：纯后端用例不经引擎执行，两行滞留 PENDING（同 prio 用例）
+        with SessionLocal() as db:
+            for tid in (lo_id, hi_id):
+                row = db.get(TaskRecord, tid)
+                if row is not None:
+                    db.delete(row)
+            db.commit()
 
 
 # ---------- worker 入口 ----------

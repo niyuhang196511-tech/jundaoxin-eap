@@ -1,16 +1,28 @@
-"""工作流交互节点测试（v0.5-⑤）：挂起 → 提交 → 续跑；聊天通道统一。"""
+"""工作流交互节点测试（v0.5-⑤）：挂起 → 提交 → 续跑；聊天通道统一。
+
+M52-D 可重入：工作流名/会话 id 唯一化（固定名脏库重跑 409 击穿 assert 200），
+模块收尾删除自造工作流——避免残留 enabled 工作流在后续运行启动时重复注册进
+智能体注册表（样板=test_workflow_versions）。
+"""
 
 from __future__ import annotations
 
 import json
 import time
+import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
 
+_SFX = uuid.uuid4().hex[:8]
+F_LINEAR = f"restock-flow-{_SFX}"
+F_GRAPH = f"restock-graph-{_SFX}"
+F_CHAT = f"restock-chat-{_SFX}"
+
 DSL = {
-    "name": "restock-flow",
+    "name": F_LINEAR,
     "version": "1.0.0",
     "description": "补货流程（交互节点演示）",
     "steps": [
@@ -28,6 +40,13 @@ DSL = {
 }
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_flows(client: TestClient):
+    yield
+    for name in (F_LINEAR, F_GRAPH, F_CHAT):
+        client.delete(f"/api/v1/workflows/{name}", headers=AUTH)  # 404/失败无害
+
+
 def _make_workflow(client: TestClient):
     resp = client.post("/api/v1/workflows", headers=AUTH, json=DSL)
     assert resp.status_code == 200, resp.text
@@ -37,7 +56,7 @@ def _make_workflow(client: TestClient):
 def test_workflow_interaction_linear(client: TestClient):
     """线性 DSL：interaction 节点挂起 → run submit → 续跑 succeeded。"""
     _make_workflow(client)
-    run_id = client.post("/api/v1/workflows/restock-flow/test-run", headers=AUTH,
+    run_id = client.post(f"/api/v1/workflows/{F_LINEAR}/test-run", headers=AUTH,
                          json={"input": "开始"}).json()["run_id"]
     status = ""
     for _ in range(30):
@@ -62,7 +81,7 @@ def test_workflow_interaction_linear(client: TestClient):
 
 def test_workflow_interaction_graph_mode(client: TestClient):
     """图 DSL（edges）：interaction 节点同样可挂起/恢复。"""
-    graph = dict(DSL, name="restock-graph", steps=[
+    graph = dict(DSL, name=F_GRAPH, steps=[
         {"id": "start", "type": "tool", "tool_name": "kb.product-docs.search",
          "tool_args": {"query": "x"}},
         DSL["steps"][0],
@@ -73,7 +92,7 @@ def test_workflow_interaction_graph_mode(client: TestClient):
     ])
     resp = client.post("/api/v1/workflows", headers=AUTH, json=graph)
     assert resp.status_code == 200, resp.text
-    run_id = client.post("/api/v1/workflows/restock-graph/test-run", headers=AUTH,
+    run_id = client.post(f"/api/v1/workflows/{F_GRAPH}/test-run", headers=AUTH,
                          json={"input": "开始"}).json()["run_id"]
     for _ in range(30):
         view = client.get(f"/api/v1/workflows/runs/{run_id}", headers=AUTH).json()
@@ -94,20 +113,20 @@ def test_workflow_interaction_graph_mode(client: TestClient):
 
 def test_workflow_agent_chat_interaction(client: TestClient):
     """workflow-as-agent 聊天通道：挂起返回 result.interaction → submit 恢复协议续跑。"""
-    chat_dsl = dict(DSL, name="restock-chat")
+    chat_dsl = dict(DSL, name=F_CHAT)
     resp = client.post("/api/v1/workflows", headers=AUTH, json=chat_dsl)
     assert resp.status_code == 200, resp.text
-    resp = client.post("/api/v1/agents/restock-chat/invocations", headers=AUTH,
-                       json={"input": "补货", "session_id": "wf-itx-1"})
+    resp = client.post(f"/api/v1/agents/{F_CHAT}/invocations", headers=AUTH,
+                       json={"input": "补货", "session_id": f"wf-itx-{_SFX}"})
     assert resp.status_code == 200, resp.text
     data = resp.json()
     interaction = data.get("interaction")
     assert interaction is not None, "工作流 agent 应挂起等待交互"
     assert interaction["id"].startswith("itx-")
 
-    resp = client.post(f"/api/v1/agents/restock-chat/interactions/{interaction['id']}/submit",
+    resp = client.post(f"/api/v1/agents/{F_CHAT}/interactions/{interaction['id']}/submit",
                        headers=AUTH, json={"values": {"product": "EAP 一体机", "qty": 5},
-                                            "session_id": "wf-itx-1"})
+                                            "session_id": f"wf-itx-{_SFX}"})
     assert resp.status_code == 200, resp.text
     result_frames = [json.loads(block.split("data: ", 1)[1])
                      for block in resp.text.split("\n\n") if block.startswith("event: result")]
@@ -116,7 +135,7 @@ def test_workflow_agent_chat_interaction(client: TestClient):
 
 
 def test_workflow_submit_non_waiting_409(client: TestClient):
-    run_id = client.post("/api/v1/workflows/restock-flow/test-run", headers=AUTH,
+    run_id = client.post(f"/api/v1/workflows/{F_LINEAR}/test-run", headers=AUTH,
                          json={"input": "开始"}).json()["run_id"]
     # 立即 submit：可能还在 running（未挂起）或已 waiting_input；等待挂起后再提交两次
     for _ in range(30):

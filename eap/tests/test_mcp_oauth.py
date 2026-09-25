@@ -2,12 +2,16 @@
 
 全部离线确定性：mock IdP 经 record.http_client_factory 注入（零真实网络）；
 完整 MCP 握手（load_mcp_tools 端到端）需真实 server，属 L3 式联调（见账本）。
+
+M52-D 可重入：server 名经 _record 统一加 uuid 后缀——脏库重跑不撞唯一约束（409）；
+后续 URL/查询一律走返回记录的 name。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -52,8 +56,10 @@ def _patch_idp(monkeypatch, calls: list[dict]) -> None:
     monkeypatch.setattr(mcp_auth, "token_transport_factory", _MockIdP(calls).factory)
 
 
-def _record(client: TestClient, name: str, calls: list[dict], *, expires_in: int | None = None):
-    """注册 + 返回可按需调整过期时间的 ORM 记录（token 缓存置空）。"""
+def _record(client: TestClient, prefix: str, calls: list[dict], *, expires_in: int | None = None):
+    """注册（唯一名 = prefix + uuid 后缀，M52-D 可重入）+ 返回可按需调整过期时间
+    的 ORM 记录（token 缓存置空）；后续引用一律走 record.name。"""
+    name = f"{prefix}-{uuid.uuid4().hex[:8]}"
     r = client.post("/api/v1/mcp/servers", headers=HEADERS, json={
         "name": name, "url": "http://mcp.internal", "transport": "http",
         "oauth_token_url": "http://idp.internal/token",
@@ -131,7 +137,7 @@ def test_build_headers_oauth_then_api_key_fallback(client: TestClient, monkeypat
 
     with SessionLocal() as db:
         rec = db.scalar(__import__("sqlalchemy").select(MCPServerRecord)
-                        .where(MCPServerRecord.name == "mcp-oauth-c"))
+                        .where(MCPServerRecord.name == record.name))
         rec.oauth_access_token_enc = None
         rec.oauth_token_url = ""
         rec.api_key = encrypt_secret("key-123")
@@ -167,9 +173,9 @@ def test_api_fields_secret_not_echoed(client: TestClient, monkeypatch):
     """注册 OAuth Server：secret Fernet 加密、列表响应不回显。"""
     calls: list[dict] = []
     _patch_idp(monkeypatch, calls)
-    _record(client, "mcp-oauth-d", calls)
+    rec_created = _record(client, "mcp-oauth-d", calls)
     listing = client.get("/api/v1/mcp/servers", headers=AUTH).json()
-    row = next(s for s in listing if s["name"] == "mcp-oauth-d")
+    row = next(s for s in listing if s["name"] == rec_created.name)
     assert "oauth_client_secret" not in json.dumps(row)
     from eap.db import SessionLocal
     from eap.models import MCPServerRecord
@@ -177,7 +183,7 @@ def test_api_fields_secret_not_echoed(client: TestClient, monkeypatch):
     from sqlalchemy import select
 
     with SessionLocal() as db:
-        rec = db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == "mcp-oauth-d"))
+        rec = db.scalar(select(MCPServerRecord).where(MCPServerRecord.name == rec_created.name))
         assert decrypt_secret(rec.oauth_client_secret_enc) == "s3cret"
 
 
@@ -185,13 +191,13 @@ def test_token_refresh_endpoint(client: TestClient, monkeypatch):
     """POST /{name}/oauth/token：admin 手动刷新，响应不回显明文 token。"""
     calls: list[dict] = []
     _patch_idp(monkeypatch, calls)
-    _record(client, "mcp-oauth-e", calls)
-    r = client.post("/api/v1/mcp/servers/mcp-oauth-e/oauth/token", headers=HEADERS)
+    rec = _record(client, "mcp-oauth-e", calls)
+    r = client.post(f"/api/v1/mcp/servers/{rec.name}/oauth/token", headers=HEADERS)
     assert r.status_code == 200 and r.json()["status"] == "refreshed"
     assert "tok-" not in json.dumps(r.json())
     assert r.json()["expires_at"] not in (None, "None")
     # 非 admin 403
-    r = client.post("/api/v1/mcp/servers/mcp-oauth-e/oauth/token",
+    r = client.post(f"/api/v1/mcp/servers/{rec.name}/oauth/token",
                     headers={"Authorization": "Bearer dev-key-2"})
     assert r.status_code in (401, 403)
     # 未配置 OAuth 的 server → 400
@@ -241,8 +247,8 @@ def test_validate_passes_auth_headers(client: TestClient, monkeypatch):
     monkeypatch.setattr(_mcp, "ClientSession", _FakeSession)
     calls: list[dict] = []
     _patch_idp(monkeypatch, calls)
-    _record(client, "mcp-oauth-f", calls)
-    r = client.post("/api/v1/mcp/servers/mcp-oauth-f/validate", headers=HEADERS)
+    rec = _record(client, "mcp-oauth-f", calls)
+    r = client.post(f"/api/v1/mcp/servers/{rec.name}/validate", headers=HEADERS)
     assert r.json()["status"] == "verified", r.text
     # httpx 内部规范化头名为小写（Headers 大小写不敏感）
     assert captured["auth"].get("authorization") == "Bearer tok-1"

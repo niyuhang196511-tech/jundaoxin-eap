@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import uuid
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,21 @@ import pytest
 from .conftest import AUTH
 
 HEADERS = {**AUTH, "Content-Type": "application/json"}
+
+# ---------- M52-D 可重入命名 ----------
+# 技能名跨运行唯一（样板同 test_connector_v2._SFX）：POST /api/v1/skills 对已存在
+# 技能 409，固定名脏库重跑必撞；唯一名同时保证附件目录（EAP_MEDIA_DIR/skills/<name>）
+# 与库内清单每遍全新，不被上一遍残留（如 rogue 杂质文件、已清空清单）干扰。
+_SFX = uuid.uuid4().hex[:8]
+
+SK_RT = f"skill-assets-rt-{_SFX}"
+SK_CLEAR = f"skill-assets-clear-{_SFX}"
+SK_SIG = f"skill-assets-sig-{_SFX}"
+SK_SEC = f"skill-assets-sec-{_SFX}"
+SK_NOASSETS = f"skill-no-assets-{_SFX}"
+SK_MISSING = f"skill-assets-missing-{_SFX}"
+# 注：恶意包用例（skill-assets-evil/many/bulk/imbalance）一律 400 拒绝不落库，
+# 固定坏名保留（修复守则第 3 条）。
 
 FILES = [
     ("scripts/demo.py", b"print('demo')\n"),
@@ -60,7 +76,7 @@ def _import(client, bundle: dict):
 # ---------- 打包 → 导入往返 ----------
 
 def test_assets_package_import_roundtrip(client):
-    name = "skill-assets-rt"
+    name = SK_RT
     _make_skill(client, name)
     bundle = _signed_bundle(name)
     assert {f["path"] for f in bundle["files"]} == {p for p, _ in FILES}
@@ -95,7 +111,7 @@ def test_assets_reimport_without_files_clears_old(client):
     """整体替换语义：重导入无附件包 → 清单清空 + 附件目录清场。"""
     from eap.runtime.skill_files import load_all, skill_dir
 
-    name = "skill-assets-clear"
+    name = SK_CLEAR
     assert _import(client, _signed_bundle(name)).status_code == 200
     assert skill_dir(name).is_dir() and load_all(name)
     # 无附件包（签名有效）
@@ -114,7 +130,7 @@ def test_assets_reimport_without_files_clears_old(client):
 def test_signature_covers_assets(client):
     """清单（skill.assets）随签名覆盖：篡改清单 → 验签失败 401；
     文件本体按清单哈希绑定：篡改附件 → 清单与实际不符 400。"""
-    name = "skill-assets-sig"
+    name = SK_SIG
     _make_skill(client, name)
     bundle = _signed_bundle(name)
 
@@ -197,7 +213,7 @@ def test_import_rejects_manifest_file_imbalance(client):
 def test_assets_endpoints_validation(client):
     from eap.runtime.skill_files import skill_dir
 
-    name = "skill-assets-sec"
+    name = SK_SEC
     _make_skill(client, name)
     assert _import(client, _signed_bundle(name)).status_code == 200
     base = f"/api/v1/skills/{name}/assets"
@@ -228,8 +244,8 @@ def test_assets_endpoints_validation(client):
     assert r.status_code == 200
 
     # 无附件技能：空清单
-    _make_skill(client, "skill-no-assets")
-    r = client.get("/api/v1/skills/skill-no-assets/assets", headers=AUTH)
+    _make_skill(client, SK_NOASSETS)
+    r = client.get(f"/api/v1/skills/{SK_NOASSETS}/assets", headers=AUTH)
     assert r.status_code == 200 and r.json()["assets"] == []
 
     # L2 详情携带附件清单；L1 目录不携带（渐进披露）
@@ -247,7 +263,7 @@ def test_package_rejects_when_disk_missing(client):
 
     from eap.runtime.skill_files import skill_dir
 
-    name = "skill-assets-missing"
+    name = SK_MISSING
     _make_skill(client, name)
     assert _import(client, _signed_bundle(name)).status_code == 200
     shutil.rmtree(skill_dir(name))

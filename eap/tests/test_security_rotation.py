@@ -1,12 +1,19 @@
-"""M48-C 密钥轮换与安全响应头测试。"""
+"""M48-C 密钥轮换与安全响应头测试。
+
+M52-D 可重入：e2e 用模型名加模块级 uuid 后缀——脏库重跑不撞 UNIQUE models.name
+（行尾照旧禁用收尾，不残留进路由链）。
+"""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+
+_SFX = uuid.uuid4().hex[:8]
 
 
 def _fernet_of(secret: str):
@@ -67,7 +74,7 @@ def test_reencrypt_script_rotates_rows(client: TestClient, monkeypatch):
 
     old, new = "rotate-old", "rotate-new"
     with SessionLocal() as db:
-        row = ModelRecord(name="rotate-e2e-model", provider="mock",
+        row = ModelRecord(name=f"rotate-e2e-model-{_SFX}", provider="mock",
                           capabilities=["chat"], api_key=_enc_with(old, "sk-rotated"),
                           priority=999)
         db.add(row)

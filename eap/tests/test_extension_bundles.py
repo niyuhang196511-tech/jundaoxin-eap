@@ -1,9 +1,15 @@
-"""Extension Bundle 测试（v0.7-M28）：安装/升级/卸载生命周期 + 安全校验。"""
+"""Extension Bundle 测试（v0.7-M28）：安装/升级/卸载生命周期 + 安全校验。
+
+M52-D 可重入（API 端点用例）：bundle 名加模块级 uuid 后缀 + 测后经卸载端点
+删除 ExtensionRecord——manifest.version 是严格 semver（无后缀空间），同名同版本
+重装被「拒绝降级安装」挡住（脏库残留必 409）；卸载兜底防安装记录累积。
+"""
 
 from __future__ import annotations
 
 import io
 import json
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -11,6 +17,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
+
+_SFX = uuid.uuid4().hex[:8]
+API_BUNDLE = f"api-bundle-tool-{_SFX}"
 
 TOOL_CODE = (
     "from eap.runtime.tools import Tool\n"
@@ -111,15 +120,18 @@ def test_bundle_install_api_endpoint(client: TestClient, tmp_path, monkeypatch):
     monkeypatch.setenv("EAP_PLUGINS_DIR", str(tmp_path / "plugins"))
     get_settings.cache_clear()
     try:
-        data = _bundle("api-bundle-tool", "1.0.0")
+        data = _bundle(API_BUNDLE, "1.0.0")
         resp = client.post("/api/v1/extensions/install", headers=AUTH,
-                           files={"file": ("api-bundle-tool.eapext", data,
+                           files={"file": (f"{API_BUNDLE}.eapext", data,
                                            "application/octet-stream")})
         assert resp.status_code == 200, resp.text
         rows = client.get("/api/v1/extensions/registry", headers=AUTH).json()
-        assert any(r["name"] == "api-bundle-tool" and r["source"] == "plugin_dir" for r in rows)
+        assert any(r["name"] == API_BUNDLE and r["source"] == "plugin_dir" for r in rows)
         logs = client.get("/api/v1/audit", headers=AUTH,
                           params={"action": "extension.install"}).json()
         assert logs
     finally:
+        # 自清理：卸载删除 ExtensionRecord（安装记录残留会挡后续同名安装；
+        # 须在 settings 仍指向本用例 plugins 目录时执行）
+        client.delete(f"/api/v1/extensions/registry/{API_BUNDLE}", headers=AUTH)
         get_settings.cache_clear()

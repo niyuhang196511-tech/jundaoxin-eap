@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -31,6 +32,25 @@ HEADERS = {**AUTH, "Content-Type": "application/json"}
 _EAP_DIR = Path(__file__).resolve().parents[1]  # eap/（alembic.ini、migrations/ 所在）
 
 SENT: list[dict] = []  # 捕获的出站 HTTP 调用 {url, payload, headers}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _drain_stale_outbound(client: TestClient):
+    """M52-D 入口排涸 + 收尾禁用（模式同 test_im_remote / test_tool_governance）：
+
+    - 入口：把上一遍进程残留的 pending 投递置 dead——重试循环一旦被任何入队唤醒，
+      会把残留行重投进本模块的 fake 捕获窗口，污染回执计数断言（残留行的进程语境
+      已消失，置 dead 与失败用例测后自置 dead 同语义）。
+    - 收尾：停用本模块留下的 notify_hitl 渠道——脏库下一遍启动时，引擎恢复执行的
+      遗留任务回执会推给「仍启用」的 notify 渠道，跨模块污染出站断言。
+    """
+    with SessionLocal() as db:
+        for rec in db.scalars(select(IMOutboundLogRecord)
+                              .where(IMOutboundLogRecord.status == "pending")).all():
+            rec.status = "dead"
+        db.commit()
+    yield
+    _disable_notify_channels()
 
 
 @pytest.fixture(autouse=True)
@@ -92,14 +112,22 @@ def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 2
     return last
 
 
-def _wait_push(min_count: int = 1, timeout: float = 10.0) -> list[dict]:
-    """等任务引擎 worker 发出卡片推送（终态落库后异步推送，与状态轮询存在微小竞态）。"""
+def _wait_push(min_count: int = 1, timeout: float = 10.0, contains: str = "") -> list[dict]:
+    """等任务引擎 worker 发出卡片推送（终态落库后异步推送，与状态轮询存在微小竞态）。
+
+    M52-D：contains 按 payload 子串（本用例 task_id）过滤——脏库下一遍启动时引擎
+    恢复执行的遗留任务回执可能落进同一捕获窗口，与本用例断言无关（模式同
+    test_non_agent_task_type_no_receipt 的按任务 id 过滤）。
+    """
     deadline = time.monotonic() + timeout
+    hits: list[dict] = []
     while time.monotonic() < deadline:
-        if len(SENT) >= min_count:
-            return SENT
+        hits = [e for e in SENT
+                if not contains or contains in json.dumps(e["payload"], ensure_ascii=False)]
+        if len(hits) >= min_count:
+            return hits
         time.sleep(0.1)
-    return SENT
+    return hits
 
 
 def _log_row(event_key: str) -> IMOutboundLogRecord | None:
@@ -127,8 +155,9 @@ def test_task_completed_pushes_done_card(client: TestClient):
     task = _poll(client, task_id, {"COMPLETED"})
     assert task["state"] == "COMPLETED", task["result"]
 
-    push = _wait_push(1)
-    assert len(push) == 1  # 仅 notify_hitl 渠道收到，无其他出站
+    push = _wait_push(1, contains=task_id)
+    assert len(push) == 1  # 本任务回执恰一条（仅 notify_hitl 渠道收到；脏库恢复的
+    # 遗留任务回执与本用例无关，按 task_id 过滤——模式同 test_non_agent_task_type_no_receipt）
     assert push[0]["url"] == f"https://hook.example/{ch['name']}"
     card = _feishu_card(push[0]["payload"])
     assert card["header"]["title"]["content"] == "✅ 已完成"
@@ -160,8 +189,8 @@ def test_task_failed_pushes_fail_card(client: TestClient):
     task = _poll(client, task_id, {"FAILED"})
     assert task["state"] == "FAILED", task["result"]
 
-    push = _wait_push(1)
-    assert len(push) == 1
+    push = _wait_push(1, contains=task_id)
+    assert len(push) == 1  # 本任务回执恰一条（按 task_id 过滤，理由同上一用例）
     card = _feishu_card(push[0]["payload"])
     assert card["header"]["title"]["content"] == "❌ 失败"
     body = card["elements"][0]["text"]["content"]
@@ -194,20 +223,21 @@ def test_notify_done_idempotent_event_key(client: TestClient):
     from eap.runtime import im_outbound as im_out
 
     ch = _solo_notify_channel(client, "feishu", "fs-done-idem")
+    tid = _name("m40-idem")  # M52-D：任务 id 唯一化 → event_key 跨运行唯一
     with SessionLocal() as db:
-        pushed = asyncio.run(im_out.notify_task_done("m40-idem-1", "agent.invoke",
+        pushed = asyncio.run(im_out.notify_task_done(tid, "agent.invoke",
                                                      "COMPLETED", "已生成 3 条记录", db))
     assert pushed == [ch["name"]]
     n = len(SENT)
     with SessionLocal() as db:
-        pushed2 = asyncio.run(im_out.notify_task_done("m40-idem-1", "agent.invoke",
+        pushed2 = asyncio.run(im_out.notify_task_done(tid, "agent.invoke",
                                                       "COMPLETED", "已生成 3 条记录", db))
     assert pushed2 == []  # 已 done 的同键投递 → 幂等跳过
     # 同上按任务 id 过滤（隔离 session 引擎其他在途任务的回执，M48 实测满载偶发）
     import json as _json
-    late = [e for e in SENT[n:] if "m40-idem-1" in _json.dumps(e)]
+    late = [e for e in SENT[n:] if tid in _json.dumps(e)]
     assert late == []
-    rec = _log_row("done:m40-idem-1:COMPLETED")
+    rec = _log_row(f"done:{tid}:COMPLETED")
     assert rec is not None and rec.status == "done" and rec.attempts == 1
 
 
@@ -235,11 +265,12 @@ def test_notify_done_send_failure_enqueued(client: TestClient, monkeypatch):
         raise RuntimeError("net-boom-m40")
 
     monkeypatch.setattr(im_out, "post_json", boom)
+    tid = _name("m40-fail")  # M52-D：任务 id 唯一化——上一遍同键行已置 dead，复用会污染断言
     with SessionLocal() as db:
-        pushed = asyncio.run(im_out.notify_task_done("m40-fail-1", "agent.invoke",
+        pushed = asyncio.run(im_out.notify_task_done(tid, "agent.invoke",
                                                      "FAILED", "boom", db))
     assert len(pushed) == 1  # 渠道命中但发送失败（入队重试）
-    rec = _log_row("done:m40-fail-1:FAILED")
+    rec = _log_row(f"done:{tid}:FAILED")
     assert rec is not None and rec.status == "pending" and rec.attempts == 1
     assert "net-boom-m40" in rec.error and rec.next_retry_at is not None
     # 置死信：避免后续测试触发后台重试循环时对该记录发起真实出站
@@ -254,18 +285,21 @@ def test_notify_done_send_failure_enqueued(client: TestClient, monkeypatch):
 def test_device_register_with_user_and_list(client: TestClient):
     """注册带 user（归属人标识）→ 注册响应与列表透出；缺省（API Key 通道无登录态）
     为 null；明细不落明文 key。"""
+    # M52-D：设备名全局唯一（在用重名 409）——唯一名保证脏库可重入
+    paired = _name("m40-paired")
+    anon = _name("m40-anon")
     r = client.post("/api/v1/auth/devices", headers=HEADERS,
-                    json={"name": "m40-paired", "user": "alice"})
+                    json={"name": paired, "user": "alice"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["user"] == "alice" and body["api_key"].startswith("eap_d_")
-    r = client.post("/api/v1/auth/devices", headers=HEADERS, json={"name": "m40-anon"})
+    r = client.post("/api/v1/auth/devices", headers=HEADERS, json={"name": anon})
     assert r.status_code == 200 and r.json()["user"] is None
 
     listing = client.get("/api/v1/auth/devices", headers=HEADERS).json()
     users = {d["name"]: d.get("user") for d in listing}
-    assert users["m40-paired"] == "alice"
-    assert users["m40-anon"] is None
+    assert users[paired] == "alice"
+    assert users[anon] is None
     assert "api_key" not in __import__("json").dumps(listing)
 
 
@@ -273,10 +307,11 @@ def test_device_user_persisted_in_db(client: TestClient):
     """配对落库：device_user 列存归属人（设备↔用户绑定语义的地基）。"""
     from eap.models import ApiKey
 
+    dev = _name("m40-dbcheck")  # M52-D：唯一名可重入
     client.post("/api/v1/auth/devices", headers=HEADERS,
-                json={"name": "m40-dbcheck", "user": "bob"})
+                json={"name": dev, "user": "bob"})
     with SessionLocal() as db:
-        row = db.scalar(select(ApiKey).where(ApiKey.note == "harness:m40-dbcheck"))
+        row = db.scalar(select(ApiKey).where(ApiKey.note == f"harness:{dev}"))
         assert row is not None and row.device_user == "bob"
 
 
@@ -381,10 +416,14 @@ def test_done_receipt_after_recovered_task_shape(client: TestClient):
     from eap.runtime import im_outbound as im_out
 
     ch = _solo_notify_channel(client, "feishu", "fs-done-shape")
+    tid = _name("m40-shape")  # M52-D：任务 id 唯一化 → event_key/出站过滤跨运行唯一
     with SessionLocal() as db:
-        pushed = asyncio.run(im_out.notify_task_done("m40-shape-1", "agent.hitl",
+        pushed = asyncio.run(im_out.notify_task_done(tid, "agent.hitl",
                                                      "COMPLETED", "", db))
     assert pushed == [ch["name"]]
-    card = _feishu_card(SENT[-1]["payload"])
+    # 按本用例任务 id 过滤取回执（SENT[-1] 会被脏库恢复任务/重试循环的无关出站抢占）
+    mine = [e for e in SENT if tid in json.dumps(e["payload"], ensure_ascii=False)]
+    assert len(mine) == 1, mine
+    card = _feishu_card(mine[0]["payload"])
     assert card["header"]["title"]["content"] == "✅ 已完成"
     assert "agent.hitl" in card["elements"][0]["text"]["content"]

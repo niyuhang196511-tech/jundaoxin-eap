@@ -8,9 +8,31 @@ from __future__ import annotations
 import time
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from .conftest import AUTH
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_policies(client: TestClient):
+    """模块结束后差量清理本模块新增策略行（样板=test_tool_governance/_cleanup_gov_policies）。
+
+    M52-D：策略按 kind 检索且「租户自有策略不叠加平台默认」——本文件的
+    model-allowlist 策略若残留（即便已停用），仍会参与后续文件的策略组合语义，
+    属跨文件语义污染，删行而非仅停用。"""
+    from eap.db import SessionLocal
+    from eap.models import PolicyRecord
+
+    with SessionLocal() as db:
+        before = set(db.scalars(select(PolicyRecord.id)).all())
+    yield
+    with SessionLocal() as db:
+        for r in db.scalars(select(PolicyRecord)).all():
+            if r.id not in before:
+                db.delete(r)
+        db.commit()
 
 
 def _counter(body: str, series: str) -> float:
@@ -105,6 +127,7 @@ def test_metrics_task_queue_depth_gauge(client: TestClient):
 
     from eap.db import SessionLocal
     from eap.models import TaskRecord
+    from eap.observability.metrics import TASK_STATES
 
     ids = [f"metrics-depth-{uuid.uuid4().hex[:8]}-{i}" for i in range(3)]
     with SessionLocal() as db:
@@ -126,15 +149,22 @@ def test_metrics_task_queue_depth_gauge(client: TestClient):
             return {l["state"]: v for l, v in _series(body, "eap_task_queue_depth")
                     if "state" in l}
 
+        # M52-D：相等性只对「导出面内的 state」（TASK_STATES）成立——
+        # refresh_task_queue_depth 按设计只导出已知 state（显式补零），库里其他用例
+        # 残留的非标准 state 行（如 tasks 分页测试的唯一标记）永远不在导出面，
+        # 对全库 state 做 == 属误报断言（对导出面内 state 的精确相等语义保持不变）。
+        def in_scope(want: dict[str, float]) -> dict[str, float]:
+            return {state: n for state, n in want.items() if state in TASK_STATES}
+
         got: dict[str, float] = {}
         want: dict[str, float] = {}
         for _ in range(20):  # 与引擎后台状态迁移赛跑：最多 ~4s，正常首轮即一致
             want, got = expected(), exported()
-            if all(got.get(state, 0.0) == n for state, n in want.items()):
+            if all(got.get(state, 0.0) == n for state, n in in_scope(want).items()):
                 break
             time.sleep(0.2)
 
-        for state, n in want.items():
+        for state, n in in_scope(want).items():
             assert got.get(state, 0.0) == n, f"state={state} 导出值应与 DB 计数一致"
         assert got.get("PENDING", 0.0) >= 2, "插入的 2 个 PENDING 应计入"
         assert got.get("RUNNING", 0.0) >= 1, "插入的 1 个 RUNNING 应计入"
@@ -147,21 +177,24 @@ def test_metrics_task_queue_depth_gauge(client: TestClient):
             db.commit()
 
 
-def test_audit_log_records_admin_ops(client: TestClient):
+def test_audit_log_records_admin_ops(client: TestClient, uname):
     """M11 审计：策略创建/启停、任务审批落审计并可查询；敏感字段脱敏。"""
-    # 策略创建（含敏感形态 config 验证脱敏）
+    # 策略创建（含敏感形态 config 验证脱敏）——M52-D：策略名唯一化（脏库重跑不撞唯一约束）
+    name = uname("audit-test-policy")
     r = client.post("/api/v1/policies", headers=AUTH, json={
-        "name": "audit-test-policy", "tenant_id": 0, "kind": "model-allowlist",
+        "name": name, "tenant_id": 0, "kind": "model-allowlist",
         "config": {"models": ["mock-llm"], "api_key": "mask-" + uuid.uuid4().hex[:8]},
     })
     assert r.status_code == 200, r.text
-    r2 = client.post("/api/v1/policies/audit-test-policy/enabled?enabled=false", headers=AUTH)
+    r2 = client.post(f"/api/v1/policies/{name}/enabled?enabled=false", headers=AUTH)
     assert r2.status_code == 200
 
     logs = client.get("/api/v1/audit", headers=AUTH).json()
     actions = [l["action"] for l in logs]
     assert "policy.create" in actions and "policy.toggle" in actions
-    create_log = next(l for l in logs if l["action"] == "policy.create")
+    # 按本用例策略名（审计 target）定位创建日志——脏库残留的其他 policy.create 不干扰
+    create_log = next(l for l in logs
+                      if l["action"] == "policy.create" and l["target"] == name)
     assert create_log["detail"]["config"]["api_key"] == "***"
 
     # 按 action 过滤

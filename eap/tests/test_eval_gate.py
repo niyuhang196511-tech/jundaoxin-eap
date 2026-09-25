@@ -14,20 +14,41 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from .conftest import AUTH
 
 HEADERS = {**AUTH, "Content-Type": "application/json"}
 CHAT = "/v1/chat/completions"
 
+# M52-D 可重入：模块级一次性后缀——模型/策略/评测行 ID 跨运行唯一，脏库重跑不撞约束
+_SFX = uuid.uuid4().hex[:8]
+
 # 门禁集成用专用模型名（reasoning 能力，不进 chat 链；用后停用防泄漏）
-GATED_MODEL = "gate-eval-a"
-FALLBACK_MODEL = "gate-eval-b"
+GATED_MODEL = f"gate-eval-a-{_SFX}"
+FALLBACK_MODEL = f"gate-eval-b-{_SFX}"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_gate_policies(client: TestClient):
+    """模块结束后删除本模块新增的策略行（差量清理，样板=test_tool_governance）：
+    eval-gate 残留启用策略会污染后续文件的模型路由断言。"""
+    from eap.db import SessionLocal
+    from eap.models import PolicyRecord
+
+    with SessionLocal() as db:
+        before = set(db.scalars(select(PolicyRecord.id)).all())
+    yield
+    with SessionLocal() as db:
+        for r in db.scalars(select(PolicyRecord)).all():
+            if r.id not in before:
+                db.delete(r)
+        db.commit()
 
 
 # ---------- 纯判定逻辑（apply_eval_gate） ----------
@@ -47,7 +68,7 @@ def test_eval_gate_pure_logic(client: TestClient):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def _run(model, verdict, pass_rate, offset_s):
-        return EvalRunRecord(id=f"m42b-{model}-{offset_s}", agent="", dataset="faq-smoke",
+        return EvalRunRecord(id=f"m42b-{_SFX}-{model}-{offset_s}", agent="", dataset="faq-smoke",
                              model=model, verdict=verdict, kind="agent", judge="rule",
                              min_pass_rate=0.8, pass_rate=pass_rate, scores=[],
                              created_at=now + timedelta(seconds=offset_s))
@@ -61,7 +82,7 @@ def test_eval_gate_pure_logic(client: TestClient):
             assert [r.name for r in chain] == ["gate-a", "gate-b", "gate-out"]
             assert blocked == []
 
-            policy = PolicyRecord(name="m42b-gate-logic", tenant_id=0, kind="eval-gate",
+            policy = PolicyRecord(name=f"m42b-gate-logic-{_SFX}", tenant_id=0, kind="eval-gate",
                                   config={"models": ["gate-a", "gate-b"],
                                           "require_eval": True, "min_pass_rate": 0.8})
             db.add(policy)
@@ -101,7 +122,8 @@ def test_eval_gate_pure_logic(client: TestClient):
                 assert [r.name for r in chain] == ["gate-a", "gate-b", "gate-out"]
             finally:
                 db.execute(delete(EvalRunRecord).where(EvalRunRecord.model.like("gate-%")))
-                db.execute(delete(PolicyRecord).where(PolicyRecord.name == "m42b-gate-logic"))
+                db.execute(delete(PolicyRecord)
+                           .where(PolicyRecord.name == f"m42b-gate-logic-{_SFX}"))
                 db.commit()
     finally:
         policy_mod.reset_tenant(token)
@@ -140,7 +162,7 @@ def test_eval_gate_router_fallback(client: TestClient):
         assert resp.status_code == 200, resp.text
 
     client.post("/api/v1/policies", headers=HEADERS, json={
-        "name": "m42b-gate-route", "kind": "eval-gate",
+        "name": f"m42b-gate-route-{_SFX}", "kind": "eval-gate",
         "config": {"models": [GATED_MODEL], "require_eval": True, "min_pass_rate": 0.8}})
     try:
         # FAIL 模型被门禁剔除 → 自然落到降级链第二个
@@ -156,7 +178,7 @@ def test_eval_gate_router_fallback(client: TestClient):
 
         # 模型直评写入 PASS 记录（作为门禁输入）→ 门禁放行，直达高优模型
         with SessionLocal() as db:
-            db.add(EvalRunRecord(id="m42b-route-pass", agent="", dataset="faq-smoke",
+            db.add(EvalRunRecord(id=f"m42b-route-pass-{_SFX}", agent="", dataset="faq-smoke",
                                  model=GATED_MODEL, verdict="PASS", kind="agent", judge="rule",
                                  min_pass_rate=0.8, pass_rate=1.0, scores=[]))
             db.commit()
@@ -165,17 +187,24 @@ def test_eval_gate_router_fallback(client: TestClient):
         # 链全空（capability 链上模型均被门禁剔除，含 mock-llm）→ 既有语义错误
         with SessionLocal() as db:
             db.execute(delete(EvalRunRecord).where(EvalRunRecord.model == GATED_MODEL))
+            # M52-D：mock-llm 为 reasoning 链尾（种子能力含 reasoning）——上一遍运行
+            # 本文件 test_model_direct_eval 留下的 PASS 记录会让门禁放行 mock-llm，
+            # 「链全空」前提失效。该记录源于本文件，按本文件隔离纪律（自建评测行
+            # 用后删除）在此清掉；后跑的 test_model_direct_eval 每次自建新记录不受影响。
+            db.execute(delete(EvalRunRecord).where(EvalRunRecord.model == "mock-llm"))
             db.commit()
         client.post("/api/v1/policies", headers=HEADERS, json={
-            "name": "m42b-gate-route-both", "kind": "eval-gate",
+            "name": f"m42b-gate-route-both-{_SFX}", "kind": "eval-gate",
             "config": {"models": [GATED_MODEL, FALLBACK_MODEL, "mock-llm"],
                        "require_eval": True}})
         with pytest.raises(ProviderError) as exc_info:
             _complete("reasoning", "全被门禁剔除")
         assert "评测门禁" in str(exc_info.value)
     finally:
-        client.post("/api/v1/policies/m42b-gate-route-both/enabled?enabled=false", headers=HEADERS)
-        client.post("/api/v1/policies/m42b-gate-route/enabled?enabled=false", headers=HEADERS)
+        client.post(f"/api/v1/policies/m42b-gate-route-both-{_SFX}/enabled?enabled=false",
+                    headers=HEADERS)
+        client.post(f"/api/v1/policies/m42b-gate-route-{_SFX}/enabled?enabled=false",
+                    headers=HEADERS)
         for name in (GATED_MODEL, FALLBACK_MODEL):
             client.patch(f"/api/v1/models/{name}?enabled=false", headers=HEADERS)
         with SessionLocal() as db:
@@ -228,7 +257,7 @@ def test_model_direct_eval(client: TestClient):
 def test_eval_gate_policy_validation(client: TestClient):
     # eval-gate 注册 + config 校验
     assert client.post("/api/v1/policies", headers=HEADERS, json={
-        "name": "m42b-gate-valid", "kind": "eval-gate",
+        "name": f"m42b-gate-valid-{_SFX}", "kind": "eval-gate",
         "config": {"models": ["mock-llm"], "require_eval": True, "min_pass_rate": 0.8}}
     ).status_code == 200
     r = client.post("/api/v1/policies", headers=HEADERS, json={
@@ -238,15 +267,17 @@ def test_eval_gate_policy_validation(client: TestClient):
         "name": "m42b-gate-bad2", "kind": "eval-gate",
         "config": {"models": ["x"], "min_pass_rate": 1.5}})
     assert r.status_code == 400 and "min_pass_rate" in r.json()["detail"]
-    client.post("/api/v1/policies/m42b-gate-valid/enabled?enabled=false", headers=HEADERS)
+    client.post(f"/api/v1/policies/m42b-gate-valid-{_SFX}/enabled?enabled=false",
+                headers=HEADERS)
 
 
 def test_model_direct_eval_no_fallback(client: TestClient):
     """M45-B 直评直连（only_prefer）：目标模型供应商失败 → 逐用例落 error 判 FAIL，
     绝不落到链上其他模型应答（对照：普通调用同场景会降级到 mock-llm）。"""
     # 注册必然失败的高优先级 openai_compat 模型（不可路由地址，test_hub 同款手法）
+    dead_model = f"eval-dead-model-{_SFX}"
     resp = client.post("/api/v1/models", headers=HEADERS, json={
-        "name": "eval-dead-model", "capabilities": ["chat"],
+        "name": dead_model, "capabilities": ["chat"],
         "provider": "openai_compat", "base_url": "http://127.0.0.1:9",
         "api_key": "x", "remote_model": "x", "priority": 1})
     assert resp.status_code == 200, resp.text
@@ -260,11 +291,11 @@ def test_model_direct_eval_no_fallback(client: TestClient):
 
         # 直评 dead-model：only_prefer 钉死 → 每个用例 ProviderError 落 error → FAIL
         resp = client.post("/api/v1/evals/runs", headers=HEADERS, json={
-            "model": "eval-dead-model", "dataset": "faq-smoke", "min_pass_rate": 0.8})
+            "model": dead_model, "dataset": "faq-smoke", "min_pass_rate": 0.8})
         assert resp.status_code == 200, resp.text
         run = _wait_run(client, resp.json()["run_id"])
         assert run["verdict"] == "FAIL", run.get("scores")
-        assert run["model"] == "eval-dead-model"
+        assert run["model"] == dead_model
         assert run["pass_rate"] == 0.0
         assert run["scores"], "应有逐用例记录"
         for case in run["scores"]:
@@ -272,7 +303,7 @@ def test_model_direct_eval_no_fallback(client: TestClient):
             assert "output_snippet" not in case, "不应出现其他模型（mock-llm）的应答"
     finally:
         # 隔离纪律：用后停用，防污染 session 级共享测试库的路由链
-        client.post("/api/v1/models/eval-dead-model/enabled?enabled=false", headers=HEADERS)
+        client.post(f"/api/v1/models/{dead_model}/enabled?enabled=false", headers=HEADERS)
 
 
 def test_model_direct_eval_pinned_missing_model(client: TestClient):

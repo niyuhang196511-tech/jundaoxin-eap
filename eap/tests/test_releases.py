@@ -1,12 +1,21 @@
-"""发布治理：生命周期状态机 + 评测门禁 + 回滚（docs/06 §2）。"""
+"""发布治理：生命周期状态机 + 评测门禁 + 回滚（docs/06 §2）。
+
+M52-D 可重入：数据集名/发布版本号加模块级 uuid 后缀（ReleaseCreate.version
+pattern 允许 "-" 后缀）——脏库重跑不撞「数据集名 / agent@version」唯一约束；
+回滚恢复目标按 updated_at 最新 retired+PASS 选取，本遍新注册的 v1 必然最新，
+残留 retired 版不干扰断言。
+"""
 
 from __future__ import annotations
+
+import uuid
 
 from .conftest import AUTH
 
 HEADERS = {**AUTH, "Content-Type": "application/json"}
+_SFX = uuid.uuid4().hex[:8]
 DATASET = {
-    "name": "release-gate-ds",
+    "name": f"release-gate-ds-{_SFX}",
     "cases": [
         {"input": "如何创建知识库？", "expected_any": ["知识库", "kb"]},
         {"input": "如何注册手写智能体？", "expected_any": ["register_agent", "智能体", "注册"]},
@@ -31,10 +40,10 @@ def test_release_lifecycle_with_gate(client):
     assert r.status_code == 404
 
     # 登记草案 → 重复版本 409
-    rel = _create_release(client, version="2.0.0")
+    rel = _create_release(client, version=f"2.0.0-{_SFX}")
     assert rel["state"] == "draft"
     assert client.post("/api/v1/releases", headers=HEADERS,
-                       json={"agent": "faq-agent", "version": "2.0.0"}).status_code == 409
+                       json={"agent": "faq-agent", "version": f"2.0.0-{_SFX}"}).status_code == 409
 
     # 未评测直接提升到 prod → 403 门禁拦截
     rid = rel["id"]
@@ -43,12 +52,12 @@ def test_release_lifecycle_with_gate(client):
     assert r.status_code == 403 and "EAP-6001" in r.json()["detail"]
 
     # FAIL 评测也不能放行
-    bad_ds = {**DATASET, "name": "release-gate-bad",
+    bad_ds = {**DATASET, "name": f"release-gate-bad-{_SFX}",
               "cases": [{"input": "随便问点什么", "expected_any": ["绝不出现的关键词"]}],
               "min_pass_rate": 1.0}
     assert client.post("/api/v1/evals/datasets", headers=HEADERS, json=bad_ds).status_code == 200
     r = client.post(f"/api/v1/releases/{rid}/eval", headers=HEADERS,
-                    json={"dataset": "release-gate-bad", "min_pass_rate": 1.0})
+                    json={"dataset": bad_ds["name"], "min_pass_rate": 1.0})
     assert r.json()["eval_verdict"] == "FAIL"
     assert client.post(f"/api/v1/releases/{rid}/promote", headers=HEADERS).status_code == 403
 
@@ -71,8 +80,8 @@ def test_promote_replaces_old_prod_and_rollback_restores(client):
     ds = client.post("/api/v1/evals/datasets", headers=HEADERS, json=DATASET)
     assert ds.status_code in (200, 409)
 
-    v1 = _create_release(client, version="3.0.0")
-    v2 = _create_release(client, version="3.1.0")
+    v1 = _create_release(client, version=f"3.0.0-{_SFX}")
+    v2 = _create_release(client, version=f"3.1.0-{_SFX}")
     for rel in (v1, v2):
         rid = rel["id"]
         client.post(f"/api/v1/releases/{rid}/promote", headers=HEADERS)  # → review

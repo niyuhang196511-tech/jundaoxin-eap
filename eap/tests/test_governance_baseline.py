@@ -1,10 +1,20 @@
-"""治理基线测试（v0.6-M23）：RBAC 收口 / 审计补全与查询 / KB 租户过滤。"""
+"""治理基线测试（v0.6-M23）：RBAC 收口 / 审计补全与查询 / KB 租户过滤。
+
+M52-D 可重入：发布版本号/工作流名/模型名/KB 名一律加模块级 uuid 后缀
+（ReleaseCreate.version pattern 允许 "-" 后缀，样板=test_releases）——脏库重跑
+不撞「agent@version 已存在 / 工作流已存在 / UNIQUE models.name / KB 已存在」；
+注册的 mock 模型用后收尾禁用（不残留进路由链，样板=test_hub）。
+"""
 
 from __future__ import annotations
+
+import uuid
 
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
+
+_SFX = uuid.uuid4().hex[:8]
 
 
 def test_budget_requires_admin_but_api_key_is_admin(client: TestClient):
@@ -23,7 +33,7 @@ def test_budget_requires_admin_but_api_key_is_admin(client: TestClient):
 def test_releases_write_endpoints_audited(client: TestClient):
     """发布治理全生命周期落审计（release.create/eval/promote/rollback）。"""
     resp = client.post("/api/v1/releases", headers=AUTH,
-                       json={"agent": "faq-agent", "version": "9.9.9"})
+                       json={"agent": "faq-agent", "version": f"9.9.9-{_SFX}"})
     assert resp.status_code == 200, resp.text
     release_id = resp.json()["id"]
     client.post(f"/api/v1/releases/{release_id}/promote", headers=AUTH)
@@ -35,41 +45,49 @@ def test_releases_write_endpoints_audited(client: TestClient):
 
 def test_workflow_audited(client: TestClient):
     """工作流创建/删除落审计。"""
-    dsl = {"name": "audit-wf", "version": "1.0.0",
+    name = f"audit-wf-{_SFX}"
+    dsl = {"name": name, "version": "1.0.0",
            "steps": [{"id": "a", "type": "llm", "system": "s"}]}
     assert client.post("/api/v1/workflows", headers=AUTH, json=dsl).status_code == 200
-    assert client.delete("/api/v1/workflows/audit-wf", headers=AUTH).status_code == 200
+    assert client.delete(f"/api/v1/workflows/{name}", headers=AUTH).status_code == 200
     actions = {l["action"] for l in
-               client.get("/api/v1/audit", headers=AUTH, params={"target": "audit-wf"}).json()}
+               client.get("/api/v1/audit", headers=AUTH, params={"target": name}).json()}
     assert {"workflow.create", "workflow.disable"} <= actions
 
 
 def test_audit_query_filters(client: TestClient):
     """审计查询：actor/action/时间范围/offset 分页。"""
-    # 造两条不同 action 的审计
-    client.post("/api/v1/models", headers=AUTH,
-                json={"name": "audit-m1", "capabilities": ["chat"], "provider": "mock"})
-    resp = client.get("/api/v1/audit", headers=AUTH,
-                      params={"action": "model.register", "limit": 5, "offset": 0})
-    assert resp.status_code == 200
-    rows = resp.json()
-    assert rows and all(r["action"] == "model.register" for r in rows)
-    # actor 过滤（API Key 通道 actor=api-key）
-    resp = client.get("/api/v1/audit", headers=AUTH, params={"actor": "api-key", "limit": 10})
-    assert all(r["actor"] == "api-key" for r in resp.json())
-    # 时间范围
-    resp = client.get("/api/v1/audit", headers=AUTH,
-                      params={"since": "2020-01-01", "until": "2099-01-01", "limit": 10})
-    assert resp.status_code == 200 and resp.json()
-    # 非法时间 → 400
-    assert client.get("/api/v1/audit", headers=AUTH,
-                      params={"since": "not-a-date"}).status_code == 400
+    # 造审计（模型名唯一化 → 注册恒成功、model.register 审计确为本运行所造；用后禁用不残留路由链）
+    model = f"audit-m1-{_SFX}"
+    resp = client.post("/api/v1/models", headers=AUTH,
+                       json={"name": model, "capabilities": ["chat"], "provider": "mock"})
+    assert resp.status_code == 200, resp.text
+    try:
+        resp = client.get("/api/v1/audit", headers=AUTH,
+                          params={"action": "model.register", "limit": 5, "offset": 0})
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert rows and all(r["action"] == "model.register" for r in rows)
+        # actor 过滤（API Key 通道 actor=api-key）
+        resp = client.get("/api/v1/audit", headers=AUTH, params={"actor": "api-key", "limit": 10})
+        assert all(r["actor"] == "api-key" for r in resp.json())
+        # 时间范围
+        resp = client.get("/api/v1/audit", headers=AUTH,
+                          params={"since": "2020-01-01", "until": "2099-01-01", "limit": 10})
+        assert resp.status_code == 200 and resp.json()
+        # 非法时间 → 400
+        assert client.get("/api/v1/audit", headers=AUTH,
+                          params={"since": "not-a-date"}).status_code == 400
+    finally:
+        r = client.patch(f"/api/v1/models/{model}", headers=AUTH, params={"enabled": "false"})
+        assert r.status_code == 200, r.text
 
 
 def test_kb_tenant_filter_channels(client: TestClient):
     """KB 租户过滤：API Key 通道全量可见；创建默认平台共享（NULL）。"""
+    name = f"audit-kb-{_SFX}"
     resp = client.post("/api/v1/kb", headers=AUTH,
-                       json={"name": "audit-kb", "title": "租户过滤测试库"})
+                       json={"name": name, "title": "租户过滤测试库"})
     assert resp.status_code == 200, resp.text
     names = [k["name"] for k in client.get("/api/v1/kb", headers=AUTH).json()]
-    assert "audit-kb" in names
+    assert name in names

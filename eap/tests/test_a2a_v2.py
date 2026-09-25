@@ -10,6 +10,7 @@ import hmac
 import json
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -22,6 +23,25 @@ from eap.runtime.a2a_client import (
 )
 
 from .conftest import AUTH
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_a2a_policies(client: TestClient):
+    """M52-D 模块级差量清理（模式同 test_tool_governance）：本模块直插库的
+    a2a-delegate-allowlist 策略测后删除——策略按 kind 检索（非按名），残留的启用行
+    会让后续「默认拒绝」语义断言（fail-closed）被上一遍/其他文件污染。"""
+    from eap.db import SessionLocal
+    from eap.models import PolicyRecord
+
+    with SessionLocal() as db:
+        before = set(db.scalars(select(PolicyRecord.id)).all())
+    yield
+    with SessionLocal() as db:
+        for r in db.scalars(select(PolicyRecord)).all():
+            if r.id not in before:
+                db.delete(r)
+        db.commit()
+
 
 _EXT_CARD_URL = "http://ext.test/.well-known/agent-card.json"
 _EXT_RPC_URL = "http://ext.test/rpc"
@@ -263,8 +283,9 @@ def test_a2a_delegate_tool_policy_allowed_and_audit(client: TestClient):
     from eap.runtime import policy
 
     tenant_id = _dev_tenant_id()
+    pname = f"e2e-a2a-allow-{uuid.uuid4().hex[:8]}"  # M52-D：策略名唯一化（脏库重跑不撞唯一约束）
     with SessionLocal() as db:
-        db.add(PolicyRecord(name="e2e-a2a-allow", tenant_id=tenant_id,
+        db.add(PolicyRecord(name=pname, tenant_id=tenant_id,
                             kind="a2a-delegate-allowlist",
                             config={"endpoints": ["http://ext.test"], "agents": ["ext-agent"]}))
         db.commit()
@@ -293,8 +314,8 @@ def test_a2a_delegate_tool_policy_allowed_and_audit(client: TestClient):
             assert row.detail["agent"] == "ext-agent"
             assert row.detail["task_state"] == "completed"
     finally:
-        with SessionLocal() as db:  # 清理策略，避免影响其他测试文件
-            row = db.scalar(select(PolicyRecord).where(PolicyRecord.name == "e2e-a2a-allow"))
+        with SessionLocal() as db:  # 清理策略，避免影响其他测试文件（模块级差量清理兜底）
+            row = db.scalar(select(PolicyRecord).where(PolicyRecord.name == pname))
             if row is not None:
                 db.delete(row)
                 db.commit()
@@ -325,11 +346,14 @@ def test_tasks_tenant_isolation(client: TestClient):
     from eap.security_keys import key_hash
 
     suffix = uuid.uuid4().hex[:6]
+    # M52-D：API Key 明文/哈希同样唯一化——api_keys.key 有唯一约束，固定
+    # "k-a2a-iso" 在上一遍残留行（本测不删）时脏库重跑撞 UNIQUE
+    iso_key = f"k-a2a-iso-{suffix}"
     with SessionLocal() as db:
         other = Tenant(name=f"a2a-iso-{suffix}")
         db.add(other)
         db.flush()
-        db.add(ApiKey(key="k-a2a-iso", key_hash=key_hash("k-a2a-iso"), tenant_id=other.id))
+        db.add(ApiKey(key=iso_key, key_hash=key_hash(iso_key), tenant_id=other.id))
         db.commit()
 
     resp = client.post("/a2a/rpc?agent=faq-agent", headers=AUTH, json={
@@ -338,7 +362,7 @@ def test_tasks_tenant_isolation(client: TestClient):
     task_id = resp.json()["result"]["id"]
 
     resp = client.post("/a2a/rpc?agent=faq-agent",
-                       headers={"Authorization": "Bearer k-a2a-iso"},
+                       headers={"Authorization": f"Bearer {iso_key}"},
                        json={"jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": {"id": task_id}})
     assert resp.status_code == 200
     assert resp.json()["error"]["code"] == -32001  # 跨租户查询视为不存在

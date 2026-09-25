@@ -79,9 +79,9 @@ def _add_acl(client: TestClient, kb: str, effect: str, subject: str,
     return r.json()["id"]
 
 
-def test_retrieve_filters_denied_document(client: TestClient):
+def test_retrieve_filters_denied_document(client: TestClient, uname):
     """deny 文档不出现在命中与引用；无规则 KB 存量兼容（全部可见）。"""
-    kb = "acl-demo"
+    kb = uname("acl-demo")  # M52-D：KB 名唯一化——重名 409，且检索断言只面对本遍文档
     assert client.post("/api/v1/kb", headers=HEADERS,
                        json={"name": kb, "title": "ACL 演示"}).status_code == 200
     _ingest_doc(client, kb, "公开手册", "退货政策：七天无理由退货，需要提供订单号。")
@@ -116,9 +116,9 @@ def test_retrieve_filters_denied_document(client: TestClient):
     assert "公开手册" in docs
 
 
-def test_acl_crud_rbac_and_validation(client: TestClient):
+def test_acl_crud_rbac_and_validation(client: TestClient, uname):
     """ACL 端点：CRUD、RBAC（非 admin 403）、坏文档 404、删除后列表同步。"""
-    kb = "acl-crud"
+    kb = uname("acl-crud")  # M52-D：KB 名唯一化（重名 409；ACL 计数断言只面对本遍规则）
     assert client.post("/api/v1/kb", headers=HEADERS,
                        json={"name": kb, "title": "ACL CRUD"}).status_code == 200
     acl_id = _add_acl(client, kb, "allow", "vip-user")
@@ -136,9 +136,9 @@ def test_acl_crud_rbac_and_validation(client: TestClient):
         "effect": "maybe", "subject_type": "role", "subject": "x"}).status_code == 422
 
 
-def test_graph_overview_filters_denied(client: TestClient):
+def test_graph_overview_filters_denied(client: TestClient, uname):
     """图谱概览：被 deny 文档的节点过滤（按过滤后计）。"""
-    kb = "acl-graph"
+    kb = uname("acl-graph")  # M52-D：KB 名唯一化（重名 409）
     assert client.post("/api/v1/kb", headers=HEADERS,
                        json={"name": kb, "title": "ACL 图谱"}).status_code == 200
     _ingest_doc(client, kb, "公开产品说明", "EAP 平台支持模型路由与知识检索，覆盖多租户。")

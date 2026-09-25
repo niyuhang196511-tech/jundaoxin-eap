@@ -1,4 +1,8 @@
-"""Workflow DSL v2 测试：图遍历执行 / branch 出口边 / loop 节点 / 旧线性 DSL 兼容 / 运行记录。"""
+"""Workflow DSL v2 测试：图遍历执行 / branch 出口边 / loop 节点 / 旧线性 DSL 兼容 / 运行记录。
+
+M52-D 可重入：落库的工作流名 uname 唯一化（脏库重跑不撞唯一约束）；
+仅 422 拒绝（不落库）的坏 DSL 名保持固定。
+"""
 
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ def _make_graph_dsl(name: str) -> dict:
     }
 
 
-def test_workflow_graph_executes_and_runs_recorded(client: TestClient):
+def test_workflow_graph_executes_and_runs_recorded(client: TestClient, uname):
     """图 DSL：创建即注册 → 调用走图遍历 → test-run 逐节点运行记录落库。"""
     from eap.runtime.workflow import register_workflow_tool
 
@@ -46,13 +50,14 @@ def test_workflow_graph_executes_and_runs_recorded(client: TestClient):
         name="test.escalate", description="升级工单",
         parameters={"type": "object", "properties": {}}, handler=escalate_handler))
 
-    dsl = _make_graph_dsl("graph-flow")
+    name = uname("graph-flow")
+    dsl = _make_graph_dsl(name)
     resp = client.post("/api/v1/workflows", headers=AUTH, json=dsl)
     assert resp.status_code == 200, resp.text
     assert resp.json()["steps"] == 4
 
     # 图遍历调用：不含"投诉" → else → answer
-    resp = client.post("/api/v1/agents/graph-flow/invocations", headers=AUTH,
+    resp = client.post(f"/api/v1/agents/{name}/invocations", headers=AUTH,
                        json={"input": "如何创建知识库？"})
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -60,13 +65,13 @@ def test_workflow_graph_executes_and_runs_recorded(client: TestClient):
     assert "TK-100" not in data["output"]
 
     # 含"投诉" → then → escalate
-    resp = client.post("/api/v1/agents/graph-flow/invocations", headers=AUTH,
+    resp = client.post(f"/api/v1/agents/{name}/invocations", headers=AUTH,
                        json={"input": "我要投诉！"})
     assert resp.status_code == 200, resp.text
     assert "TK-100" in resp.json()["output"]
 
     # 试运行：run_id → 轮询到终态 → 节点运行记录完整
-    resp = client.post("/api/v1/workflows/graph-flow/test-run", headers=AUTH,
+    resp = client.post(f"/api/v1/workflows/{name}/test-run", headers=AUTH,
                        json={"input": "投诉测试"})
     assert resp.status_code == 200, resp.text
     run_id = resp.json()["run_id"]
@@ -84,7 +89,7 @@ def test_workflow_graph_executes_and_runs_recorded(client: TestClient):
     assert detail["elapsed_ms"] >= 0
 
     # 历史列表
-    runs = client.get("/api/v1/workflows/graph-flow/runs", headers=AUTH).json()
+    runs = client.get(f"/api/v1/workflows/{name}/runs", headers=AUTH).json()
     assert any(r["id"] == run_id for r in runs)
 
 
@@ -102,7 +107,7 @@ def test_workflow_graph_validation(client: TestClient):
     assert resp.status_code == 422
 
 
-def test_workflow_loop_node(client: TestClient):
+def test_workflow_loop_node(client: TestClient, uname):
     """loop 节点：对数组变量逐项执行 body，拼接输出并保存 items。"""
     from eap.runtime.workflow import register_workflow_tool
 
@@ -114,8 +119,9 @@ def test_workflow_loop_node(client: TestClient):
         name="test.array", description="返回城市数组",
         parameters={"type": "object", "properties": {}}, handler=array_handler))
 
+    name = uname("loop-flow")
     dsl = {
-        "name": "loop-flow",
+        "name": name,
         "version": "1.0.0",
         "steps": [
             {"id": "cities", "type": "tool", "tool_name": "test.array"},
@@ -132,7 +138,7 @@ def test_workflow_loop_node(client: TestClient):
     resp = client.post("/api/v1/workflows", headers=AUTH, json=dsl)
     assert resp.status_code == 200, resp.text
 
-    resp = client.post("/api/v1/agents/loop-flow/invocations", headers=AUTH,
+    resp = client.post(f"/api/v1/agents/{name}/invocations", headers=AUTH,
                        json={"input": "开始"})
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -161,10 +167,11 @@ def test_workflow_loop_validation(client: TestClient):
     assert resp.status_code == 422
 
 
-def test_workflow_linear_dsl_still_works(client: TestClient):
+def test_workflow_linear_dsl_still_works(client: TestClient, uname):
     """旧线性 DSL（无 edges）走原执行路径不回归。"""
+    name = uname("legacy-flow")
     dsl = {
-        "name": "legacy-flow",
+        "name": name,
         "version": "1.0.0",
         "steps": [
             {"id": "a", "type": "llm", "system": "第一步"},
@@ -174,12 +181,12 @@ def test_workflow_linear_dsl_still_works(client: TestClient):
     resp = client.post("/api/v1/workflows", headers=AUTH, json=dsl)
     assert resp.status_code == 200
 
-    resp = client.post("/api/v1/agents/legacy-flow/invocations", headers=AUTH,
+    resp = client.post(f"/api/v1/agents/{name}/invocations", headers=AUTH,
                        json={"input": "hello"})
     assert resp.status_code == 200, resp.text
     steps = resp.json()["steps"]
     assert any("a(llm" in s for s in steps) and any("b(llm" in s for s in steps)
 
     # dsl 接口返回全文（无 edges 字段 → 前端 linear_to_edges 兜底可视化）
-    dsl_full = client.get("/api/v1/workflows/legacy-flow/dsl", headers=AUTH).json()
+    dsl_full = client.get(f"/api/v1/workflows/{name}/dsl", headers=AUTH).json()
     assert "edges" not in dsl_full or dsl_full["edges"] == []

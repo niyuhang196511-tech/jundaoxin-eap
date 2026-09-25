@@ -1,10 +1,19 @@
-"""Extension SDK 契约测试（v0.7-M29）：RAG/WorkflowNode/Provider/Connector/UI 各类型接入。"""
+"""Extension SDK 契约测试（v0.7-M29）：RAG/WorkflowNode/Provider/Connector/UI 各类型接入。
+
+M52-D 可重入：落库的自定义节点工作流名加模块级 uuid 后缀（create_and_register
+按 DB 查重抛「工作流已存在」——脏库残留必炸），用后删行不残留 enabled 工作流
+（其 DSL 依赖测试进程内注册的 upper 节点，后续运行启动重注册只会失败刷警告）。
+"""
 
 from __future__ import annotations
 
 import json
+import uuid
 
 from fastapi.testclient import TestClient
+
+_SFX = uuid.uuid4().hex[:8]
+CUSTOM_NODE_WF = f"custom-node-wf-{_SFX}"
 
 
 def test_rag_sdk_chunker_reranker(client: TestClient):
@@ -46,7 +55,7 @@ def test_custom_workflow_node(client: TestClient):
         return value.upper()
 
     register_workflow_node("upper", upper_executor)
-    spec = WorkflowSpec(name="custom-node-wf", version="1.0.0",
+    spec = WorkflowSpec(name=CUSTOM_NODE_WF, version="1.0.0",
                         steps=[{"id": "raw", "type": "upper",
                                 "ui_schema": {"type": "form", "fields": []}},
                                {"id": "say", "type": "llm", "system": "s"}])
@@ -70,8 +79,19 @@ def test_custom_workflow_node(client: TestClient):
             out = await _execute_node(step, ctx, db, st, "hello")
             return out
 
-    out = asyncio.run(_run())
-    assert out == "HELLO"
+    try:
+        out = asyncio.run(_run())
+        assert out == "HELLO"
+    finally:
+        # 自清理：删除本用例落库的工作流行（唯一名已保证可重入，删行避免
+        # enabled 残留在后续运行启动时以未注册的 upper 节点类型重注册刷警告）
+        from sqlalchemy import delete
+
+        from eap.db import SessionLocal
+        from eap.models import WorkflowRecord
+        with SessionLocal() as db:
+            db.execute(delete(WorkflowRecord).where(WorkflowRecord.name == CUSTOM_NODE_WF))
+            db.commit()
 
 
 def test_model_provider_sdk(client: TestClient):

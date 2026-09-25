@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
 
+# M52-D：手工落库的 TaskRecord id 跨运行唯一——tasks.id 为主键，固定 id 脏库重跑撞 UNIQUE
+_RECOVER_ID = f"recover-e2e-{uuid.uuid4().hex[:8]}"
 
-def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 20.0) -> dict:
+
+def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 60.0) -> dict:
+    # M52-D：轮询窗口 20s → 60s（断言语义不变，仅容忍降级环境）——理由同
+    # test_im_remote._poll：脏库残留「启用态远程模型」时能力路由每次 LLM 调用
+    # 先真实出站等超时再降级 mock，order-agent 批准续跑（两次 LLM 调用）实测 26s+。
     deadline = time.monotonic() + timeout
     last = {}
     while time.monotonic() < deadline:
@@ -127,7 +134,7 @@ def test_engine_recovers_pending_tasks_on_start(client):
 
     # 落一个 PENDING 记录（模拟崩溃前未执行完的任务）
     with SessionLocal() as db:
-        db.add(TaskRecord(id="recover-e2e-1", type="echo", state="PENDING", payload={"text": "hi"}))
+        db.add(TaskRecord(id=_RECOVER_ID, type="echo", state="PENDING", payload={"text": "hi"}))
         db.commit()
         import time as _t; _t.sleep(0.05)  # 确保任务 updated_at 严格早于引擎 boot（恢复范围判定）
 
@@ -144,12 +151,12 @@ def test_engine_recovers_pending_tasks_on_start(client):
             deadline = asyncio.get_running_loop().time() + 5
             while asyncio.get_running_loop().time() < deadline:
                 with SessionLocal() as db:
-                    state = db.get(TaskRecord, "recover-e2e-1").state
+                    state = db.get(TaskRecord, _RECOVER_ID).state
                 if state == "COMPLETED":
                     break
                 await asyncio.sleep(0.2)
             with SessionLocal() as db:
-                assert db.get(TaskRecord, "recover-e2e-1").state == "COMPLETED"
+                assert db.get(TaskRecord, _RECOVER_ID).state == "COMPLETED"
         finally:
             await engine.stop()
 

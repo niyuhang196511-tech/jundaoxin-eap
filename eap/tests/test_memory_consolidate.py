@@ -17,23 +17,29 @@ def _write_org(client: TestClient, content: str, importance: float) -> int:
     return resp.json()["id"]
 
 
-def test_consolidate_flow_idempotent_acl_retrieve(client: TestClient):
+def test_consolidate_flow_idempotent_acl_retrieve(client: TestClient, uname):
     """主流程：org 记忆高/低重要性混合 → 沉淀只收高阈值 → KB 文档生成且内容含条目 →
-    再次调用 consolidated=0（幂等）→ ACL 规则存在且 /retrieve 命中。"""
+    再次调用 consolidated=0（幂等）→ ACL 规则存在且 /retrieve 命中。
+
+    M52-D：KB 名每遍唯一（consolidate 的 kb_name 参数）——固定 org-memory 库会残留
+    上一遍的沉淀文档，检索「演示环境 冒烟测试」命中旧文档（同名内容、更高向量得分），
+    「命中引用应指向沉淀文档」断言被击穿；唯一 KB 保证检索语料只含本遍文档。
+    """
+    kb_name = uname("org-memory")
     # 预清扫：把库内既有未沉淀的高重要性 org 记忆先沉淀掉（不影响本测断言，保证确定性）
-    sweep = client.post("/api/v1/memory/consolidate", headers=AUTH, json={})
+    sweep = client.post("/api/v1/memory/consolidate", headers=AUTH, json={"kb_name": kb_name})
     assert sweep.status_code == 200, sweep.text
-    assert sweep.json()["kb"] == "org-memory"
+    assert sweep.json()["kb"] == kb_name
 
     id_high1 = _write_org(client, "发布会前所有演示环境必须完成冒烟测试核对清单", 0.9)
     id_high2 = _write_org(client, "客户续约需提前 30 天由客户成功团队跟进", 0.85)
     id_low = _write_org(client, "低重要性备忘：周三例会常规同步进度", 0.3)
 
-    resp = client.post("/api/v1/memory/consolidate", headers=AUTH, json={})
+    resp = client.post("/api/v1/memory/consolidate", headers=AUTH, json={"kb_name": kb_name})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["consolidated"] == 2, body
-    assert body["kb"] == "org-memory"
+    assert body["kb"] == kb_name
     assert body["document_id"]
     assert body["title"].startswith("组织记忆沉淀 "), body["title"]
 
@@ -51,7 +57,7 @@ def test_consolidate_flow_idempotent_acl_retrieve(client: TestClient):
 
     # 幂等：再次调用 → 0，不新建文档
     n_docs = len(docs)
-    again = client.post("/api/v1/memory/consolidate", headers=AUTH, json={})
+    again = client.post("/api/v1/memory/consolidate", headers=AUTH, json={"kb_name": kb_name})
     assert again.status_code == 200
     assert again.json()["consolidated"] == 0 and again.json()["document_id"] is None
     assert len(client.get(f"/api/v1/kb/{body['kb']}/documents", headers=AUTH).json()) == n_docs

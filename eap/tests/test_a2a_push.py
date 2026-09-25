@@ -33,6 +33,32 @@ from .conftest import AUTH
 
 RPC = "/a2a/rpc?agent=faq-agent"
 
+# ---------- M52-D 可重入命名 ----------
+# 策略名/手工任务 id 跨运行唯一：策略重名 409（EAP-2002，唯一约束不看 enabled，
+# 上一遍「停用收尾」的残留行同样挡新建）；且策略按 kind 检索有语义污染面，
+# 模块级差量清理兜底删除本模块创建的策略行（模式同 test_tool_governance）。
+_SFX = uuid.uuid4().hex[:8]
+
+GATE_POLICY = f"m46-a2a-gate-{_SFX}"
+MAP_COMPLETED = f"m45-map-completed-{_SFX}"
+MAP_FAILED = f"m45-map-failed-{_SFX}"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_a2a_policies(client: TestClient):
+    """模块结束删除本模块创建的租户策略——仅停用不够：残留行既挡下一遍同名重建
+    （唯一约束），又以 kind=a2a-delegate-allowlist 参与全局策略检索（语义污染）。"""
+    from eap.models import PolicyRecord
+
+    with SessionLocal() as db:
+        before = set(db.scalars(select(PolicyRecord.id)).all())
+    yield
+    with SessionLocal() as db:
+        for r in db.scalars(select(PolicyRecord)).all():
+            if r.id not in before:
+                db.delete(r)
+        db.commit()
+
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
@@ -217,13 +243,13 @@ def test_async_message_send_pushes_failed_receipt(client: TestClient, push_captu
 
 def test_tasks_get_maps_engine_task_states(client: TestClient):
     dev_tenant = _dev_tenant_id()
-    rows = {  # task_id → (引擎态, 期望 A2A 态)
-        "m45-map-pending": ("PENDING", "working"),
-        "m45-map-running": ("RUNNING", "working"),
-        "m45-map-waiting": ("WAITING_HUMAN", "working"),
-        "m45-map-completed": ("COMPLETED", "completed"),
-        "m45-map-failed": ("FAILED", "failed"),
-        "m45-map-cancelled": ("CANCELLED", "canceled"),
+    rows = {  # task_id → (引擎态, 期望 A2A 态)；M52-D：id 唯一化防撞上一遍中断残留行
+        f"m45-map-pending-{_SFX}": ("PENDING", "working"),
+        f"m45-map-running-{_SFX}": ("RUNNING", "working"),
+        f"m45-map-waiting-{_SFX}": ("WAITING_HUMAN", "working"),
+        MAP_COMPLETED: ("COMPLETED", "completed"),
+        MAP_FAILED: ("FAILED", "failed"),
+        f"m45-map-cancelled-{_SFX}": ("CANCELLED", "canceled"),
     }
     try:
         with SessionLocal() as db:
@@ -247,13 +273,13 @@ def test_tasks_get_maps_engine_task_states(client: TestClient):
         # completed：artifacts 从 result.output 构造
         resp = client.post(RPC, headers=AUTH, json={
             "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
-            "params": {"id": "m45-map-completed"}})
+            "params": {"id": MAP_COMPLETED}})
         task = resp.json()["result"]
         assert task["artifacts"][0]["parts"][0]["text"] == "异步产物文本"
         # failed：status.message 携带 error（tasks/get 兼容）
         resp = client.post(RPC, headers=AUTH, json={
             "jsonrpc": "2.0", "id": 3, "method": "tasks/get",
-            "params": {"id": "m45-map-failed"}})
+            "params": {"id": MAP_FAILED}})
         task = resp.json()["result"]
         assert "异步失败原因" in task["status"]["message"]["parts"][0]["text"]
     finally:  # 清理：PENDING 行防后续引擎启动 _recover_pending 误捞执行
@@ -317,7 +343,7 @@ def test_a2a_delegate_allowlist_kind_creatable_via_api(client: TestClient):
     from .conftest import AUTH
 
     r = client.post("/api/v1/policies", headers=AUTH, json={
-        "name": "m46-a2a-gate", "kind": "a2a-delegate-allowlist",
+        "name": GATE_POLICY, "kind": "a2a-delegate-allowlist",
         "config": {"endpoints": ["https://a2a.partner.example.com"], "agents": ["ext-agent"]}})
     assert r.status_code == 200, r.text
     assert r.json()["kind"] == "a2a-delegate-allowlist"
@@ -327,5 +353,6 @@ def test_a2a_delegate_allowlist_kind_creatable_via_api(client: TestClient):
         "name": "m46-a2a-gate-bad", "kind": "a2a-delegate-allowlist", "config": {}})
     assert r.status_code == 400 and "endpoints" in r.json()["detail"]
 
-    # 清理：停用防污染共享测试库（fail-closed 运行时语义不变）
-    client.post("/api/v1/policies/m46-a2a-gate/enabled?enabled=false", headers=AUTH)
+    # 收尾：先停用（fail-closed 运行时语义即刻生效），模块级差量清理再删行
+    # （停用不删行挡不住下一遍唯一约束，见 _cleanup_a2a_policies）
+    client.post(f"/api/v1/policies/{GATE_POLICY}/enabled?enabled=false", headers=AUTH)

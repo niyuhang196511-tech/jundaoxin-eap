@@ -36,7 +36,7 @@ def test_rag_dataset_validation(client: TestClient):
     assert "relevant_chunk_ids" in resp.json()["detail"]
 
 
-def test_rag_run_async_and_metrics(client: TestClient):
+def test_rag_run_async_and_metrics(client: TestClient, uname):
     """RAG 评测全链路：标注数据集 → 异步 run → 指标落库（种子 KB 真实检索）。"""
     # 先拿 website-faq 里一个真实 chunk_id 作标注
     resp = client.post("/api/v1/kb/website-faq/retrieve", headers=AUTH,
@@ -46,13 +46,15 @@ def test_rag_run_async_and_metrics(client: TestClient):
     assert hits, "种子库应有可检索内容"
     target = hits[0]["citation"]["chunk_id"]
 
+    # M52-D：数据集唯一名——脏库重跑不撞唯一约束（409 会击穿 assert 200）
+    ds_name = uname("rag-faq-smoke")
     ds = client.post("/api/v1/evals/datasets", headers=AUTH, json={
-        "name": "rag-faq-smoke", "kind": "rag",
+        "name": ds_name, "kind": "rag",
         "cases": [{"query": "如何创建知识库？", "relevant_chunk_ids": [target]}]})
     assert ds.status_code == 200, ds.text
 
     resp = client.post("/api/v1/evals/rag-runs", headers=AUTH,
-                       json={"agent": "website-faq", "dataset": "rag-faq-smoke", "top_k": 3})
+                       json={"agent": "website-faq", "dataset": ds_name, "top_k": 3})
     assert resp.status_code == 200, resp.text
     run_id = resp.json()["run_id"]
     for _ in range(50):

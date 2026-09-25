@@ -17,19 +17,20 @@ def test_chunking():
     assert chunks[0] != chunks[1]
 
 
-def test_kb_lifecycle_and_retrieval(client: TestClient):
-    # 创建 KB
+def test_kb_lifecycle_and_retrieval(client: TestClient, uname):
+    # 创建 KB（M52-D：唯一名——脏库重跑不撞唯一约束；409 断言用同一唯一名重复提交）
+    kb = uname("test-kb")
     resp = client.post("/api/v1/kb", headers=AUTH,
-                       json={"name": "test-kb", "title": "测试库", "template": "doc"})
+                       json={"name": kb, "title": "测试库", "template": "doc"})
     assert resp.status_code == 200
-    assert resp.json()["name"] == "test-kb"
+    assert resp.json()["name"] == kb
 
     # 重名 409
     assert client.post("/api/v1/kb", headers=AUTH,
-                       json={"name": "test-kb"}).status_code == 409
+                       json={"name": kb}).status_code == 409
 
     # 摄入文档
-    resp = client.post("/api/v1/kb/test-kb/documents", headers=AUTH, json={
+    resp = client.post(f"/api/v1/kb/{kb}/documents", headers=AUTH, json={
         "title": "退货政策",
         "text": "自签收之日起 7 天内可无理由退货，需保留完整包装。\n\n"
                 "生鲜类商品不支持无理由退货。质量问题 15 天内可退。",
@@ -38,7 +39,7 @@ def test_kb_lifecycle_and_retrieval(client: TestClient):
     doc_id = resp.json()["document_id"]
 
     # 混合检索 + Citation
-    resp = client.post("/api/v1/kb/test-kb/retrieve", headers=AUTH,
+    resp = client.post(f"/api/v1/kb/{kb}/retrieve", headers=AUTH,
                        json={"query": "生鲜能不能退货", "top_k": 3})
     assert resp.status_code == 200
     hits = resp.json()["hits"]
@@ -47,10 +48,10 @@ def test_kb_lifecycle_and_retrieval(client: TestClient):
     assert "生鲜" in hits[0]["content"]
 
     # 级联删除
-    resp = client.delete(f"/api/v1/kb/test-kb/documents/{doc_id}", headers=AUTH)
+    resp = client.delete(f"/api/v1/kb/{kb}/documents/{doc_id}", headers=AUTH)
     assert resp.status_code == 200
     assert resp.json()["deleted_chunks"] >= 1
-    resp = client.post("/api/v1/kb/test-kb/retrieve", headers=AUTH,
+    resp = client.post(f"/api/v1/kb/{kb}/retrieve", headers=AUTH,
                        json={"query": "退货", "top_k": 3})
     assert resp.json()["hits"] == []
 

@@ -1,16 +1,22 @@
 """人工抽检测试（M44-B）：任务抽样 / 防重复 / 评分校验 / 报表聚合 / RBAC。
 
 离线确定性：抽样源用 agent.invoke 任务（mock LLM 快速到 COMPLETED）。
+M52-D 可重入：报表专属工作流名加模块级 uuid 后缀——脏库重跑不撞「工作流已存在」，
+且报表按 agent 聚合的精确断言（total==2）天然与历史残留样本隔离。
 """
 
 from __future__ import annotations
 
 import time
+import uuid
 
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
 from .test_oidc import fake_idp  # noqa: F401 复用模拟 IdP 夹具（fixture 再导出）
+
+_SFX = uuid.uuid4().hex[:8]
+REPORT_FLOW = f"review-report-flow-{_SFX}"
 
 
 def _submit_and_wait(client: TestClient, input_text: str) -> dict:
@@ -73,14 +79,14 @@ def test_review_sample_and_submit_flow(client: TestClient):
 
 def test_review_report_aggregates(client: TestClient):
     # 专属 agent：报表按 agent 聚合，与其他用例的 faq-agent 样本互不污染
-    dsl = {"name": "review-report-flow", "version": "1.0.0",
+    dsl = {"name": REPORT_FLOW, "version": "1.0.0",
            "steps": [{"id": "gen", "type": "llm", "system": "你是测试助手。"}]}
     assert client.post("/api/v1/workflows", headers=AUTH, json=dsl).status_code == 200
 
     def _submit(input_text: str) -> dict:
         resp = client.post("/api/v1/tasks", headers=AUTH,
                            json={"type": "agent.invoke",
-                                 "payload": {"agent": "review-report-flow", "input": input_text}})
+                                 "payload": {"agent": REPORT_FLOW, "input": input_text}})
         assert resp.status_code == 200
         return resp.json()
 
@@ -94,7 +100,7 @@ def test_review_report_aggregates(client: TestClient):
                 json={"scores": {"correctness": 3, "relevance": 5, "format": 3}})
 
     rep = client.get("/api/v1/evals/reviews/report", headers=AUTH,
-                     params={"agent": "review-report-flow"}).json()
+                     params={"agent": REPORT_FLOW}).json()
     assert rep["total"] == 2 and rep["reviewed"] == 2 and rep["pending"] == 0
     assert rep["avg_scores"]["correctness"] == 4.0  # (5+3)/2
     assert rep["avg_scores"]["format"] == 3.0

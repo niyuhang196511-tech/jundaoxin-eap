@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from .conftest import AUTH
 
 
-def test_prompt_crud_and_render(client: TestClient):
+def test_prompt_crud_and_render(client: TestClient, uname):
     # 种子 Prompt：L1 列表带自动提取的变量
     prompts = client.get("/api/v1/prompts", headers=AUTH).json()
     seeded = next(p for p in prompts if p["name"] == "faq-answer-style")
@@ -25,17 +25,19 @@ def test_prompt_crud_and_render(client: TestClient):
     assert resp.status_code == 200
     assert "怎么退货" in resp.json()["rendered"]
 
-    # 新建 + 重名 409
+    # 新建 + 重名 409（M52-D：首建唯一名，409 用同一唯一名重复提交）
+    name = uname("triage-style")
     assert client.post("/api/v1/prompts", headers=AUTH, json={
-        "name": "triage-style", "template": "分类：{{text}}"}).status_code == 200
+        "name": name, "template": "分类：{{text}}"}).status_code == 200
     assert client.post("/api/v1/prompts", headers=AUTH, json={
-        "name": "triage-style", "template": "x"}).status_code == 409
+        "name": name, "template": "x"}).status_code == 409
 
 
-def test_workflow_uses_prompt_center(client: TestClient):
+def test_workflow_uses_prompt_center(client: TestClient, uname):
     """工作流 llm 节点引用 Prompt 中心模板 + 变量注入。"""
+    wf = uname("prompted-flow")
     dsl = {
-        "name": "prompted-flow",
+        "name": wf,
         "version": "1.0.0",
         "steps": [{
             "id": "gen", "type": "llm",
@@ -44,7 +46,7 @@ def test_workflow_uses_prompt_center(client: TestClient):
         }],
     }
     assert client.post("/api/v1/workflows", headers=AUTH, json=dsl).status_code == 200
-    resp = client.post("/api/v1/agents/prompted-flow/invocations", headers=AUTH,
+    resp = client.post(f"/api/v1/agents/{wf}/invocations", headers=AUTH,
                        json={"input": "测试问题"})
     assert resp.status_code == 200
 

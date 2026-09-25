@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +16,22 @@ from .conftest import AUTH
 from .test_oidc import fake_idp, _make_id_token  # noqa: F401  复用模拟 IdP 夹具（fixture 再导出）
 
 ISSUER = "https://idp.example"
+
+# ---------- M52-D 可重入命名 ----------
+# 规则名/事件类型跨运行唯一（样板同 test_connector_v2）：触发器重名 409，且上一遍
+# 中断残留的同名规则/同事件类型监听会劫持本遍事件（trigger.fire 审计污染）。
+# 重名 409 用例首建名唯一、409 用同名重复提交；m30-bad-evt/m30-bad-cron 为 400
+# 不落库的固定坏名，保留。webhook 重放去重（X-EAP-Event-Id）为进程内 LRU，无需唯一化。
+_SFX = uuid.uuid4().hex[:8]
+
+CRUD_RULE = f"m30-crud-rule-{_SFX}"
+EVT_AGENT_RULE = f"m30-evt-agent-{_SFX}"
+EVT_MATCH_RULE = f"m30-evt-match-{_SFX}"
+HOOK_RULE = f"m30-hook-agent-{_SFX}"
+MANUAL_RULE = f"m30-manual-{_SFX}"
+EVT_HELLO = f"test.hello.m30.{_SFX}"
+EVT_MATCH = f"test.match.m30.{_SFX}"
+EVT_MANUAL = f"test.manual.m30.{_SFX}"
 
 
 def _token(roles: list[str]) -> str:
@@ -84,7 +101,7 @@ def test_emit_event_sync_context_no_raise():
 
 def test_trigger_crud_and_rbac(client: TestClient, fake_idp):  # noqa: F811
     member = _token(roles=["member"])
-    body = {"name": "m30-crud-rule", "source": "event", "event_type": "kb.document.indexed",
+    body = {"name": CRUD_RULE, "source": "event", "event_type": "kb.document.indexed",
             "target_type": "agent", "target_name": "faq-agent"}
     # member 写 → 403（require_admin）
     resp = client.post("/api/v1/triggers", headers={"Authorization": f"Bearer {member}"}, json=body)
@@ -106,7 +123,7 @@ def test_trigger_crud_and_rbac(client: TestClient, fake_idp):  # noqa: F811
                              "target_type": "agent", "target_name": "faq-agent"}).status_code == 400
     # 列表可见
     rules = client.get("/api/v1/triggers", headers=AUTH).json()
-    assert any(r["name"] == "m30-crud-rule" for r in rules)
+    assert any(r["name"] == CRUD_RULE for r in rules)
     # member 读 → 403（列表也 admin-only）
     assert client.get("/api/v1/triggers",
                       headers={"Authorization": f"Bearer {member}"}).status_code == 403
@@ -116,7 +133,7 @@ def test_trigger_crud_and_rbac(client: TestClient, fake_idp):  # noqa: F811
     # DELETE
     assert client.delete(f"/api/v1/triggers/{rid}", headers=AUTH).status_code == 200
     assert client.get("/api/v1/triggers", headers=AUTH).json() == [] or all(
-        r["name"] != "m30-crud-rule"
+        r["name"] != CRUD_RULE
         for r in client.get("/api/v1/triggers", headers=AUTH).json())
 
 
@@ -125,7 +142,7 @@ def test_trigger_crud_and_rbac(client: TestClient, fake_idp):  # noqa: F811
 def test_event_rule_fires_agent(client: TestClient):
     """事件规则全链路：总线事件 → 规则匹配 → agent.invoke 任务 → 完成（审计留痕）。"""
     resp = client.post("/api/v1/triggers", headers=AUTH, json={
-        "name": "m30-evt-agent", "source": "event", "event_type": "test.hello.m30",
+        "name": EVT_AGENT_RULE, "source": "event", "event_type": EVT_HELLO,
         "target_type": "agent", "target_name": "faq-agent"})
     assert resp.status_code == 200, resp.text
     rid = resp.json()["id"]
@@ -133,13 +150,13 @@ def test_event_rule_fires_agent(client: TestClient):
     # 发射事件（测试线程无运行循环 → 经 call_soon_threadsafe 调度到应用循环）
     from eap.runtime.events import emit_event
 
-    emit_event("test.hello.m30", data={"question": "如何创建知识库？"})
+    emit_event(EVT_HELLO, data={"question": "如何创建知识库？"})
 
     task_id = ""
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not task_id:
         time.sleep(0.2)
-        task_id = _latest_fire_ref(client, "m30-evt-agent")
+        task_id = _latest_fire_ref(client, EVT_AGENT_RULE)
     assert task_id, "触发审计 trigger.fire 应产生任务引用"
 
     task = _poll_task(client, task_id, {"COMPLETED", "FAILED"})
@@ -152,24 +169,24 @@ def test_event_rule_fires_agent(client: TestClient):
 def test_event_rule_match_filter(client: TestClient):
     """match 等值过滤：不匹配的事件不触发（无 trigger.fire 审计）。"""
     resp = client.post("/api/v1/triggers", headers=AUTH, json={
-        "name": "m30-evt-match", "source": "event", "event_type": "test.match.m30",
+        "name": EVT_MATCH_RULE, "source": "event", "event_type": EVT_MATCH,
         "match": {"kind": "wanted"}, "target_type": "agent", "target_name": "faq-agent"})
     assert resp.status_code == 200, resp.text
     rid = resp.json()["id"]
 
     from eap.runtime.events import emit_event
 
-    emit_event("test.match.m30", data={"kind": "unwanted"})
+    emit_event(EVT_MATCH, data={"kind": "unwanted"})
     time.sleep(1.0)  # 给引擎消费留出时间（若误触发会落审计）
-    assert _latest_fire_ref(client, "m30-evt-match") == ""
+    assert _latest_fire_ref(client, EVT_MATCH_RULE) == ""
 
     # 匹配的事件触发
-    emit_event("test.match.m30", data={"kind": "wanted"})
+    emit_event(EVT_MATCH, data={"kind": "wanted"})
     task_id = ""
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not task_id:
         time.sleep(0.2)
-        task_id = _latest_fire_ref(client, "m30-evt-match")
+        task_id = _latest_fire_ref(client, EVT_MATCH_RULE)
     assert task_id, "匹配事件应触发并留审计"
 
     assert client.delete(f"/api/v1/triggers/{rid}", headers=AUTH).status_code == 200
@@ -180,7 +197,7 @@ def test_event_rule_match_filter(client: TestClient):
 def test_webhook_signature_and_dedup(client: TestClient):
     """webhook：错签名 401；对签名触发 agent 任务完成；同 X-EAP-Event-Id 重放去重。"""
     resp = client.post("/api/v1/triggers", headers=AUTH, json={
-        "name": "m30-hook-agent", "source": "webhook", "secret": "s3cret-key",
+        "name": HOOK_RULE, "source": "webhook", "secret": "s3cret-key",
         "target_type": "agent", "target_name": "faq-agent"})
     assert resp.status_code == 200, resp.text
     rid = resp.json()["id"]
@@ -222,7 +239,7 @@ def test_webhook_unknown_rule_404(client: TestClient):
 def test_test_fire_endpoint(client: TestClient):
     """test-fire：admin 手工注入样例 payload，走同一 fire 通道并返回任务引用。"""
     resp = client.post("/api/v1/triggers", headers=AUTH, json={
-        "name": "m30-manual", "source": "event", "event_type": "test.manual.m30",
+        "name": MANUAL_RULE, "source": "event", "event_type": EVT_MANUAL,
         "target_type": "agent", "target_name": "faq-agent"})
     rid = resp.json()["id"]
     resp = client.post(f"/api/v1/triggers/{rid}/test-fire", headers=AUTH,

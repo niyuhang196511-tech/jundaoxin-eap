@@ -1,4 +1,9 @@
-"""M8 静态秘密加密测试：Fernet 加解密 + 模型/连接器存储加密 + 未配密钥兼容。"""
+"""M8 静态秘密加密测试：Fernet 加解密 + 模型/连接器存储加密 + 未配密钥兼容。
+
+M52-D 可重入：模型/连接器名 uuid 唯一化——脏库重跑不撞唯一约束（409 会击穿
+assert 200）；连接器的 tool_name 同步唯一化，防残留启用连接器的同名工具干扰
+resolve_tool 命中序。
+"""
 
 from __future__ import annotations
 
@@ -49,26 +54,31 @@ def test_model_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
     from eap.db import SessionLocal
     from eap.models import ModelRecord
 
+    model = f"enc-test-model-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("EAP_SECRET_KEY", "unit-test-secret")
     get_settings.cache_clear()
     try:
         resp = client.post("/api/v1/models", headers=AUTH, json={
-            "name": "enc-test-model", "capabilities": ["chat"],
+            "name": model, "capabilities": ["chat"],
             "provider": "openai_compat", "base_url": "https://api.example.com/v1",
             "api_key": (live_key := "sk-unit-" + uuid.uuid4().hex[:12]), "priority": 90,
         })
         assert resp.status_code == 200, resp.text
 
         with SessionLocal() as db:
-            record = db.query(ModelRecord).filter_by(name="enc-test-model").one()
+            record = db.query(ModelRecord).filter_by(name=model).one()
             assert record.api_key.startswith("enc1:")
             assert security_crypto.decrypt_secret(record.api_key) == live_key
         # 列表接口不回显 key
         listed = client.get("/api/v1/models", headers=AUTH).json()
-        model = next(m for m in listed if m["name"] == "enc-test-model")
-        assert "api_key" not in model
+        row = next(m for m in listed if m["name"] == model)
+        assert "api_key" not in row
     finally:
         get_settings.cache_clear()
+        # M52-D 二波收尾：priority=90 的启用态 openai_compat 残留模型会被后续所有
+        # 能力路由用例排进降级链先真实出站（api.example.com 超时 ~13s/次）再落
+        # mock——用毕禁用（对齐 test_eval_gate/test_hub 收尾纪律）
+        client.post(f"/api/v1/models/{model}/enabled?enabled=false", headers=AUTH)
 
 
 def test_connector_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
@@ -78,18 +88,20 @@ def test_connector_api_key_encrypted_at_rest(client: TestClient, monkeypatch):
     from eap.db import SessionLocal
     from eap.models import ConnectorRecord
 
+    conn = f"enc-conn-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("EAP_SECRET_KEY", "unit-test-secret")
     get_settings.cache_clear()
     try:
         resp = client.post("/api/v1/connectors", headers=AUTH, json={
-            "name": "enc-conn", "kind": "rest", "base_url": "https://erp.example.com/api",
+            "name": conn, "kind": "rest", "base_url": "https://erp.example.com/api",
             "api_key": (conn_key := "conn-unit-" + uuid.uuid4().hex[:12]),
-            "endpoints": [{"name": "ping", "tool_name": "erp.ping", "method": "GET", "path": "/"}],
+            "endpoints": [{"name": "ping", "tool_name": f"erp-{uuid.uuid4().hex[:8]}.ping",
+                           "method": "GET", "path": "/"}],
         })
         assert resp.status_code == 200, resp.text
 
         with SessionLocal() as db:
-            record = db.query(ConnectorRecord).filter_by(name="enc-conn").one()
+            record = db.query(ConnectorRecord).filter_by(name=conn).one()
             assert record.api_key.startswith("enc1:")
             assert security_crypto.decrypt_secret(record.api_key) == conn_key
     finally:

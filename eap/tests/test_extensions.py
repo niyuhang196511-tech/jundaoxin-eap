@@ -59,20 +59,21 @@ def test_rag_components_registry(client: TestClient):
     assert any(c["name"] == "ext.markdown" for c in comps)
 
 
-def test_kb_pipeline_uses_custom_chunker(client: TestClient):
+def test_kb_pipeline_uses_custom_chunker(client: TestClient, uname):
     """KB.pipeline 选型自定义 chunker：摄入后分块结果按组件逻辑。"""
-    # 建库（带 pipeline）
+    # 建库（带 pipeline；M52-D：唯一名——脏库重跑不撞唯一约束，全新库保证分块断言确定）
+    kb = uname("ext-kb")
     resp = client.post("/api/v1/kb", headers=AUTH, json={
-        "name": "ext-kb", "title": "扩展分块测试",
+        "name": kb, "title": "扩展分块测试",
         "pipeline": {"chunker": {"name": "ext.markdown"}},
     })
     assert resp.status_code == 200, resp.text
 
     # 摄入 markdown：按标题行分块（2 块）→ 检索验证分块内容
-    resp = client.post("/api/v1/kb/ext-kb/documents", headers=AUTH,
+    resp = client.post(f"/api/v1/kb/{kb}/documents", headers=AUTH,
                        json={"title": "md", "text": "# 标题一\n正文一\n# 标题二\n正文二"})
     assert resp.status_code == 200, resp.text
-    resp = client.post("/api/v1/kb/ext-kb/retrieve", headers=AUTH,
+    resp = client.post(f"/api/v1/kb/{kb}/retrieve", headers=AUTH,
                        json={"query": "标题二", "top_k": 5})
     assert resp.status_code == 200, resp.text
     hits = resp.json().get("hits", [])
@@ -164,7 +165,7 @@ def test_scaffold_generates_tool_template(client: TestClient, tmp_path):
         _WORKFLOW_TOOLS.pop("scaffolded-echo", None)
 
 
-def test_mcp_stdio_roundtrip(client: TestClient):
+def test_mcp_stdio_roundtrip(client: TestClient, uname):
     """stdio 传输端到端：注册本地手写 MCP server → validate 拉到工具清单。"""
     server_script = '''
 from mcp.server.mcpserver import MCPServer
@@ -185,19 +186,20 @@ mcp.run("stdio")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(server_script)
 
+    name = uname("tiny-stdio")  # M52-D：唯一名——脏库重跑不撞 MCP server 唯一约束
     resp = client.post("/api/v1/mcp/servers", headers=AUTH, json={
-        "name": "tiny-stdio", "transport": "stdio", "command": sys.executable,
+        "name": name, "transport": "stdio", "command": sys.executable,
         "args": [path],
     })
     assert resp.status_code == 200, resp.text
 
-    resp = client.post("/api/v1/mcp/servers/tiny-stdio/validate", headers=AUTH)
+    resp = client.post(f"/api/v1/mcp/servers/{name}/validate", headers=AUTH)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "verified", data
     tool_names = [t["name"] for t in data["tools"]]
-    assert "tiny-stdio.greet" in tool_names, tool_names
+    assert f"{name}.greet" in tool_names, tool_names
 
     # 工具清单出现在扩展工具列表（mcp 桥接）
     tools = client.get("/api/v1/extensions/tools", headers=AUTH).json()
-    assert any(t["name"] == "mcp:tiny-stdio.tiny-stdio.greet" for t in tools)
+    assert any(t["name"] == f"mcp:{name}.{name}.greet" for t in tools)

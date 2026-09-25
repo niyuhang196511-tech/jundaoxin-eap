@@ -76,7 +76,31 @@ def _solo_notify_channel(client: TestClient, platform: str, prefix: str, **kw) -
     return _create_channel(client, platform, prefix, extra=extra, **kw)
 
 
-def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 20.0) -> dict:
+@pytest.fixture(scope="module", autouse=True)
+def _drain_stale_outbound(client: TestClient):
+    """M52-D 入口排涸 + 收尾禁用（模式同 test_tool_governance 差量清理）：
+
+    - 入口：把上一遍进程残留的 pending 投递置 dead——本遍重试循环一旦被任何入队
+      唤醒，会把残留行重投进各用例的 fake 捕获窗口，污染「无出站/恰好一条」断言
+      （残留行的进程语境已消失，置 dead 与失败用例测后自置 dead 同语义）。
+    - 收尾：停用本模块留下的 notify_hitl 渠道——脏库下一遍启动时，引擎恢复的
+      遗留任务回执会推给「仍启用」的 notify 渠道，跨模块污染出站断言。
+    """
+    with SessionLocal() as db:
+        for rec in db.scalars(select(IMOutboundLogRecord)
+                              .where(IMOutboundLogRecord.status == "pending")).all():
+            rec.status = "dead"
+        db.commit()
+    yield
+    _disable_notify_channels()
+
+
+def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 60.0) -> dict:
+    # M52-D：轮询窗口 20s → 60s（断言语义不变，仅容忍降级环境）——脏库中若残留
+    # 「启用态远程模型」（如他域测试注册后未清理的 openai_compat 行，优先级高于
+    # mock），能力路由会对每次 LLM 调用先真实出站等网络超时再降级 mock；order-agent
+    # 续跑含两次 LLM 调用，20s 窗口在实测中被击穿（RUNNING 超时）。健康库下任务
+    # 毫秒级完成，轮询命中即返回，加大窗口无额外耗时。
     deadline = time.monotonic() + timeout
     last: dict = {}
     while time.monotonic() < deadline:
@@ -89,14 +113,22 @@ def _poll(client: TestClient, task_id: str, states: set[str], timeout: float = 2
     return last
 
 
-def _wait_push(min_count: int = 1, timeout: float = 10.0) -> list[dict]:
-    """等任务引擎 worker 发出卡片推送（挂起落库后异步推送，与状态轮询存在微小竞态）。"""
+def _wait_push(min_count: int = 1, timeout: float = 10.0, contains: str = "") -> list[dict]:
+    """等任务引擎 worker 发出卡片推送（挂起落库后异步推送，与状态轮询存在微小竞态）。
+
+    M52-D：contains 按 payload 子串（本用例 task_id）过滤——脏库下一遍启动时引擎
+    恢复执行的遗留任务回执可能落进同一捕获窗口，与本用例断言无关（模式同
+    test_m40_receipt.test_non_agent_task_type_no_receipt 的按任务 id 过滤）。
+    """
     deadline = time.monotonic() + timeout
+    hits: list[dict] = []
     while time.monotonic() < deadline:
-        if len(SENT) >= min_count:
-            return SENT
+        hits = [e for e in SENT
+                if not contains or contains in json.dumps(e["payload"], ensure_ascii=False)]
+        if len(hits) >= min_count:
+            return hits
         time.sleep(0.1)
-    return SENT
+    return hits
 
 
 def _submit_hitl(client: TestClient, agent: str = "order-agent", text: str = "帮我下一台 EAP 一体机") -> str:
@@ -122,8 +154,8 @@ def test_hitl_suspend_pushes_approval_card(client: TestClient):
 
     task = _poll(client, task_id, {"WAITING_HUMAN"})
     assert task["state"] == "WAITING_HUMAN", task["result"]
-    push = _wait_push(1)
-    assert len(push) == 1  # 仅 notify_hitl 渠道收到，无其他出站
+    push = _wait_push(1, contains=task_id)
+    assert len(push) == 1  # 本任务审批卡恰一条（仅 notify_hitl 渠道收到）
     assert push[0]["url"] == f"https://hook.example/{ch['name']}"
     payload = push[0]["payload"]
     assert payload["msg_type"] == "interactive"  # 群机器人 webhook 直发卡片
@@ -157,7 +189,7 @@ def test_button_approve_via_dingtalk_action_url(client: TestClient):
     ch = _solo_notify_channel(client, "dingtalk", "dt-approve")
     task_id = _submit_hitl(client)
     _poll(client, task_id, {"WAITING_HUMAN"})
-    push = _wait_push(1)[0]
+    push = _wait_push(1, contains=task_id)[0]
 
     # 从卡片按钮还原回调 URL，模拟用户点击（actionURL 即 webhook + query 引用）
     action_url = push["payload"]["actionCard"]["btns"][0]["actionURL"]
@@ -185,7 +217,7 @@ def test_button_deny_via_wecom_event_key(client: TestClient):
                               extra={"token": "qy-token", "aes_key": aes_key})
     task_id = _submit_hitl(client)
     _poll(client, task_id, {"WAITING_HUMAN"})
-    _wait_push(1)
+    _wait_push(1, contains=task_id)
 
     key = json.dumps({"action": "task.approve", "channel": ch["name"],
                       "args": {"task_id": task_id, "decision": False}}, ensure_ascii=False)
@@ -199,7 +231,9 @@ def test_button_deny_via_wecom_event_key(client: TestClient):
                              f"<Encrypt><![CDATA[{encrypt}]]></Encrypt></xml>"),
                     headers={"Content-Type": "text/xml"})
     assert r.status_code == 200 and r.text == "success"
-    assert any("已拒绝" in str(p["payload"]) for p in SENT[1:])  # 回执推送（首条为卡片）
+    # 回执推送（「已拒绝」文本为否决回执独有；不再按 [1:] 切片定位——脏库恢复的
+    # 无关出站可能占据索引 0，全文检索不依赖窗口内条目顺序/数量）
+    assert any("已拒绝" in str(p["payload"]) for p in SENT)
 
     task = _poll(client, task_id, {"COMPLETED"})
     assert task["state"] == "COMPLETED"
@@ -279,7 +313,10 @@ def test_task_prefix_unknown_agent_rejected(client: TestClient):
                           "event": {"message": {"message_type": "text",
                                                 "content": json.dumps({"text": "/task no-such hi"})}}})
     assert r.status_code == 200
-    assert any("未注册" in str(p["payload"]) for p in SENT), SENT
+    # 按本渠道 webhook 过滤：脏库恢复任务回执的错误摘要也可能含「未注册」，
+    # 与本用例无关（本用例回执必发往触发渠道自己的 webhook）
+    mine = [p for p in SENT if p["url"] == f"https://hook.example/{ch['name']}"]
+    assert any("未注册" in str(p["payload"]) for p in mine), SENT
     with SessionLocal() as db:
         tasks = db.scalars(select(TaskRecord).where(TaskRecord.type == "agent.invoke")).all()
         assert all(t.payload.get("agent") != "no-such" for t in tasks)
@@ -306,17 +343,21 @@ def test_notify_hitl_idempotent_event_key(client: TestClient):
     from eap.runtime import im_outbound as im_out
 
     ch = _solo_notify_channel(client, "feishu", "fs-idem")
+    tid = _name("task-idem")  # M52-D：任务 id 唯一化 → event_key 跨运行唯一
     with SessionLocal() as db:
-        pushed = asyncio.run(im_out.notify_hitl("task-idem-1", "order-agent",
+        pushed = asyncio.run(im_out.notify_hitl(tid, "order-agent",
                                                 "erp.order.create", db))
     assert pushed == [ch["name"]]
     n = len(SENT)
     with SessionLocal() as db:
-        pushed2 = asyncio.run(im_out.notify_hitl("task-idem-1", "order-agent",
+        pushed2 = asyncio.run(im_out.notify_hitl(tid, "order-agent",
                                                  "erp.order.create", db))
     assert pushed2 == []  # 已 done 的同键投递 → 幂等跳过
-    assert len(SENT) == n
-    rec = _log_row("hitl:task-idem-1")
+    # 按本用例任务 id 过滤（隔离脏库恢复任务/重试循环的无关出站，模式同
+    # test_m40_receipt.test_notify_done_idempotent_event_key）
+    late = [e for e in SENT[n:] if tid in json.dumps(e["payload"], ensure_ascii=False)]
+    assert late == []
+    rec = _log_row(f"hitl:{tid}")
     assert rec is not None and rec.status == "done" and rec.attempts == 1
 
 
@@ -330,11 +371,13 @@ def test_notify_hitl_send_failure_enqueued(client: TestClient, monkeypatch):
         raise RuntimeError("net-boom-m39")
 
     monkeypatch.setattr(im_out, "post_json", boom)
+    tid = _name("task-fail")  # M52-D：任务 id 唯一化——_log_row 按 event_key 直查，
+    # 固定 id 会命中上一遍残留的 dead 行（'dead' != 'pending' 断言击穿）
     with SessionLocal() as db:
-        pushed = asyncio.run(im_out.notify_hitl("task-fail-1", "order-agent",
+        pushed = asyncio.run(im_out.notify_hitl(tid, "order-agent",
                                                 "erp.order.create", db))
     assert len(pushed) == 1  # 渠道命中但发送失败（入队重试）
-    rec = _log_row("hitl:task-fail-1")
+    rec = _log_row(f"hitl:{tid}")
     assert rec is not None and rec.status == "pending" and rec.attempts == 1
     assert "net-boom-m39" in rec.error and rec.next_retry_at is not None
     # 置死信：避免后续测试触发后台重试循环时对该记录发起真实出站

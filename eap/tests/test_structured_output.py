@@ -1,12 +1,23 @@
-"""结构化输出测试（v0.5-②）：mock 合成合规 / 解析校验 / 重试回退 / API 集成。"""
+"""结构化输出测试（v0.5-②）：mock 合成合规 / 解析校验 / 重试回退 / API 集成。
+
+M52-D 可重入：faq-agent 配置版本号唯一化（pattern ^\\d+\\.\\d+\\.\\d+$——第三段取随机
+数，脏库重跑不撞 (agent, version) 唯一约束）；模块收尾仍发布空配置归零覆盖层
+（M51-A 进程内泄漏修复的既有纪律，跟随唯一版本号）。
+"""
 
 from __future__ import annotations
 
+
+import uuid
 
 import jsonschema
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
+
+# 结构化配置版本 / 收尾空配置版本（跨运行唯一，进程内一次性生成）
+_V_SCHEMA = f"7.7.{uuid.uuid4().int % 10**8}"
+_V_CLEAN = f"7.8.{uuid.uuid4().int % 10**8}"
 
 SCHEMA = {
     "type": "object",
@@ -90,8 +101,9 @@ def test_agent_overlay_schema_via_config_version(client: TestClient):
         "required": ["summary"],
     }}
     assert client.post("/api/v1/agents/faq-agent/versions", headers=AUTH,
-                       json={"version": "7.7.7", "config": cfg}).status_code == 200
-    assert client.post("/api/v1/agents/faq-agent/versions/7.7.7/publish", headers=AUTH).status_code == 200
+                       json={"version": _V_SCHEMA, "config": cfg}).status_code == 200
+    assert client.post(f"/api/v1/agents/faq-agent/versions/{_V_SCHEMA}/publish",
+                       headers=AUTH).status_code == 200
     resp = client.post("/api/v1/agents/faq-agent/invocations", headers=AUTH,
                        json={"input": "介绍一下平台"})
     assert resp.status_code == 200, resp.text
@@ -139,9 +151,9 @@ def test_run_loop_structuring_with_tools(client: TestClient):
 
 def test_cleanup_faq_schema_overlay(client: TestClient):
     """发布空配置归零 faq-agent 覆盖层（隔离纪律，同 test_agent_versions 收尾惯例）：
-    7.7.7 的 output_schema 若泄漏到后续文件，全进程 faq-agent 调用都会被结构化成
+    本模块发布的 output_schema 若泄漏到后续文件，全进程 faq-agent 调用都会被结构化成
     {"summary": …}，破坏 test_prompt_ab / test_prompts_evals 等的输出断言。"""
     assert client.post("/api/v1/agents/faq-agent/versions", headers=AUTH,
-                       json={"version": "7.7.8", "config": {}}).status_code == 200
-    assert client.post("/api/v1/agents/faq-agent/versions/7.7.8/publish",
+                       json={"version": _V_CLEAN, "config": {}}).status_code == 200
+    assert client.post(f"/api/v1/agents/faq-agent/versions/{_V_CLEAN}/publish",
                        headers=AUTH).status_code == 200

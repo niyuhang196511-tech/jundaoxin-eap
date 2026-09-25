@@ -1,10 +1,16 @@
-"""企业 IM 连接器：三平台推送格式、验证机制、回调→智能体→回复链路（docs/04 §4）。"""
+"""企业 IM 连接器：三平台推送格式、验证机制、回调→智能体→回复链路（docs/04 §4）。
+
+M52-D 可重入：渠道名模块级唯一后缀（样板同 test_connector_v2._SFX）——渠道重名 409，
+固定名脏库重跑必撞；test_channel_management 跨用例引用前序渠道名，故用模块常量而非
+function 级 uname 夹具。fs-3（未注册智能体 404）/fs-4（未知平台 422）不落库，固定坏名保留。
+"""
 
 from __future__ import annotations
 
 import base64
 import json
 import time
+import uuid
 
 import pytest
 
@@ -12,6 +18,13 @@ from .conftest import AUTH
 
 HEADERS = {**AUTH, "Content-Type": "application/json"}
 _pushed: list[tuple[str, dict]] = []
+
+_SFX = uuid.uuid4().hex[:8]
+
+FS1 = f"fs-1-{_SFX}"
+DT1 = f"dt-1-{_SFX}"
+WX1 = f"wx-1-{_SFX}"
+FS2 = f"fs-2-{_SFX}"
 
 
 @pytest.fixture(autouse=True)
@@ -51,24 +64,24 @@ def test_push_payload_formats():
 # ---------- 飞书 ----------
 
 def test_feishu_challenge_and_message_flow(client):
-    _create_channel(client, "fs-1", "feishu", secret="tok-123")
+    _create_channel(client, FS1, "feishu", secret="tok-123")
     # URL 验证：原样回传 challenge
-    r = client.post("/api/v1/im/feishu/fs-1/webhook",
+    r = client.post(f"/api/v1/im/feishu/{FS1}/webhook",
                     json={"challenge": "ajls384", "type": "url_verification"})
     assert r.json() == {"challenge": "ajls384"}
     # token 错误 → 401
-    r = client.post("/api/v1/im/feishu/fs-1/webhook",
+    r = client.post(f"/api/v1/im/feishu/{FS1}/webhook",
                     json={"header": {"token": "wrong"},
                           "event": {"message": {"message_type": "text", "content": "{}"}}})
     assert r.status_code == 401
     # 正常消息 → 智能体回答推到群 webhook
     content = json.dumps({"text": "如何创建知识库？"})
-    r = client.post("/api/v1/im/feishu/fs-1/webhook",
+    r = client.post(f"/api/v1/im/feishu/{FS1}/webhook",
                     json={"header": {"token": "tok-123"},
                           "event": {"message": {"message_type": "text", "content": content},
                                     "sender": {"sender_id": {"open_id": "ou-1"}}}})
     assert r.status_code == 200
-    assert any(url.endswith("fs-1") and "mock-llm" in str(p)
+    assert any(url.endswith(FS1) and "mock-llm" in str(p)
                for url, p in _pushed), _pushed
 
 
@@ -78,14 +91,14 @@ def test_dingtalk_sign_and_message_flow(client):
     from eap.runtime.im import dingtalk_sign
 
     secret = "sec-xyz"
-    _create_channel(client, "dt-1", "dingtalk", secret=secret)
+    _create_channel(client, DT1, "dingtalk", secret=secret)
     # 签名算法自洽：先算对签再请求；篡改则 401
     ts = str(int(time.time() * 1000))
     good = dingtalk_sign(secret, ts)
-    assert client.post("/api/v1/im/dingtalk/dt-1/webhook",
+    assert client.post(f"/api/v1/im/dingtalk/{DT1}/webhook",
                        headers={"timestamp": ts, "sign": "bad"},
                        json={"text": {"content": "hi"}}).status_code == 401
-    r = client.post("/api/v1/im/dingtalk/dt-1/webhook",
+    r = client.post(f"/api/v1/im/dingtalk/{DT1}/webhook",
                     headers={"timestamp": ts, "sign": good},
                     json={"text": {"content": "如何创建知识库？"},
                           "senderStaffId": "staff-9",
@@ -106,17 +119,17 @@ def test_wecom_echo_verification_and_message(client):
     from eap.runtime.im import wecom_decrypt, wecom_encrypt, wecom_signature
 
     extra = _wecom_extra()
-    _create_channel(client, "wx-1", "wecom", extra=extra)
+    _create_channel(client, WX1, "wecom", extra=extra)
     echostr = wecom_encrypt(extra, "echo-plain-12345", "corp-1")
     params = {"msg_timestamp": "1409659813", "msg_nonce": "n1"}
     sig = wecom_signature(extra["token"], params["msg_timestamp"],
                           params["msg_nonce"], echostr)
     # 验证 URL：解密 echostr 明文回显
-    r = client.get("/api/v1/im/wecom/wx-1/webhook",
+    r = client.get(f"/api/v1/im/wecom/{WX1}/webhook",
                    params={**params, "msg_signature": sig, "echostr": echostr})
     assert r.status_code == 200 and r.text == "echo-plain-12345"
     # 签名错 → 401
-    r = client.get("/api/v1/im/wecom/wx-1/webhook",
+    r = client.get(f"/api/v1/im/wecom/{WX1}/webhook",
                    params={**params, "msg_signature": "bad", "echostr": echostr})
     assert r.status_code == 401
     # 加密消息 → 解密路由到智能体 → 推送回复
@@ -126,7 +139,7 @@ def test_wecom_echo_verification_and_message(client):
     encrypt = wecom_encrypt(extra, secret_xml, "corp-1")
     sig2 = wecom_signature(extra["token"], params["msg_timestamp"],
                            params["msg_nonce"], encrypt)
-    r = client.post("/api/v1/im/wecom/wx-1/webhook",
+    r = client.post(f"/api/v1/im/wecom/{WX1}/webhook",
                     params={**params, "msg_signature": sig2},
                     content=msg_xml.format(encrypt=encrypt),
                     headers={"Content-Type": "text/xml"})
@@ -139,9 +152,9 @@ def test_wecom_echo_verification_and_message(client):
 # ---------- 渠道管理 ----------
 
 def test_channel_management(client):
-    _create_channel(client, "fs-2", "feishu")
+    _create_channel(client, FS2, "feishu")
     names = {c["name"] for c in client.get("/api/v1/im/channels", headers=AUTH).json()}
-    assert {"fs-1", "dt-1", "wx-1", "fs-2"} <= names
+    assert {FS1, DT1, WX1, FS2} <= names
     # 未注册智能体拒绝
     r = client.post("/api/v1/im/channels", headers=HEADERS,
                     json={"name": "fs-3", "platform": "feishu", "agent": "no-such"})
@@ -151,6 +164,6 @@ def test_channel_management(client):
                     json={"name": "fs-4", "platform": "slack", "agent": "faq-agent"})
     assert r.status_code == 422
     # 停用后回调 409
-    client.post("/api/v1/im/channels/fs-2/enabled?enabled=false", headers=HEADERS)
-    r = client.post("/api/v1/im/feishu/fs-2/webhook", json={"challenge": "c1"})
+    client.post(f"/api/v1/im/channels/{FS2}/enabled?enabled=false", headers=HEADERS)
+    r = client.post(f"/api/v1/im/feishu/{FS2}/webhook", json={"challenge": "c1"})
     assert r.status_code == 409
