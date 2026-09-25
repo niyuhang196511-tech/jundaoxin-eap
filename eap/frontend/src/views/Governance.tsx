@@ -290,6 +290,8 @@ const POLICY_TEMPLATES: Record<string, Record<string, unknown>> = {
   'a2a-delegate-allowlist': { endpoints: ['https://a2a.partner.example.com'], agents: ['ext-agent'] },
   // M42-B：清单内模型上线/续用须过评测门禁（无评测记录或 PASS 率低于阈值则路由剔除）
   'eval-gate': { models: ['mock-llm'], require_eval: true, min_pass_rate: 0.8 },
+  // M55-E：工作流环境保护（GitHub Environments protection rules 风格）——名单外 403，require_confirm 二次确认
+  'env-protection': { rules: [{ env: 'prod', allowed_actors: ['api-key'], require_confirm: true }] },
 }
 
 /* ---------- 策略配置结构化子表单（M50-B1） ----------
@@ -379,6 +381,7 @@ const POLICY_KIND_LABELS: Record<string, string> = {
   'tool-sandbox': '脚本工具沙箱',
   'a2a-delegate-allowlist': 'A2A 外部委派白名单',
   'eval-gate': '评测门禁',
+  'env-protection': '环境保护规则',
 }
 
 /** chips 字段：ChipPicker（ui 收敛版，M51-B）+ 自由输入（数据源列表拉取失败/为空时天然退化为纯手输） */
@@ -415,13 +418,130 @@ function ChipsField({ def, values, options, onChange }: {
 
 type ParseResult = { ok: true; draft: Record<string, unknown> } | { ok: false; reason: string }
 
+/* ---------- env-protection 专用子表单（M55-E） ----------
+ * config.rules 是对象数组，超脱通用扁平 schema（chips/enum/int/float/bool）
+ * 的表达能力，故走独立的 parse/build/render 分支：结构化 ⇄ JSON 双向切换
+ * 与降级语义与九种通用 kind 完全一致。 */
+
+type EnvRuleDraft = { env: string; actors: string[]; confirm: boolean }
+
+const ENV_PROTECTION_ENVS = ['dev', 'test', 'staging', 'prod']
+
+function parseEnvProtection(raw: string): ParseResult {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { return { ok: false, reason: '配置不是合法 JSON' } }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, reason: '配置须为 JSON 对象' }
+  }
+  const rules = (parsed as Record<string, unknown>).rules
+  if (!Array.isArray(rules) || !rules.length) {
+    return { ok: false, reason: 'env-protection 需要 config.rules 非空数组' }
+  }
+  const draft: EnvRuleDraft[] = []
+  for (const r of rules) {
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) {
+      return { ok: false, reason: 'rules 项须为对象' }
+    }
+    const rule = r as Record<string, unknown>
+    if (typeof rule.env !== 'string' || !ENV_PROTECTION_ENVS.includes(rule.env)) {
+      return { ok: false, reason: `规则 env 须为 ${ENV_PROTECTION_ENVS.join('/')} 之一` }
+    }
+    if (!Array.isArray(rule.allowed_actors) || rule.allowed_actors.some(a => typeof a !== 'string')) {
+      return { ok: false, reason: '规则 allowed_actors 须为字符串数组' }
+    }
+    if ('require_confirm' in rule && typeof rule.require_confirm !== 'boolean') {
+      return { ok: false, reason: '规则 require_confirm 须为布尔' }
+    }
+    draft.push({ env: rule.env, actors: [...rule.allowed_actors], confirm: rule.require_confirm === true })
+  }
+  return { ok: true, draft: { rules: draft } }
+}
+
+function buildEnvProtection(draft: Record<string, unknown>):
+  { config: Record<string, unknown>; errors: string[] } {
+  const rules = Array.isArray(draft.rules) ? (draft.rules as EnvRuleDraft[]) : []
+  if (!rules.length) return { config: {}, errors: ['env-protection 需至少一条规则'] }
+  return {
+    config: {
+      rules: rules.map(r => ({
+        env: r.env,
+        allowed_actors: [...new Set(r.actors.map(a => String(a).trim()).filter(Boolean))],
+        require_confirm: Boolean(r.confirm),
+      })),
+    },
+    errors: [],
+  }
+}
+
+/** env-protection 规则编辑器：env Select + actors ChipPicker（自由输入）+ require_confirm Checkbox */
+function EnvProtectionFields({ rules, onChange }: {
+  rules: EnvRuleDraft[]
+  onChange: (next: EnvRuleDraft[]) => void
+}) {
+  const [custom, setCustom] = useState('')
+  const addActor = (i: number) => {
+    const v = custom.trim()
+    if (!v) return
+    onChange(rules.map((x, j) => j === i && !x.actors.includes(v) ? { ...x, actors: [...x.actors, v] } : x))
+    setCustom('')
+  }
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-ink-3">
+        每条规则保护一个环境：allowed_actors 为操作者名单（audit.actor_of 形态：jwt:&lt;用户&gt; 或 api-key，
+        空名单 = 冻结该环境），名单外发布/回滚 403（EAP-3010）；勾选 require_confirm 后名单内操作者
+        也须显式二次确认（首发 428 EAP-3011，确认后重发）。
+      </p>
+      {rules.map((r, i) => (
+        <div key={i} className="space-y-2 rounded-lg border border-line p-3">
+          <div className="flex items-center justify-between">
+            <Label className="mb-0">规则 {i + 1}</Label>
+            <Button size="xs" variant="ghost"
+              onClick={() => onChange(rules.filter((_, j) => j !== i))}>删除</Button>
+          </div>
+          <div>
+            <Label>环境（rules[{i}].env）</Label>
+            <Select value={r.env}
+              onChange={e => onChange(rules.map((x, j) => j === i ? { ...x, env: e.target.value } : x))}>
+              {ENV_PROTECTION_ENVS.map(e => <option key={e} value={e}>{e}</option>)}
+            </Select>
+          </div>
+          <div>
+            <Label>放行操作者（rules[{i}].allowed_actors）</Label>
+            <ChipPicker options={[]} values={r.actors} emptyHint="（名单为空 = 冻结该环境，可在下方添加）"
+              onChange={next => onChange(rules.map((x, j) => j === i ? { ...x, actors: next } : x))} />
+            <div className="mt-2 flex gap-2">
+              <Input placeholder="jwt:用户名 或 api-key，回车添加" value={custom}
+                onChange={e => setCustom(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addActor(i) } }} />
+              <Button size="xs" variant="secondary" className="shrink-0" disabled={!custom.trim()}
+                onClick={() => addActor(i)}>
+                <Plus className="size-3" />添加
+              </Button>
+            </div>
+          </div>
+          <Checkbox checked={r.confirm}
+            onChange={e => onChange(rules.map((x, j) => j === i ? { ...x, confirm: e.target.checked } : x))}
+            label="require_confirm：名单内操作者也须二次确认（428 EAP-3011）"
+            labelClassName="gap-2 text-ink-2" />
+        </div>
+      ))}
+      <Button size="xs" variant="secondary"
+        onClick={() => onChange([...rules, { env: 'prod', actors: ['api-key'], confirm: true }])}>
+        <Plus className="size-3" />添加规则
+      </Button>
+    </div>
+  )
+}
+
 /** config JSON（模板或既有策略）→ 结构化草稿。未知 kind、解析失败、schema 之外的
  * 未知键、类型/枚举/范围不符 → ok:false 附原因（调用方降级 JSON 编辑）。
  * int/float 归一为字符串便于受控输入；缺失的可选键补后端缺省值（threshold=high、
  * mode=enforce、require_eval=true，与 runtime/policy.py 的 or/缺省语义一致）。 */
 function parseConfig(kind: string, raw: string): ParseResult {
+  if (kind === 'env-protection') return parseEnvProtection(raw)  // M55-E：rules 数组走专用分支
   const schema = POLICY_SCHEMA[kind]
-  if (!schema) return { ok: false, reason: `策略类型 ${kind} 无结构化表单（不在九种已知 kind 内）` }
+  if (!schema) return { ok: false, reason: `策略类型 ${kind} 无结构化表单（不在十种已知 kind 内）` }
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return { ok: false, reason: '配置不是合法 JSON' } }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -474,6 +594,7 @@ function parseConfig(kind: string, raw: string): ParseResult {
  * （切换 JSON 模式不拦，宽松序列化保证切换不丢数据）。 */
 function buildConfig(kind: string, draft: Record<string, unknown>):
   { config: Record<string, unknown>; errors: string[] } {
+  if (kind === 'env-protection') return buildEnvProtection(draft)  // M55-E：专用分支
   const config: Record<string, unknown> = {}
   const errors: string[] = []
   for (const f of POLICY_SCHEMA[kind] ?? []) {
@@ -684,7 +805,7 @@ function PoliciesTab() {
               </span>
             ) },
           ]}
-          empty="暂无策略。点击「创建策略」按九种类型配置白名单、门禁与沙箱。"
+          empty="暂无策略。点击「创建策略」按十种类型配置白名单、门禁、沙箱与环境保护。"
         />
       </div>
       <DialogContent open={open} onOpenChange={setOpen} title="创建策略"
@@ -707,7 +828,7 @@ function PoliciesTab() {
                 setForm({ ...form, kind: e.target.value })
                 applyTemplate(e.target.value)
               }}>
-                {/* 复用旧数据时 kind 可能不在九种内：附加 option 保持选中并如实标注 */}
+                {/* 复用旧数据时 kind 可能不在十种内：附加 option 保持选中并如实标注 */}
                 {!POLICY_KIND_LABELS[form.kind] && (
                   <option value={form.kind}>{form.kind}（未知类型，仅 JSON 编辑）</option>
                 )}
@@ -730,7 +851,14 @@ function PoliciesTab() {
               </Button>
             </div>
             {cfgMode === 'structured' ? (
-              <div className="space-y-3">{(POLICY_SCHEMA[form.kind] ?? []).map(renderField)}</div>
+              <div className="space-y-3">
+                {form.kind === 'env-protection' ? (
+                  /* M55-E：rules 对象数组超脱扁平 schema，走专用规则编辑器 */
+                  <EnvProtectionFields
+                    rules={Array.isArray(cfgDraft.rules) ? (cfgDraft.rules as EnvRuleDraft[]) : []}
+                    onChange={next => setCfgDraft(d => ({ ...d, rules: next }))} />
+                ) : (POLICY_SCHEMA[form.kind] ?? []).map(renderField)}
+              </div>
             ) : (
               <div>
                 <Textarea rows={6} value={cfgRaw} onChange={e => setCfgRaw(e.target.value)}

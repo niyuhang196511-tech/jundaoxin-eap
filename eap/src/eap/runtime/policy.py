@@ -178,6 +178,59 @@ def check_a2a_delegate(db: Session, endpoint: str, target_agent: str = "") -> No
         f"不在租户 {tenant_id} 的 a2a-delegate-allowlist 放行名单内{where}")
 
 
+def check_env_protection(db: Session, env: str, actor: str) -> dict | None:
+    """环境保护规则判定（M55-E）：工作流 publish/rollback 到受保护环境前的闸门。
+
+    kind=env-protection，config={"rules": [{"env": "prod", "allowed_actors": [...],
+    "require_confirm": bool}]}。actor 为 audit.actor_of 形态（"jwt:<user>" / "api-key"），
+    与 allowed_actors 逐项精确匹配。
+
+    语义（多条规则命中同一 env 取最严者，conjunction 语义与 GitHub Environments 一致）：
+    - 任一命中规则的 allowed_actors 不含 actor → {"action": "deny"}（空名单 = 冻结该环境，
+      任何操作者都拒）；
+    - 否则任一命中规则 require_confirm=true → {"action": "confirm"}（操作者须显式二次确认）；
+    - 无命中 → None（照常放行，存量零影响）。
+
+    与其他 check_* 的租户语义差异：工作流发布/回滚是平台级管理操作（无租户上下文
+    contextvar），故直接查询全部启用的 env-protection 策略（跨租户），由平台管理员治理。
+
+    返回 None 或 {"action": "deny"|"confirm", "env": env, "policies": [策略名...]}；
+    deny 额外带 "denied_by"（拒绝来源策略名列表）。畸形规则（非 dict / env 非法）跳过不拦。
+    """
+    from .workflow_versions import ENVS
+
+    rows = db.scalars(
+        select(PolicyRecord)
+        .where(PolicyRecord.enabled == True,  # noqa: E712
+               PolicyRecord.kind == "env-protection")
+        .order_by(PolicyRecord.priority)
+    ).all()
+    policies: list[str] = []
+    denied_by: list[str] = []
+    need_confirm = False
+    for row in rows:
+        rules = (row.config or {}).get("rules")
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("env") not in ENVS:
+                continue  # 畸形规则防御性跳过（创建侧已校验，运行期不再信任）
+            if str(rule["env"]) != env:
+                continue  # 环境精确匹配：他环境规则不影响本 env（多环境精确度）
+            policies.append(row.name)
+            actors = {str(a) for a in (rule.get("allowed_actors") or [])}
+            if actor not in actors:
+                denied_by.append(row.name)
+            elif bool(rule.get("require_confirm")):
+                need_confirm = True
+    if denied_by:
+        return {"action": "deny", "env": env, "policies": sorted(set(policies)),
+                "denied_by": sorted(set(denied_by))}
+    if need_confirm:
+        return {"action": "confirm", "env": env, "policies": sorted(set(policies))}
+    return None
+
+
 def apply_eval_gate(db: Session, records: list[ModelRecord]) -> tuple[list[ModelRecord], list[dict]]:
     """评测门禁（M42-B，docs/10 遗留项）：清单内模型须过评测方可路由，与熔断过滤同位。
 

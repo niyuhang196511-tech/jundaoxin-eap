@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...observability import audit
 from ...models import WorkflowRecord, WorkflowRunRecord, WorkflowVersionRecord
-from ...runtime import workflow_versions
+from ...runtime import policy, workflow_versions
 from ...runtime.workflow import WorkflowSpec
 from ...workflows import (create_and_register, disable, load_enabled, refresh_registration,
                           resume_run_async, test_run_async)
@@ -152,11 +152,16 @@ class VersionDraftBody(BaseModel):
 class VersionPublishBody(BaseModel):
     env: str = Field(pattern=r"^(dev|test|staging|prod)$",
                      description="发布目标环境：dev|test|staging|prod")
+    confirm: bool = Field(default=False,
+                          description="环境保护二次确认（M55-E）：目标 env 命中 require_confirm"
+                                      " 规则时必须显式传 true，否则 428 EAP-3011")
 
 
 class VersionRollbackBody(BaseModel):
     env: str = Field(pattern=r"^(dev|test|staging|prod)$",
                      description="回滚目标环境：回滚该 env 到上一版")
+    confirm: bool = Field(default=False,
+                          description="环境保护二次确认（M55-E）：语义同发布端点 confirm 字段")
 
 
 def _require_workflow(db: Session, name: str) -> WorkflowRecord:
@@ -164,6 +169,52 @@ def _require_workflow(db: Session, name: str) -> WorkflowRecord:
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 工作流 {name} 不存在")
     return record
+
+
+def _gate_env_protection(db: Session, request: fastapi.Request, name: str,
+                         env: str, op: str, version: int, confirmed: bool) -> None:
+    """环境保护闸门（M55-E，GitHub Environments protection rules 语义）：
+
+    发布/回滚到受保护环境前查 env-protection 策略（runtime/policy.check_env_protection）：
+    - 操作者不在 allowed_actors → 落审计 workflow.env_protected 后 403 EAP-3010；
+    - 在名单内但规则 require_confirm=true 且请求未带 confirm=true →
+      落审计后 428 Precondition Required（EAP-3011），客户端显式确认后重发即过；
+    - 无规则命中 → 原样放行（存量零影响）。
+
+    审计走审计模块自会话（不挂请求事务）：闸门拒绝路径必然以异常收场，
+    get_db 无 commit，挂同一事务的记录会随回滚丢弃。
+
+    错误码选 EAP-3xxx（RBAC/权限域）：3010 = 白名单拒绝（403），3011 = 缺二次确认（428）。
+    428 选型理由：RFC 6585 Precondition Required 的语义即「服务器要求该请求携带指定
+    前置条件后重发」，与两阶段确认一一对应；403 已被白名单分支占用（身份问题 ≠ 缺确认），
+    409 在平台语义中是状态冲突（EAP-6002 等），均不如 428 贴切且无既有占用。
+    审批人队列（多人为签 min_approvals）平台暂无独立审批人体系，v1 不做，
+    留待 HITL Approval 形态落地后扩展（docstring 记录取舍）。
+    """
+    actor = audit.actor_of(request)
+    rule = policy.check_env_protection(db, env, actor)
+    if rule is None:
+        return
+    policies = rule.get("policies") or []
+    if rule["action"] == "deny":
+        audit.record("workflow.env_protected", actor=actor, target=name,
+                     detail={"env": env, "op": op, "outcome": "actor_not_allowed",
+                             "policies": policies, "version": version},
+                     trace_id=getattr(request.state, "trace_id", ""))
+        raise fastapi.HTTPException(
+            status_code=403,
+            detail=f"EAP-3010 环境保护：env={env} 由策略 {policies} 保护，"
+                   f"操作者 {actor} 不在 allowed_actors 名单内（EAP-3xxx 权限域）")
+    # action == "confirm"：操作者在名单内，但要求显式二次确认（body.confirm=true）
+    if not confirmed:
+        audit.record("workflow.env_protected", actor=actor, target=name,
+                     detail={"env": env, "op": op, "outcome": "confirm_required",
+                             "policies": policies, "version": version},
+                     trace_id=getattr(request.state, "trace_id", ""))
+        raise fastapi.HTTPException(
+            status_code=428,
+            detail=f"EAP-3011 环境保护：env={env} 要求二次确认（策略 {policies}），"
+                   f"请在请求体携带 confirm=true 后重发")
 
 
 @router.get("/{name}/versions")
@@ -221,8 +272,9 @@ def get_workflow_version(name: str, version_id: int, db: Session = fastapi.Depen
 async def publish_workflow_version(name: str, version_id: int, body: VersionPublishBody,
                                    request: fastapi.Request,
                                    db: Session = fastapi.Depends(get_db)):
-    """发布到环境：DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。"""
+    """发布到环境：环境保护闸门（M55-E）→ DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。"""
     record = _require_workflow(db, name)
+    _gate_env_protection(db, request, name, body.env, "publish", version_id, body.confirm)
     try:
         row = workflow_versions.publish(db, record, version_id, body.env)
         db.commit()
@@ -242,8 +294,9 @@ async def publish_workflow_version(name: str, version_id: int, body: VersionPubl
 async def rollback_workflow_version(name: str, version_id: int, body: VersionRollbackBody,
                                     request: fastapi.Request,
                                     db: Session = fastapi.Depends(get_db)):
-    """回滚该环境到上一版：现 published → archived，最近 archived → published（prod 同步指针）。"""
+    """回滚该环境到上一版：环境保护闸门（M55-E）→ 现 published → archived，最近 archived → published（prod 同步指针）。"""
     record = _require_workflow(db, name)
+    _gate_env_protection(db, request, name, body.env, "rollback", version_id, body.confirm)
     target = db.get(WorkflowVersionRecord, version_id)
     if target is None or target.workflow_id != record.id:
         raise fastapi.HTTPException(status_code=404,

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { GitCompareArrows, RotateCcw, Save } from 'lucide-react'
 import {
-  Badge, Button, DrawerContent, Label, Select, toast,
+  Badge, Button, ConfirmDialog, DrawerContent, Label, Select, toast,
 } from '@/components/ui'
 import { workflowVersionsApi, type WorkflowVersion, type WorkflowVersionsPayload, type WfEnv } from '@/lib/api'
 import { WfVersionDiffDialog } from './VersionDiffDialog'
@@ -28,6 +28,14 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
   const [data, setData] = useState<WorkflowVersionsPayload | null>(null)
   const [env, setEnv] = useState<WfEnv>('prod')
   const [diffOpen, setDiffOpen] = useState(false)
+  // M55-E 环境保护：428 EAP-3011（缺二次确认）→ 弹确认对话框带 confirm=true 重发；
+  // 403 EAP-3010（白名单外）与其他错误 → toast 透出后端规则详情（含策略名）
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    run: (confirm: boolean) => Promise<unknown>
+    ok: string
+    message: string
+  } | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -43,13 +51,34 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
     load()
   }, [open, workflow, load])
 
-  const act = async (fn: () => Promise<unknown>, ok: string) => {
+  const act = async (fn: (confirm: boolean) => Promise<unknown>, ok: string) => {
     try {
-      await fn()
+      await fn(false)
       toast.success(ok)
       load()
     } catch (e) {
+      const msg = (e as Error).message
+      if (msg.includes('EAP-3011')) {
+        setPendingConfirm({ run: fn, ok, message: msg })
+        return
+      }
+      // EAP-3010 白名单拒绝等：后端 detail 已含 env/策略名，toast 原样透出
+      toast.error(`操作失败：${msg}`)
+    }
+  }
+
+  const confirmPending = async () => {
+    if (!pendingConfirm) return
+    setConfirmBusy(true)
+    try {
+      await pendingConfirm.run(true)
+      toast.success(pendingConfirm.ok)
+      setPendingConfirm(null)
+      load()
+    } catch (e) {
       toast.error(`操作失败：${(e as Error).message}`)
+    } finally {
+      setConfirmBusy(false)
     }
   }
 
@@ -82,9 +111,9 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
           </Button>
           <Button variant="secondary" title={`回滚 ${env} 环境到上一版`}
             disabled={!currentOnEnv(env)}
-            onClick={() => act(() => {
+            onClick={() => act(confirm => {
               const cur = currentOnEnv(env)!
-              return workflowVersionsApi.rollback(workflow, cur.id, env)
+              return workflowVersionsApi.rollback(workflow, cur.id, env, confirm)
             }, `已回滚 ${env} 到上一版`)}>
             <RotateCcw className="size-3.5" />回滚
           </Button>
@@ -117,7 +146,7 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
             </div>
             {row.state !== 'published' && (
               <Button size="xs" variant="primary"
-                onClick={() => act(() => workflowVersionsApi.publish(workflow, row.id, env),
+                onClick={() => act(confirm => workflowVersionsApi.publish(workflow, row.id, env, confirm),
                   `v${row.version} 已发布到 ${env}`)}>
                 发布到 {env}
               </Button>
@@ -132,6 +161,17 @@ export function WfVersionDrawer({ workflow, open, onOpenChange }: {
         versions={data?.versions ?? []}
         open={diffOpen}
         onOpenChange={setDiffOpen}
+      />
+      {/* M55-E 环境保护二次确认：428 EAP-3011 → 显式确认后带 confirm=true 重发 */}
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        title="环境保护确认"
+        description={pendingConfirm?.message}
+        confirmLabel="确认执行"
+        variant="primary"
+        busy={confirmBusy}
+        onConfirm={confirmPending}
+        onCancel={() => setPendingConfirm(null)}
       />
     </>
   )

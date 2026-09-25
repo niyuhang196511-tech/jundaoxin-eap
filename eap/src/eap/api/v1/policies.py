@@ -6,6 +6,8 @@
 - max-prompt-tokens：{"limit": N}
 - eval-gate（M42-B，docs/10 评测门禁接入模型路由）：
   {"models": [...], "require_eval": bool, "min_pass_rate": 0.8}
+- env-protection（M55-E，工作流环境保护）：{"rules": [{"env": "prod",
+  "allowed_actors": [...], "require_confirm": bool}]}
 """
 
 from __future__ import annotations
@@ -25,7 +27,35 @@ router = fastapi.APIRouter(prefix="/api/v1/policies",
 
 _KINDS = ("model-allowlist", "provider-allowlist", "max-prompt-tokens",
           "tool-allowlist", "tool-risk-approval", "agent-allowlist", "tool-sandbox",
-          "eval-gate", "a2a-delegate-allowlist")
+          "eval-gate", "a2a-delegate-allowlist", "env-protection")
+
+# 环境保护规则的合法 env（M55-E）：与 runtime/workflow_versions.ENVS 对齐
+_ENV_PROTECTION_ENVS = ("dev", "test", "staging", "prod")
+
+
+def _validate_env_protection_config(cfg: dict) -> None:
+    """env-protection config 校验：rules 必填且逐条核验 env/actors/confirm 形状。"""
+    rules = cfg.get("rules")
+    if not isinstance(rules, list) or not rules:
+        raise fastapi.HTTPException(
+            status_code=400, detail="EAP-7102 env-protection 需要 config.rules 非空列表")
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise fastapi.HTTPException(
+                status_code=400, detail="EAP-7102 env-protection 的 rules 项须为对象")
+        if rule.get("env") not in _ENV_PROTECTION_ENVS:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail=f"EAP-7102 env-protection 规则的 env 须为 {'/'.join(_ENV_PROTECTION_ENVS)} 之一")
+        actors = rule.get("allowed_actors")
+        if not isinstance(actors, list) or any(not isinstance(a, str) for a in actors):
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="EAP-7102 env-protection 规则的 allowed_actors 须为字符串数组"
+                       "（audit.actor_of 形态：jwt:<user> / api-key；空名单 = 冻结该环境）")
+        if "require_confirm" in rule and not isinstance(rule["require_confirm"], bool):
+            raise fastapi.HTTPException(
+                status_code=400, detail="EAP-7102 env-protection 规则的 require_confirm 须为布尔")
 
 
 class PolicyCreate(BaseModel):
@@ -33,7 +63,7 @@ class PolicyCreate(BaseModel):
     tenant_id: int = Field(default=0, ge=0, description="0 = 平台默认策略")
     kind: str = Field(pattern=r"^(model-allowlist|provider-allowlist|max-prompt-tokens|"
                               r"tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox|"
-                              r"eval-gate|a2a-delegate-allowlist)$")
+                              r"eval-gate|a2a-delegate-allowlist|env-protection)$")
     config: dict = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
     notes: str = Field(default="", max_length=256)
@@ -91,6 +121,9 @@ def create_policy(body: PolicyCreate, request: fastapi.Request, db: Session = fa
         if not isinstance(cfg.get("endpoints"), list) and not isinstance(cfg.get("agents"), list):
             raise fastapi.HTTPException(
                 status_code=400, detail="EAP-7102 a2a-delegate-allowlist 需要 config.endpoints 或 config.agents 列表")
+    if body.kind == "env-protection":
+        # M55-E 工作流环境保护：{"rules": [{"env", "allowed_actors", "require_confirm"}]}
+        _validate_env_protection_config(cfg)
     if body.kind not in _KINDS:
         raise fastapi.HTTPException(status_code=400, detail=f"EAP-7102 未知策略类型 {body.kind}")
     record = PolicyRecord(name=body.name, tenant_id=body.tenant_id, kind=body.kind,
