@@ -1740,7 +1740,7 @@
             "type": "object"
           },
           "kind": {
-            "pattern": "^(model-allowlist|provider-allowlist|max-prompt-tokens|tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox|eval-gate|a2a-delegate-allowlist)$",
+            "pattern": "^(model-allowlist|provider-allowlist|max-prompt-tokens|tool-allowlist|tool-risk-approval|agent-allowlist|tool-sandbox|eval-gate|a2a-delegate-allowlist|env-protection)$",
             "title": "Kind",
             "type": "string"
           },
@@ -2934,6 +2934,12 @@
       },
       "VersionPublishBody": {
         "properties": {
+          "confirm": {
+            "default": false,
+            "description": "环境保护二次确认（M55-E）：目标 env 命中 require_confirm 规则时必须显式传 true，否则 428 EAP-3011",
+            "title": "Confirm",
+            "type": "boolean"
+          },
           "env": {
             "description": "发布目标环境：dev|test|staging|prod",
             "pattern": "^(dev|test|staging|prod)$",
@@ -2949,6 +2955,12 @@
       },
       "VersionRollbackBody": {
         "properties": {
+          "confirm": {
+            "default": false,
+            "description": "环境保护二次确认（M55-E）：语义同发布端点 confirm 字段",
+            "title": "Confirm",
+            "type": "boolean"
+          },
           "env": {
             "description": "回滚目标环境：回滚该 env 到上一版",
             "pattern": "^(dev|test|staging|prod)$",
@@ -7325,6 +7337,160 @@
           }
         ],
         "summary": "Create Channel"
+      }
+    },
+    "/api/v1/im/channels/{ident}/directory/chats": {
+      "get": {
+        "description": "群列表代理查询（M55-C）：形态同 users，响应 {items: [{chat_id, name}], next_page_token}。",
+        "operationId": "directory_chats_api_v1_im_channels__ident__directory_chats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ident",
+            "required": true,
+            "schema": {
+              "title": "Ident",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Page Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Directory Chats"
+      }
+    },
+    "/api/v1/im/channels/{ident}/directory/users": {
+      "get": {
+        "description": "通讯录用户代理查询（M55-C）：按渠道凭据代发平台通讯录 API（admin 鉴权对齐渠道管理）。\n\n- department_id：平台部门 ID（钉钉/企微缺省根部门；飞书可选）\n- keyword：页内过滤（三平台列表 API 无服务端关键字参数，如实按页过滤）\n- page_token：上一响应 next_page_token 不透明回传\n- 响应 {items: [{user_id, name, department_ids, email?, mobile?}], next_page_token}，\n  字段缺失如实省略；停用渠道亦允许查询（enabled 管消息流，不影响管理面查询）",
+        "operationId": "directory_users_api_v1_im_channels__ident__directory_users_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ident",
+            "required": true,
+            "schema": {
+              "title": "Ident",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "department_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 128,
+              "title": "Department Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "keyword",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 128,
+              "title": "Keyword",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Page Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Directory Users"
       }
     },
     "/api/v1/im/channels/{ident}/send-card": {
@@ -12456,7 +12622,7 @@
     },
     "/api/v1/workflows/{name}/versions/{version_id}/publish": {
       "post": {
-        "description": "发布到环境：DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。",
+        "description": "发布到环境：环境保护闸门（M55-E）→ DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。",
         "operationId": "publish_workflow_version_api_v1_workflows__name__versions__version_id__publish_post",
         "parameters": [
           {
@@ -12518,7 +12684,7 @@
     },
     "/api/v1/workflows/{name}/versions/{version_id}/rollback": {
       "post": {
-        "description": "回滚该环境到上一版：现 published → archived，最近 archived → published（prod 同步指针）。",
+        "description": "回滚该环境到上一版：环境保护闸门（M55-E）→ 现 published → archived，最近 archived → published（prod 同步指针）。",
         "operationId": "rollback_workflow_version_api_v1_workflows__name__versions__version_id__rollback_post",
         "parameters": [
           {
