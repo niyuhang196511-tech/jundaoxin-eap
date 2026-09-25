@@ -569,13 +569,19 @@ export const modelsApi = {
 }
 
 export const tasksApi = {
-  /** 最近 50 条任务（后端固定 limit）；抽检抽样只认 agent.invoke/agent.hitl 两类 */
-  list: () => api<{
-    task_id: string
-    type: string
-    state: string
-    payload: Record<string, unknown> | null
-  }[]>('GET', '/api/v1/tasks'),
+  /** 任务列表（created_at 倒序）；M52-B 分页：limit 默认 50（后端钳制 [1,200]）、offset 默认 0，仅显式传参才拼 query。抽检抽样只认 agent.invoke/agent.hitl 两类 */
+  list: (limit?: number, offset?: number) => {
+    const q = new URLSearchParams()
+    if (limit !== undefined) q.set('limit', String(limit))
+    if (offset !== undefined) q.set('offset', String(offset))
+    const qs = q.toString()
+    return api<{
+      task_id: string
+      type: string
+      state: string
+      payload: Record<string, unknown> | null
+    }[]>('GET', `/api/v1/tasks${qs ? `?${qs}` : ''}`)
+  },
 }
 
 export const evalsApi = {

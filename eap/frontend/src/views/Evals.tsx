@@ -601,7 +601,8 @@ function ReviewTab() {
 
   const loadTasks = useCallback(async () => {
     try {
-      const l = await tasksApi.list()
+      // M52-B：放宽到后端钳制上限 200 条（旧固定 50 条时较老任务进不了抽检下拉）
+      const l = await tasksApi.list(200)
       setTasks(l
         .filter(t => t.type === 'agent.invoke' || t.type === 'agent.hitl')
         .map(t => ({

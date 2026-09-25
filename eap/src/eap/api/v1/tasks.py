@@ -49,10 +49,15 @@ def _view(task: TaskRecord) -> dict:
 
 
 @router.get("")
-def list_tasks(state: str | None = None, db: Session = fastapi.Depends(get_db)):
-    query = select(TaskRecord).order_by(TaskRecord.created_at.desc()).limit(50)
+def list_tasks(state: str | None = None, limit: int = 50, offset: int = 0,
+               db: Session = fastapi.Depends(get_db)):
+    """任务列表（created_at 倒序）。分页（M52-B）：limit 钳制 [1,200]、offset 钳制 ≥0，默认 50/0 向后兼容。"""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    query = select(TaskRecord)
     if state:
         query = query.where(TaskRecord.state == state)
+    query = query.order_by(TaskRecord.created_at.desc()).limit(limit).offset(offset)
     return [_view(t) for t in db.scalars(query).all()]
 
 
