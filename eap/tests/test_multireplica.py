@@ -73,7 +73,9 @@ def test_rate_limiter_redis_path(client: TestClient, monkeypatch):
     from eap.api.security import SlidingWindow
     from eap.config import get_settings
 
-    # 测试隔离：滑窗键持久在 Redis db9，跨运行会污染断言——先清空本用例专用库
+    # 测试隔离：滑窗键持久在 Redis db9，跨运行会污染断言——先清空本用例专用库。
+    # [T,T,F] 断言同时是滑窗成员唯一性的确定性守卫：M52 修复前成员为纯 f"{now}"，
+    # Windows ~15.6ms 时钟刻度下三连发撞成员 → ZADD 覆盖不计数 → 第三发误放行（时运红绿）。
     redis_lib.Redis(host="localhost", port=63790, db=9).flushdb()
     monkeypatch.setenv("EAP_REDIS_URL", "redis://localhost:63790/9")
     get_settings.cache_clear()

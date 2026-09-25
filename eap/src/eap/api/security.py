@@ -189,11 +189,14 @@ class SlidingWindow:
         now = _time.time()
         window_start = now - self.window
         redis_key = f"eap:ratelimit:{key}"
+        # 唯一成员（同成员 ZADD 只覆盖计数不新增——gateway 熔断器同款纪律）：
+        # 纯 f"{now}" 在 Windows ~15.6ms 时钟刻度下连发必撞，突发请求被合并少计、限流失真
+        member = f"{now:.6f}:{uuid.uuid4().hex[:8]}"
         r = aioredis.from_url(url, decode_responses=True)
         try:
             pipe = r.pipeline(transaction=True)
             pipe.zremrangebyscore(redis_key, 0, window_start)
-            pipe.zadd(redis_key, {f"{now}": now})
+            pipe.zadd(redis_key, {member: now})
             pipe.zcard(redis_key)
             _, _, count = await pipe.execute()
             await r.expire(redis_key, self.window)
