@@ -81,7 +81,10 @@ class LocalVectorStore:
 
         from ..config import get_settings
 
-        path = os.path.join(get_settings().media_dir, "..", "vector-cache", f"{kb_id}.npz")
+        # abspath 词法归一（与 _persist 同构）：POSIX 对未归一的 media_dir/../ 按文件系统
+        # 解析——media 目录不存在时 exists() 恒 False、磁盘缓存永不命中（Win32 词法折叠
+        # ".." 掩盖该缺陷：本地绿/CI ubuntu 红，run #36 容器 A/B 实证）
+        path = os.path.abspath(os.path.join(get_settings().media_dir, "..", "vector-cache", f"{kb_id}.npz"))
         if not os.path.exists(path):
             return None
         try:
