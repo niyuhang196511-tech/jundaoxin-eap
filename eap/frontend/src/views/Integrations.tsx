@@ -350,6 +350,25 @@ function ConnectorsTab() {
     }
   }
 
+  // 破坏性删除需确认（M53-B，对齐 M51-B 金标准）：删除按钮只置目标，ConfirmDialog 确认后执行
+  const [removeTarget, setRemoveTarget] = useState<Connector | null>(null)
+  const [removing, setRemoving] = useState(false)
+  const doRemove = async () => {
+    if (!removeTarget) return
+    setRemoving(true)
+    try {
+      await connectorsApi.remove(removeTarget.name)
+      toast.success('连接器已删除（工具即从工具池移除，密钥/令牌随行删除）')
+      setRemoveTarget(null)
+      load()
+    } catch (e) {
+      // 409 EAP-2002 时 message 即后端引用详情（api() 透传 detail 字符串）
+      toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setRemoving(false)
+    }
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -378,6 +397,10 @@ function ConnectorsTab() {
                 <Button size="xs" variant="secondary" loading={busy === `edit-${c.name}`}
                   onClick={() => openEdit(c.name)}>
                   <Pencil className="size-3" />编辑
+                </Button>
+                {/* M53-B：删除走 ConfirmDialog 确认（不可恢复 + 引用处置语义如实写明） */}
+                <Button size="xs" variant="ghost" onClick={() => setRemoveTarget(c)}>
+                  <Trash2 className="size-3" />删除
                 </Button>
               </span>
             ) },
@@ -552,6 +575,13 @@ function ConnectorsTab() {
           </div>
         </div>
       </DialogContent>
+
+      {/* M53-B 删除确认：后果如实写明（工具消失/密钥随行删除不可恢复/软引用降级/触发器引用 409 阻断），
+          对齐 Knowledge 文档删除确认的诚实风格 */}
+      <ConfirmDialog open={!!removeTarget} onCancel={() => setRemoveTarget(null)}
+        title={`删除连接器「${removeTarget?.name ?? ''}」？`}
+        description="删除后该连接器的端点工具立即从工具池消失，引用这些工具的智能体/工作流将在下次调用时解析失败（降级）；已保存的 API Key、OAuth 密钥与令牌随行删除，不可恢复。若被触发器规则引用（含停用规则），后端将拒绝删除（409）并列出引用规则，需先在触发器页删除或改绑。"
+        confirmLabel="删除" busy={removing} onConfirm={doRemove} />
     </div>
   )
 }

@@ -33,6 +33,7 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     "budget.set",
     # connector —— 连接器 CRUD / 健康 / OAuth（api/v1/connectors.py）
     "connector.create",
+    "connector.delete",
     "connector.health",
     "connector.oauth.authorize",
     "connector.oauth.callback",

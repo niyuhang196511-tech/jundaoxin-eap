@@ -625,6 +625,10 @@ export const connectorsApi = {
   /** 局部更新（M52-C，admin）：只发显式改动字段；base_url/config/endpoints 变更 → status 重置 pending */
   patch: (name: string, body: ConnectorPatch) =>
     api<ConnectorView>('PATCH', `/api/v1/connectors/${name}`, body),
+  /** 删除（M53-B，admin）：被触发器规则引用 → 409 EAP-2002（detail 列出引用规则，toast 透传）；
+   * 工具池实时读库即删即消失，密钥/令牌随行删除不可恢复 */
+  remove: (name: string) =>
+    api<{ name: string; status: string }>('DELETE', `/api/v1/connectors/${name}`),
 }
 
 export const kbApi = {

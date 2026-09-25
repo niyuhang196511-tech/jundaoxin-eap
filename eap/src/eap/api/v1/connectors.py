@@ -5,6 +5,8 @@ M31 任务组 C 增量：sql kind 登记（config={dialect, database}）、OAuth
 M52-C 增量：GET /{name} 详情（编辑回填，secret 不回显仅出 has_* 布尔）+
 PATCH /{name} 局部更新（name/kind 不可变；secret 三态：缺省保留 / "" 清除 / 非空加密覆盖；
 合并后逐 kind 校验；base_url/config/endpoints 变更 → status 重置 pending；审计 connector.update）。
+M53-B 增量：DELETE /{name} 硬删除（触发器规则引用 → 409 阻断不级联；工具池实时读库即删即消失；
+密钥/令牌列随行删除；审计 connector.delete）。
 """
 
 from __future__ import annotations
@@ -327,6 +329,57 @@ def update_connector(name: str, body: ConnectorUpdate, request: fastapi.Request,
                  detail={"fields": sorted(data), "has_oauth": bool(record.oauth_token_url)},
                  trace_id=getattr(request.state, "trace_id", ""))
     return _view(record)
+
+
+# ---------- DELETE 硬删除（M53-B）：引用检查 + 密钥随行 + 审计 ----------
+
+@router.delete("/{name}", dependencies=[fastapi.Depends(require_admin)])
+def delete_connector(name: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """删除连接器（M53-B，admin + 审计 connector.delete）。
+
+    引用语义与取舍（全仓消费点调研结论）：
+
+    - **触发器规则硬引用 → 409 阻断，不级联**：trigger_rules(target_type=connector)
+      以 target_name 按名引用，连接器删除后规则悬空——每次触发都落
+      EAP-4004 error 审计噪音，且规则可被随时重新启用。触发器有独立生命周期
+      （自己的 CRUD/审计页），平台无级联改动独立对象的先例（webhook 端点删除只清
+      **自有子表** deliveries，M49-C；影子配置删除明确**保留**历史 shadow_runs），
+      故不代删/代停规则，409 EAP-2002 列出全部引用规则（**含停用规则**——停用可再
+      启用，留悬空即埋雷），要求管理员先在触发器页删除或改绑。
+    - **agent/workflow 的 tool_name 软引用不阻断**：工具池实时读库
+      （load_connector_tools / resolve_tool / collect_option_tools），删除即工具自然
+      消失；运行中任务持旧引用会在下一次解析时「工具未注册」失败/降级——可见的
+      降级路径，不为此阻塞删除（如实记录于本 docstring）。
+    - **密钥随行删除**：api_key / OAuth client_secret / access/refresh token 均为
+      本表列（无子表，无级联问题），整行删除即密文一并消失、不可恢复；事件日志
+      connector.invoked 与审计历史**保留**（历史记录不随配置删除，对齐 shadow_runs
+      先例）。
+    """
+    record = _get_record(db, name)
+    from ...models import TriggerRuleRecord
+
+    refs = db.scalars(select(TriggerRuleRecord)
+                      .where(TriggerRuleRecord.target_type == "connector",
+                             TriggerRuleRecord.target_name == name)).all()
+    if refs:
+        listing = "、".join(f"{r.name}({'启用' if r.enabled else '停用'})" for r in refs)
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail=f"EAP-2002 连接器 {name} 被 {len(refs)} 条触发器规则引用：{listing}，"
+                   f"请先在触发器页删除或改绑这些规则")
+    # 审计 detail 只记处置结果的存在性布尔/计数，绝不记 secret 值
+    detail = {"kind": record.kind,
+              "endpoint_count": len(record.endpoints or []),
+              "had_api_key": bool(record.api_key),
+              "had_oauth_secret": bool(record.oauth_client_secret_enc),
+              "had_oauth_tokens": bool(record.oauth_access_token_enc
+                                       or record.oauth_refresh_token_enc),
+              "trigger_refs": 0}  # 引用处置结果：走到删除即为 0（有引用已 409 前置阻断）
+    db.delete(record)
+    db.commit()
+    audit.record("connector.delete", actor=audit.actor_of(request), target=name,
+                 detail=detail, trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": name, "status": "deleted"}
 
 
 # ---------- OAuth2 凭证托管（M31 任务组 C）：authorize / callback / token ----------
