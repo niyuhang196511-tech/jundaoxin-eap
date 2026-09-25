@@ -18,6 +18,15 @@ M39-B 新增（docs/18 §二.5 移动远程操作，回调处理内、路由到�
 - 文本以「/task 」前缀 → /task <agent> <input...> 远程触发：直达任务引擎
   （agent.invoke 异步执行，payload 补 _acl 身份快照），回执「任务已受理 {task_id}」；
   异步完成回执为 M40（远程监控），本版不推
+
+M55-C 新增（docs/10 遗留「通讯录/群管理应用 API」）：通讯录/群列表代理查询——
+- GET /channels/{ident}/directory/users 与 /directory/chats（admin，鉴权对齐渠道
+  管理端点）：按渠道登记的应用级凭据代发平台通讯录/群列表 API（实现见
+  runtime/im.directory_users / directory_chats），响应统一平台无关形态；
+  每次代理调用落审计 im.directory.query，detail 仅记 platform/查询参数摘要/结果
+  条数（零 PII 明文——手机号/邮箱不入审计，调用方响应体可含）。失败语义：渠道
+  不存在 404、缺应用凭据 400、上游平台 4xx/5xx → 502 透传脱敏摘要。
+  真实平台联调（真实凭证）=L3 外部条件。
 """
 
 from __future__ import annotations
@@ -205,6 +214,75 @@ async def test_push(name: str, db: Session = fastapi.Depends(get_db)):
     result = await im_rt.post_json(record.webhook_url,
                                    im_rt.format_push(record.platform, "EAP 渠道连通性测试"))
     return {"name": record.name, "result": result}
+
+
+# ---------- 通讯录 / 群管理代理查询（M55-C，docs/10 遗留） ----------
+
+async def _directory_query(request: fastapi.Request, db: Session, ident: str, kind: str, *,
+                           department_id: str = "", keyword: str = "",
+                           page_size: int = 50, page_token: str = "") -> dict:
+    """代理查询公共实现：渠道解析 → runtime 代理调用 → 审计 → 平台无关响应。
+
+    失败语义：渠道不存在 404（_resolve_channel）；缺应用凭据/平台不支持/参数形态
+    错 400（runtime ValueError）；平台 API 4xx/5xx 或业务码非 0 → 502 透传脱敏摘要
+    （runtime RuntimeError，摘要不含 URL 与凭据）。审计 im.directory.query：
+    成功记 platform/kind/department_id/has_keyword/结果条数，失败记 error 摘要——
+    PII 纪律：手机号/邮箱一律不入审计 detail（仅记 has_keyword 布尔与条数，
+    调用方响应体可含，因为调用方就是 admin 查询）。
+    """
+    record = _resolve_channel(db, ident)
+    trace_id = getattr(request.state, "trace_id", "")
+    try:
+        if kind == "users":
+            result = await im_rt.directory_users(record, department_id=department_id,
+                                                 keyword=keyword, page_size=page_size,
+                                                 page_token=page_token)
+        else:
+            result = await im_rt.directory_chats(record, page_size=page_size,
+                                                 page_token=page_token)
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        audit.record("im.directory.query", actor=audit.actor_of(request), target=record.name,
+                     detail={"platform": record.platform, "kind": kind, "ok": False,
+                             "error": str(e)[:200]}, trace_id=trace_id)
+        raise fastapi.HTTPException(status_code=502, detail=str(e)) from e
+    audit.record("im.directory.query", actor=audit.actor_of(request), target=record.name,
+                 detail={"platform": record.platform, "kind": kind, "ok": True,
+                         "department_id": department_id or None,
+                         "has_keyword": bool(keyword),
+                         "count": len(result.get("items") or [])},
+                 trace_id=trace_id)
+    return result
+
+
+@router.get("/channels/{ident}/directory/users", dependencies=ADMIN_DEP)
+async def directory_users(ident: str, request: fastapi.Request,
+                          db: Session = fastapi.Depends(get_db),
+                          department_id: str = fastapi.Query(default="", max_length=128),
+                          keyword: str = fastapi.Query(default="", max_length=128),
+                          page_size: int = fastapi.Query(default=50, ge=1, le=100),
+                          page_token: str = fastapi.Query(default="", max_length=256)):
+    """通讯录用户代理查询（M55-C）：按渠道凭据代发平台通讯录 API（admin 鉴权对齐渠道管理）。
+
+    - department_id：平台部门 ID（钉钉/企微缺省根部门；飞书可选）
+    - keyword：页内过滤（三平台列表 API 无服务端关键字参数，如实按页过滤）
+    - page_token：上一响应 next_page_token 不透明回传
+    - 响应 {items: [{user_id, name, department_ids, email?, mobile?}], next_page_token}，
+      字段缺失如实省略；停用渠道亦允许查询（enabled 管消息流，不影响管理面查询）
+    """
+    return await _directory_query(request, db, ident, "users", department_id=department_id,
+                                  keyword=keyword, page_size=page_size, page_token=page_token)
+
+
+@router.get("/channels/{ident}/directory/chats", dependencies=ADMIN_DEP)
+async def directory_chats(ident: str, request: fastapi.Request,
+                          db: Session = fastapi.Depends(get_db),
+                          page_size: int = fastapi.Query(default=50, ge=1, le=100),
+                          page_token: str = fastapi.Query(default="", max_length=256)):
+    """群列表代理查询（M55-C）：形态同 users，响应 {items: [{chat_id, name}], next_page_token}。"""
+    return await _directory_query(request, db, ident, "chats",
+                                  page_size=page_size, page_token=page_token)
 
 
 # ---------- 回调端点（IM 平台服务器调用，无 API Key） ----------

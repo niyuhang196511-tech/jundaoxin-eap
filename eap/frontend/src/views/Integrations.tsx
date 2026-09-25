@@ -7,8 +7,9 @@ import {
   type BadgeTone,
 } from '@/components/ui'
 import {
-  agentsApi, api, connectorsApi, triggersApi, webhooksApi, workflowsApi,
+  agentsApi, api, connectorsApi, imApi, triggersApi, webhooksApi, workflowsApi,
   type ConnectorDetail, type ConnectorPatch,
+  type ImDirectoryChat, type ImDirectoryUser,
   type TriggerRule, type WebhookDelivery, type WebhookEndpoint,
 } from '@/lib/api'
 
@@ -586,10 +587,145 @@ function ConnectorsTab() {
   )
 }
 
+/** 通讯录/群列表代理查询对话框（M55-C）：users/chats 两页签 + page_token 翻页（游标栈回退）。
+ * 错误 toast 透传后端 detail（400 缺应用凭据 / 404 渠道不存在 / 502 上游脱敏摘要）；
+ * 真实平台联调（真实凭证）=L3 外部条件。 */
+function ImDirectoryDialog({ channel, onClose }: { channel: ImChannel | null; onClose: () => void }) {
+  const [tab, setTab] = useState<'users' | 'chats'>('users')
+  const [keyword, setKeyword] = useState('')
+  const [deptId, setDeptId] = useState('')
+  const [users, setUsers] = useState<ImDirectoryUser[]>([])
+  const [chats, setChats] = useState<ImDirectoryChat[]>([])
+  const [nextToken, setNextToken] = useState('')
+  const [curToken, setCurToken] = useState('')
+  const [stack, setStack] = useState<string[]>([])  // 上一页游标栈（平台 page_token 只前进）
+  const [busy, setBusy] = useState(false)
+
+  const load = async (t: 'users' | 'chats', kw: string, dep: string, token: string) => {
+    if (!channel) return
+    setBusy(true)
+    try {
+      if (t === 'users') {
+        const page = await imApi.directoryUsers(channel.name, {
+          department_id: dep.trim() || undefined, keyword: kw.trim() || undefined,
+          page_size: 50, page_token: token || undefined,
+        })
+        setUsers(page.items)
+        setNextToken(page.next_page_token)
+      } else {
+        const page = await imApi.directoryChats(channel.name, {
+          page_size: 50, page_token: token || undefined,
+        })
+        setChats(page.items)
+        setNextToken(page.next_page_token)
+      }
+      setCurToken(token)
+    } catch (e) {
+      toast.error(`通讯录查询失败：${(e as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 打开（channel 变化）即查第一页，重置全部查询态
+  useEffect(() => {
+    if (!channel) return
+    setTab('users'); setKeyword(''); setDeptId('')
+    setUsers([]); setChats([]); setNextToken(''); setCurToken(''); setStack([])
+    load('users', '', '', '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channel])
+
+  const switchTab = (t: 'users' | 'chats') => {
+    setTab(t); setNextToken(''); setCurToken(''); setStack([])
+    load(t, keyword, deptId, '')
+  }
+
+  const next = () => {
+    if (!nextToken) return
+    setStack(s => [...s, curToken])
+    load(tab, keyword, deptId, nextToken)
+  }
+  const prev = () => {
+    const token = stack[stack.length - 1]
+    if (token === undefined) return
+    setStack(s => s.slice(0, -1))
+    load(tab, keyword, deptId, token)
+  }
+
+  return (
+    <DialogContent open={!!channel} onOpenChange={o => !o && onClose()}
+      title={`通讯录 · ${channel?.name ?? ''}`}
+      description="按渠道应用级凭据（app_id/app_secret）代理查询平台通讯录/群列表；keyword 为页内过滤（三平台列表 API 无服务端关键字）"
+      footer={<Button variant="ghost" onClick={onClose}>关闭</Button>}>
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Button size="xs" variant={tab === 'users' ? 'primary' : 'secondary'}
+            onClick={() => switchTab('users')}>用户</Button>
+          <Button size="xs" variant={tab === 'chats' ? 'primary' : 'secondary'}
+            onClick={() => switchTab('chats')}>群列表</Button>
+        </div>
+        {tab === 'users' && (
+          <div className="flex items-end gap-2">
+            <div className="w-44">
+              <Label>部门 ID（可选）</Label>
+              <Input value={deptId} onChange={e => setDeptId(e.target.value)}
+                placeholder="钉钉/企微缺省根部门" />
+            </div>
+            <div className="w-56">
+              <Label>关键字（页内过滤）</Label>
+              <Input value={keyword} onChange={e => setKeyword(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && load('users', keyword, deptId, '')}
+                placeholder="姓名 / 用户 ID / 邮箱 / 手机" />
+            </div>
+            <Button size="sm" variant="secondary" disabled={busy}
+              onClick={() => load('users', keyword, deptId, '')}>查询</Button>
+          </div>
+        )}
+        <div className="rounded-[--radius-card] border border-line bg-surface">
+          {tab === 'users' ? (
+            <Table<ImDirectoryUser>
+              rowKey={u => u.user_id}
+              data={users}
+              loading={busy}
+              columns={[
+                { key: 'name', title: '姓名', render: u => <span className="font-medium">{u.name}</span> },
+                { key: 'user_id', title: '用户 ID' },
+                { key: 'department_ids', title: '部门', render: u => u.department_ids.join('、') || '—' },
+                { key: 'email', title: '邮箱', render: u => u.email ?? '—' },
+                { key: 'mobile', title: '手机', render: u => u.mobile ?? '—' },
+              ]}
+              empty="暂无数据（需渠道已配置应用级凭据 app_id/app_secret）" />
+          ) : (
+            <Table<ImDirectoryChat>
+              rowKey={c => c.chat_id}
+              data={chats}
+              loading={busy}
+              columns={[
+                { key: 'name', title: '群名称', render: c => <span className="font-medium">{c.name}</span> },
+                { key: 'chat_id', title: '群 ID' },
+              ]}
+              empty="暂无数据（飞书=机器人所在群；钉钉=机器人可发消息的群；企微=应用创建的群）" />
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <Button size="xs" variant="secondary" disabled={busy || stack.length === 0} onClick={prev}>
+            上一页
+          </Button>
+          <Button size="xs" variant="secondary" disabled={busy || !nextToken} onClick={next}>
+            下一页
+          </Button>
+        </div>
+      </div>
+    </DialogContent>
+  )
+}
+
 function ImTab() {
   const [list, setList] = useState<ImChannel[]>([])
   const [agents, setAgents] = useState<string[]>([])
   const [open, setOpen] = useState(false)
+  const [dirChannel, setDirChannel] = useState<ImChannel | null>(null)
   const [form, setForm] = useState({ name: '', platform: 'feishu', agent: 'faq-agent', webhookUrl: '', secret: '' })
   const [busy, setBusy] = useState('')
 
@@ -658,9 +794,15 @@ function ImTab() {
               </Button>
             ) },
             { key: 'test', title: '操作', render: c => (
-              <Button size="xs" variant="secondary" loading={busy === c.name} onClick={() => test(c.name)}>
-                发测试消息
-              </Button>
+              <div className="flex gap-1.5">
+                {/* M55-C：通讯录/群列表代理查询对话框 */}
+                <Button size="xs" variant="secondary" onClick={() => setDirChannel(c)}>
+                  通讯录
+                </Button>
+                <Button size="xs" variant="secondary" loading={busy === c.name} onClick={() => test(c.name)}>
+                  发测试消息
+                </Button>
+              </div>
             ) },
           ]}
           empty="IM 渠道接入后，群内 @机器人 即可对话（webhook 回调 → 智能体 → 群消息回复）"
@@ -704,6 +846,9 @@ function ImTab() {
           </div>
         </div>
       </DialogContent>
+
+      {/* M55-C 通讯录/群列表代理查询（按渠道凭据代发平台 API） */}
+      <ImDirectoryDialog channel={dirChannel} onClose={() => setDirChannel(null)} />
     </div>
   )
 }

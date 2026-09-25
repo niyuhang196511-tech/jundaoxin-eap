@@ -425,12 +425,16 @@ export const workflowVersionsApi = {
   saveDraft: (name: string, note: string) =>
     api<{ id: number; version: number; state: string }>(
       'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions`, { note }),
-  publish: (name: string, versionId: number, env: WfEnv) =>
+  // M55-E：confirm 省略或 false = 不带确认字段；环境保护 require_confirm 规则命中时
+  // 首发会 428 EAP-3011，调用方确认后带 confirm=true 重发即过
+  publish: (name: string, versionId: number, env: WfEnv, confirm?: boolean) =>
     api<{ id: number; version: number; env: WfEnv; state: string }>(
-      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/publish`, { env }),
-  rollback: (name: string, versionId: number, env: WfEnv) =>
+      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/publish`,
+      confirm ? { env, confirm: true } : { env }),
+  rollback: (name: string, versionId: number, env: WfEnv, confirm?: boolean) =>
     api<{ id: number; version: number; env: WfEnv; state: string }>(
-      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/rollback`, { env }),
+      'POST', `/api/v1/workflows/${encodeURIComponent(name)}/versions/${versionId}/rollback`,
+      confirm ? { env, confirm: true } : { env }),
 }
 
 /* ---------- 影子流量（M44-A 在线评测） + 人工抽检（M44-B） ---------- */
@@ -704,4 +708,50 @@ export const toolsApi = {
   /** 平台工具目录（内置 + 工作流 + MCP 桥接）：策略工具白名单 / 沙箱清单 chips 数据源 */
   list: () => api<{ name: string; description: string; origin?: string }[]>(
     'GET', '/api/v1/extensions/tools'),
+}
+
+/* ---------- IM 渠道通讯录/群列表代理查询（M55-C，admin） ---------- */
+
+// type 别名（非 interface）：携带隐式索引签名，满足 Table 泛型 Record<string, unknown> 约束
+export type ImDirectoryUser = {
+  user_id: string
+  name: string
+  department_ids: string[]
+  email?: string  // 平台字段权限缺失时如实省略
+  mobile?: string
+}
+
+export type ImDirectoryChat = {
+  chat_id: string
+  name: string
+}
+
+export type ImDirectoryPage<T> = { items: T[]; next_page_token: string }
+
+export const imApi = {
+  /** 通讯录用户代理查询：按渠道应用级凭据代发平台通讯录 API（keyword 为页内过滤，
+   * 三平台列表 API 无服务端关键字）。缺凭据 400 / 渠道不存在 404 / 上游错误 502
+   * （detail 为脱敏摘要，toast 透传）。真实平台联调=L3 外部条件 */
+  directoryUsers: (
+    name: string,
+    params: { department_id?: string; keyword?: string; page_size?: number; page_token?: string } = {},
+  ) => {
+    const q = new URLSearchParams()
+    if (params.department_id) q.set('department_id', params.department_id)
+    if (params.keyword) q.set('keyword', params.keyword)
+    if (params.page_size !== undefined) q.set('page_size', String(params.page_size))
+    if (params.page_token) q.set('page_token', params.page_token)
+    const qs = q.toString()
+    return api<ImDirectoryPage<ImDirectoryUser>>(
+      'GET', `/api/v1/im/channels/${encodeURIComponent(name)}/directory/users${qs ? `?${qs}` : ''}`)
+  },
+  /** 群列表代理查询（飞书 im/v1/chats / 钉钉 chat/list / 企微 appchat/list 同形态归一） */
+  directoryChats: (name: string, params: { page_size?: number; page_token?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.page_size !== undefined) q.set('page_size', String(params.page_size))
+    if (params.page_token) q.set('page_token', params.page_token)
+    const qs = q.toString()
+    return api<ImDirectoryPage<ImDirectoryChat>>(
+      'GET', `/api/v1/im/channels/${encodeURIComponent(name)}/directory/chats${qs ? `?${qs}` : ''}`)
+  },
 }
