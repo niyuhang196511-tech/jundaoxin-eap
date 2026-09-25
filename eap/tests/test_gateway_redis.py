@@ -600,6 +600,51 @@ def test_idempotency_inflight_cross_replica_waits_and_replays(gw_settings, monke
 
 
 @requires_redis
+def test_idempotency_probe_failure_does_not_take_over(gw_settings, redis_url, monkeypatch):
+    """M55：探测失败（None）不得视同「标记不存在」接管执行——重复执行副作用比
+    等到 deadline 出 409 更违背幂等语义。反向自证：_redis_inflight_exists 抛异常时
+    follower 轮询到 deadline → 409，next_b 永不执行（修复前会误接管 calls.b=1）。"""
+    from eap.observability import gateway
+
+    monkeypatch.setattr(gateway, "_IDEM_INFLIGHT_WAIT_S", 0.4)
+    monkeypatch.setattr(gateway, "_IDEM_INFLIGHT_POLL_S", 0.03)
+    mw_a = gateway.IdempotencyMiddleware(app=None)
+    mw_b = gateway.IdempotencyMiddleware(app=None)
+    key = uuid.uuid4().hex
+    calls = {"a": 0, "b": 0}
+    release = asyncio.Event()
+
+    async def slow_a(request: Request) -> JSONResponse:
+        calls["a"] += 1
+        await release.wait()
+        return JSONResponse({"exec": "a"})
+
+    async def next_b(request: Request) -> JSONResponse:
+        calls["b"] += 1  # 修复前：探测异常被吞成「标记不存在」→ 误接管执行
+        return JSONResponse({"exec": "b"})
+
+    async def send(mw, call_next):
+        return await mw.dispatch(
+            Request(_scope(path="/api/v1/x", headers=[("idempotency-key", key)])), call_next)
+
+    async def scenario():
+        ta = asyncio.create_task(send(mw_a, slow_a))
+        assert await _poll_inflight_marked(redis_url, key), "A 应已抢到在途标记"
+        # B 的 exists 探测全程失败（模拟 src 内部异常被吞后的 None 三态）——
+        # fail-safe：不接管，等 deadline 409
+        async def broken_exists(key_arg):
+            return None  # None = 探测失败（src 层异常已吞；True/False 才是确定结论）
+        monkeypatch.setattr(mw_b, "_redis_inflight_exists", broken_exists)
+        rb = await send(mw_b, next_b)
+        assert rb.status_code == 409, "探测失败应轮询到 deadline 而非误接管"
+        release.set()
+        await ta
+        assert calls == {"a": 1, "b": 0}, "探测失败不得触发重复执行"
+
+    asyncio.run(scenario())
+
+
+@requires_redis
 def test_idempotency_inflight_timeout_409_then_replay(gw_settings, redis_url, monkeypatch):
     """首次执行超过等待上限：后到者 409+Retry-After（宁可短暂拒绝不重复执行副作用）；完成后重试重放。
 
