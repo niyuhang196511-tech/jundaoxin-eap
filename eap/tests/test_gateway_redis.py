@@ -600,6 +600,46 @@ def test_idempotency_inflight_cross_replica_waits_and_replays(gw_settings, monke
 
 
 @requires_redis
+def test_shared_pool_reuses_client_per_loop(gw_settings, redis_url, monkeypatch):
+    """M56 连接池共享：同循环同 (url, 预算) 返回同一客户端实例（池复用）；
+    超时预算变化取新池（M54-A 测试常数 patch 生效的前提）；跨循环各自成池。
+    并做一次真实操作冒烟证明共享客户端功能等价。"""
+    import asyncio
+
+    from eap.observability import gateway
+
+    # 同步上下文：工厂不缓存每次新建（fallback 语义文档化）
+    assert gateway._aioredis_client(redis_url) is not gateway._aioredis_client(redis_url)
+
+    async def scenario():
+        ca = gateway._aioredis_client(redis_url)
+        cb = gateway._aioredis_client(redis_url)
+        assert ca is cb, "同循环同 (url, 预算) 必须复用同一客户端实例（池共享）"
+        monkeypatch.setattr(gateway, "_REDIS_SOCK_TIMEOUT_S", 2.5)
+        assert gateway._aioredis_client(redis_url) is not ca, "预算常数变化应取新池（M54-A 测试 patch 生效前提）"
+        # 功能冒烟：共享客户端真实 SET/GET/DEL（操作后连接归池，不 aclose）
+        await ca.set("eap:gw:poolsmoke", "ok", ex=30)
+        assert await ca.get("eap:gw:poolsmoke") == "ok"
+        await ca.delete("eap:gw:poolsmoke")
+        return id(asyncio.get_running_loop()), ca
+
+    loop_id, ca = asyncio.run(scenario())
+
+    async def other_loop():
+        return gateway._aioredis_client(redis_url), id(asyncio.get_running_loop())
+    cb_other, other_id = asyncio.run(other_loop())
+    assert other_id != loop_id and cb_other is not ca, "跨 asyncio.run 循环各自成池（连接绑定循环）"
+
+    # 功能冒烟：共享客户端真实 SET/GET/DEL（操作后连接归池，不 aclose）
+    async def smoke():
+        r = gateway._aioredis_client(redis_url)
+        await r.set("eap:gw:poolsmoke", "ok", ex=30)
+        assert await r.get("eap:gw:poolsmoke") == "ok"
+        await r.delete("eap:gw:poolsmoke")
+    asyncio.run(smoke())
+
+
+@requires_redis
 def test_idempotency_probe_failure_does_not_take_over(gw_settings, redis_url, monkeypatch):
     """M55：探测失败（None）不得视同「标记不存在」接管执行——重复执行副作用比
     等到 deadline 出 409 更违背幂等语义。反向自证：_redis_inflight_exists 抛异常时

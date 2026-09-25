@@ -74,12 +74,40 @@ def _warn_degraded(mechanism: str, exc: Exception) -> None:
                    mechanism, exc)
 
 
+_ACACHE: dict[tuple[str, float, int], object] = {}
+
+
 def _aioredis_client(url: str):
-    """异步 Redis 客户端统一工厂：短超时 + decode_responses（不可达时快速抛错走回退）。"""
+    """异步 Redis 客户端统一工厂（M56 连接池共享）：短超时 + decode_responses。
+
+    redis-py 的 ``from_url`` 每次调用都新建 ConnectionPool——原实现每请求 2+ 次
+    完整 TCP 建连/销毁（限流进出/幂等标记读写），高 QPS 下连接开销显著。改为按
+    ``(url, 超时预算, running loop)`` 缓存客户端实例，连接随池复用：
+    - key 含超时：测试 monkeypatch 预算常数（M54-A 加固）后取新池，常数生效；
+    - key 含 running loop：asyncio 连接绑定创建时的循环，跨循环复用旧 socket
+      会报 attached to a different loop——每个 asyncio.run（测试）/主循环（生产）
+      各自成池；生产主循环恒定=全程单池；
+    - 调用方**不再 aclose**（共享实例关池会影响并发使用者），连接用完归还池；
+    - 进程退出由 OS 回收，与原每次 aclose 的退出语义无差别。
+    不可达时连接仍惰性建立并抛错走既有回退，失败语义不变。
+    """
+    import asyncio
     import redis.asyncio as aioredis
 
-    return aioredis.from_url(url, decode_responses=True, socket_timeout=_REDIS_SOCK_TIMEOUT_S,
-                             socket_connect_timeout=_REDIS_SOCK_TIMEOUT_S)
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:  # 同步上下文（测试便利形态）：asyncio 客户端无法操作，不缓存每次新建
+        return aioredis.from_url(url, decode_responses=True,
+                                 socket_timeout=_REDIS_SOCK_TIMEOUT_S,
+                                 socket_connect_timeout=_REDIS_SOCK_TIMEOUT_S)
+    key = (url, _REDIS_SOCK_TIMEOUT_S, loop_id)
+    client = _ACACHE.get(key)
+    if client is None:
+        client = aioredis.from_url(url, decode_responses=True,
+                                   socket_timeout=_REDIS_SOCK_TIMEOUT_S,
+                                   socket_connect_timeout=_REDIS_SOCK_TIMEOUT_S)
+        _ACACHE[key] = client
+    return client
 
 
 def _concurrency_ttl_s() -> int:
@@ -259,18 +287,15 @@ class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):
             return None
         key = f"eap:gw:conc:{cred}"
         try:
-            r = _aioredis_client(url)
-            try:
-                pipe = r.pipeline(transaction=True)
-                pipe.incr(key)
-                pipe.expire(key, _concurrency_ttl_s())  # 每次进出场续期：有流量期间键不失效
-                count = int((await pipe.execute())[0])
-                if count > limit:
-                    await r.decr(key)  # 超限回滚：被拒请求不占槽
-                    return False
-                return True
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）：连接复用，不 aclose
+            pipe = r.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, _concurrency_ttl_s())  # 每次进出场续期：有流量期间键不失效
+            count = int((await pipe.execute())[0])
+            if count > limit:
+                await r.decr(key)  # 超限回滚：被拒请求不占槽
+                return False
+            return True
         except Exception as e:
             _warn_degraded("concurrency", e)
             return None
@@ -282,16 +307,13 @@ class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):
             return
         key = f"eap:gw:conc:{cred}"
         try:
-            r = _aioredis_client(url)
-            try:
-                pipe = r.pipeline(transaction=True)
-                pipe.decr(key)
-                pipe.expire(key, _concurrency_ttl_s())
-                val = int((await pipe.execute())[0])
-                if val < 0:
-                    await r.set(key, 0, ex=_concurrency_ttl_s())
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            pipe = r.pipeline(transaction=True)
+            pipe.decr(key)
+            pipe.expire(key, _concurrency_ttl_s())
+            val = int((await pipe.execute())[0])
+            if val < 0:
+                await r.set(key, 0, ex=_concurrency_ttl_s())
         except Exception as e:
             _warn_degraded("concurrency", e)  # 残留计数等 TTL 自愈（fail-open：可能漏拒不误拒）
 
@@ -403,13 +425,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if not url:
             return None
         try:
-            r = _aioredis_client(url)
-            try:
-                got = await r.set(f"eap:idem:inflight:{key}", "1", nx=True,
-                                  ex=_idem_inflight_ttl_s())
-                return bool(got)
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            got = await r.set(f"eap:idem:inflight:{key}", "1", nx=True,
+                              ex=_idem_inflight_ttl_s())
+            return bool(got)
         except Exception as e:
             _warn_degraded("idempotency", e)
             return None
@@ -426,11 +445,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if not url:
             return False
         try:
-            r = _aioredis_client(url)
-            try:
-                return bool(await r.exists(f"eap:idem:inflight:{key}"))
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            return bool(await r.exists(f"eap:idem:inflight:{key}"))
         except Exception:
             return None
 
@@ -439,11 +455,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if not url:
             return
         try:
-            r = _aioredis_client(url)
-            try:
-                await r.delete(f"eap:idem:inflight:{key}")
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            await r.delete(f"eap:idem:inflight:{key}")
         except Exception as e:
             _warn_degraded("idempotency", e)  # 残留标记等 TTL 过期（期间后到者 409）
 
@@ -504,11 +517,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             import base64
             import json as _json
 
-            r = _aioredis_client(url)
-            try:
-                raw = await r.get(f"eap:idem:{key}")
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            raw = await r.get(f"eap:idem:{key}")
             if raw is None:
                 return None
             data = _json.loads(raw)
@@ -527,13 +537,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
 
             _expires_at, status, body, content_type = entry
             ttl = max(1, int(get_settings().gateway_idempotency_ttl_s))
-            r = _aioredis_client(url)
-            try:
-                await r.set(f"eap:idem:{key}", _json.dumps({
-                    "status": status, "body": base64.b64encode(body).decode(),
-                    "content_type": content_type}), ex=ttl)
-            finally:
-                await r.aclose()
+            r = _aioredis_client(url)  # 共享池（M56）
+            await r.set(f"eap:idem:{key}", _json.dumps({
+                "status": status, "body": base64.b64encode(body).decode(),
+                "content_type": content_type}), ex=ttl)
         except Exception:
             pass  # Redis 抖动不阻断主流程（进程内存储已生效）
 
