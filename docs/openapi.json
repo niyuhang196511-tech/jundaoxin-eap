@@ -12393,6 +12393,67 @@
         "summary": "Get Workflow Version"
       }
     },
+    "/api/v1/workflows/{name}/versions/{version_id}/diff": {
+      "get": {
+        "description": "版本与另一版本或当前草稿的 DSL 结构化差异（M54-B，画布版本对比数据源）。\n\n- against 取值：\"draft\" = 与 WorkflowRecord.dsl（画布当前保存的 DSL）比较，to 侧无版本\n  元信息（to_meta=null）；数字 = 另一版本记录 id（与 GET /{name}/versions 列表 id 同义）\n- 方向语义：from = {version_id}，to = against；changes 仅报告不同项（形态对齐既有\n  diff/{version_b} 端点与 agent diff 端点）：steps/edges 按节点/边 id 对齐，\n  逐字段比较 type/system/prompt_name/tool_name/ui_schema 等全部字段\n- 鉴权对齐既有只读版本端点（版本列表/详情/diff 均无需 admin，仅 router 级租户+API key）\n- 只读端点不落审计（平台惯例：仅写操作记审计，与 GET /{name}/versions 一致）\n- 不做语义级移动检测：同 id 的步骤/边任一字段不同即记「修改」；节点位移（position\n  变化）属普通字段差异，不作特殊判定",
+        "operationId": "diff_workflow_version_against_api_v1_workflows__name__versions__version_id__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "against",
+            "required": true,
+            "schema": {
+              "title": "Against",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Diff Workflow Version Against"
+      }
+    },
     "/api/v1/workflows/{name}/versions/{version_id}/publish": {
       "post": {
         "description": "发布到环境：DSL 校验 → 同 env 旧版归档；env=prod 同步生产指针并热更新注册。",
