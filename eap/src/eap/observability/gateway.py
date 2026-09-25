@@ -1,8 +1,12 @@
-"""API Gateway（M31 任务组 F / M49-B）：并发上限 / 请求体上限 / 超时 / 幂等键 / 熔断器。
+"""API Gateway（M31 任务组 F / M49-B / M55-B）：并发上限 / 请求体上限 / 超时 / 幂等键 / 熔断器。
 
 三个 BaseHTTPMiddleware + 一个独立熔断器（供 modelhub 路由联动）：
 
-- RequestSizeLimitMiddleware：Content-Length 超过 ``EAP_GATEWAY_MAX_BODY_BYTES`` → 413（0=关闭）
+- RequestSizeLimitMiddleware：Content-Length 超过 ``EAP_GATEWAY_MAX_BODY_BYTES`` → 413（0=关闭）；
+  chunked（无 Content-Length）请求体按 ``EAP_GATEWAY_CHUNKED_MODE`` 策略处理（proxy=信任
+  前置反代收口 / reject=读体前 411），缺省 proxy 保持现状——长度界定信任前置反代收口
+  （deploy/nginx.conf 的 client_max_body_size 对 chunked 请求体同样生效），运维契约见
+  docs/11-production-runbook.md §9.7
 - ConcurrencyLimitMiddleware：按凭证在途请求超过 ``EAP_GATEWAY_MAX_CONCURRENCY`` → 429+Retry-After
   （0=关闭）；内含非流式请求超时（``EAP_GATEWAY_TIMEOUT_S``，0=关闭）→ 504
 - IdempotencyMiddleware：``/api/v1/*`` 写方法 + ``Idempotency-Key`` 头 → 同键重放首次响应
@@ -124,10 +128,63 @@ def _reject(status: int, reason: str, detail: str, headers: dict[str, str] | Non
     return JSONResponse({"detail": detail}, status_code=status, headers=headers)
 
 
+# ---------- chunked（无 Content-Length）请求体策略（M55-B） ----------
+
+_CHUNKED_MODES = ("proxy", "reject")
+_CHUNKED_MODE_WARNED: set[str] = set()  # 非法配置告警去重（每进程每个非法值一次）
+_CHUNKED_CONTRACT_LOGGED = False  # 策略契约启动日志去重（每进程一次）
+
+
+def _log_chunked_contract(mode: str) -> None:
+    """策略契约启动日志（进程内一次）：proxy 模式写明「平台自身不拦、信任前置反代收口」的运维契约。"""
+    global _CHUNKED_CONTRACT_LOGGED
+    if _CHUNKED_CONTRACT_LOGGED:
+        return
+    _CHUNKED_CONTRACT_LOGGED = True
+    if mode == "reject":
+        logger.info("网关 chunked 请求体策略=reject：Transfer-Encoding: chunked 请求在读体前直接 411 "
+                    "Length Required（不依赖前置反代收口）")
+    else:
+        logger.info("网关 chunked 请求体策略=proxy（缺省）：无 Content-Length 的请求体不做长度校验，"
+                    "长度界定信任前置反代收口——前置 nginx 必须设置 client_max_body_size"
+                    "（deploy/nginx.conf 已设，自建反代须复制）；无法前置收口的场景改 "
+                    "EAP_GATEWAY_CHUNKED_MODE=reject 由平台 411 拒绝")
+
+
+def _chunked_mode() -> str:
+    """读 chunked 策略配置：大小写/空白归一；非法值回落 proxy 并告警一次（对齐 audit_export_limit 非法回落惯例）。"""
+    raw = (get_settings().gateway_chunked_mode or "").strip().lower()
+    if raw in _CHUNKED_MODES:
+        _log_chunked_contract(raw)
+        return raw
+    if raw and raw not in _CHUNKED_MODE_WARNED:
+        _CHUNKED_MODE_WARNED.add(raw)
+        logger.warning("EAP_GATEWAY_CHUNKED_MODE=%s 非法（可选 proxy/reject），回落 proxy——"
+                       "chunked 请求体不做长度校验（信任前置反代收口），请尽快修正配置", raw)
+    return "proxy"
+
+
+def _is_chunked(request: Request) -> bool:
+    """ASGI scope 头判 chunked：Transfer-Encoding 含 chunked 即视为无长度界定请求体。
+
+    HTTP 语义（RFC 9112 §6.1）：Transfer-Encoding 与 Content-Length 同时出现时
+    TE 优先——按 chunked 处理（防请求走私向量，reject 模式下两类请求都被拒）。
+    只看请求体方向：SSE/流式是响应方向，不受本判定影响。
+    """
+    return "chunked" in request.headers.get("transfer-encoding", "").lower()
+
+
 class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
     """请求体上限（外层）：Content-Length 超限 → 413（默认 0=关闭）。
 
-    仅校验 Content-Length 头（chunked 无该头的场景不拦——uvicorn 生产前置反代统一收口）。
+    chunked（无 Content-Length）请求体按 ``EAP_GATEWAY_CHUNKED_MODE`` 处理（M55-B）：
+    - proxy（缺省）：不拦直通——长度界定信任前置反代收口（nginx 对 chunked 请求体
+      同样按 client_max_body_size 截断），本层对该场景无防线；启动日志写明该运维契约；
+    - reject：带 Transfer-Encoding: chunked 的请求直接 411 Length Required，且拒绝
+      发生在读体之前（不调用 call_next 即不产生任何请求体消费，无慢速读体攻击面）。
+      错误码选 411 而非 413：拒绝原因是「缺长度界定」而非「体过大」——无 Content-Length
+      时无法与上限比较，413 反而暗示已判定超限；411 语义最准（服务端要求显式长度界定）。
+    错误码格式与既有 413 同源（EAP-4xxx 于 detail + eap_gateway_rejected_total 计数）。
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -136,6 +193,10 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
             content_length = request.headers.get("content-length", "")
             if content_length.isdigit() and int(content_length) > max_bytes:
                 return _reject(413, "body_size", f"EAP-413 请求体超过上限 {max_bytes} 字节")
+        if _chunked_mode() == "reject" and _is_chunked(request):
+            return _reject(411, "chunked_body",
+                           "EAP-411 缺少 Content-Length（chunked 请求体）：网关要求显式长度界定"
+                           "（EAP_GATEWAY_CHUNKED_MODE=reject），请携带 Content-Length 或改用 proxy 模式")
         return await call_next(request)
 
 
@@ -313,8 +374,11 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             remote = await self._redis_get(key)
             if remote is not None:
                 return self._replay(remote)
-            if not await self._redis_inflight_exists(key):
-                break  # 首次执行已退出且未存结果（失败/崩溃清理）→ 尝试接管
+            exists = await self._redis_inflight_exists(key)
+            if exists is False:
+                break  # 确认首次执行已退出且未存结果（失败/崩溃清理）→ 尝试接管
+            # exists is None（探测失败）：不接管，继续轮询——误接管=重复执行副作用，
+            # 比等到 deadline 出 409 更违背幂等语义（M55：run #36 前后偶发红实证）
             await asyncio.sleep(_IDEM_INFLIGHT_POLL_S)
         else:
             return self._idem_conflict()
@@ -350,7 +414,14 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             _warn_degraded("idempotency", e)
             return None
 
-    async def _redis_inflight_exists(self, key: str) -> bool:
+    async def _redis_inflight_exists(self, key: str) -> bool | None:
+        """标记存在性三态：True/False 确定结论；None = 探测失败（异常/超时）。
+
+        M55：探测失败不得视同「标记不存在」——follower 据此 break 接管会造成
+        高负载下的重复执行（首次执行仍在途却被误判退出，违背幂等语义；
+        run #36 前后全量负载下偶发红的实证）。fail-safe 方向 = 继续轮询等
+        deadline，宁可 409 短暂拒绝不容忍副作用重复执行（与 409 选型同旨）。
+        """
         url = get_settings().redis_url
         if not url:
             return False
@@ -361,7 +432,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             finally:
                 await r.aclose()
         except Exception:
-            return False  # 探测失败视同标记不存在 → 走接管分支（其降级由 mark 自行处理）
+            return None
 
     async def _redis_clear_inflight(self, key: str) -> None:
         url = get_settings().redis_url

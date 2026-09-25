@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # 幂等无需总开关——仅带 Idempotency-Key 头的写请求才进入幂等通道
     gateway_max_concurrency: int = 0  # 每凭证在途请求上限（0=关闭）
     gateway_max_body_bytes: int = 10 * 1024 * 1024  # 请求体上限字节（0=关闭；默认 10MB）
+    # chunked（无 Content-Length）请求体策略（M55-B）：proxy=信任前置反代收口（缺省，
+    # 向后兼容——运维契约见 deploy/nginx.conf 与 docs/11 §9.7）；reject=网关在读体前
+    # 直接 411 Length Required。非法值回落 proxy 并告警一次（对齐 audit_export_limit 非法回落惯例）
+    gateway_chunked_mode: str = "proxy"
     gateway_timeout_s: float = 0.0  # 非流式请求超时秒（0=关闭；流式路径始终豁免）
     gateway_cb_window_s: float = 60.0  # 熔断滑动窗口（秒）
     gateway_cb_rate: float = 0.5  # 熔断失败率阈值（窗口内失败占比 ≥ 该值跳闸）
