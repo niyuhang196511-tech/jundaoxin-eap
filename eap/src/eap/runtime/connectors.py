@@ -246,6 +246,11 @@ def _resolve_pg_dsn(database: str) -> str:
         raise ValueError(
             f"EAP-7003 环境变量 {var} 未设置：postgresql 连接器 DSN 经 env:{var} 引用注入"
             "（在部署环境配置该变量后重启生效；URL 或 key=value 串均可）")
+    # 高频误用容错（M56）：SQLAlchemy URL 形态（postgresql+psycopg://…）直接喂给
+    # psycopg 会解析异常——剥掉 driver 段归一为原生 DSN（psycopg 3 官方即接受
+    # postgresql:// 与 key=value 两种形态）
+    if "+psycopg" in dsn:
+        dsn = dsn.replace("postgresql+psycopg://", "postgresql://")
     return dsn
 
 
