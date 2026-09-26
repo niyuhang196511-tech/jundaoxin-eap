@@ -23,7 +23,7 @@
 | 快照日期 | 2026-09-25 |
 | 测试基线 | **SQLite 559/569 passed + 21~35 skipped**（fresh；skip 数随 EAP_M55_PG_DSN 活体守卫浮动）+ **同库脏复跑两连遍全绿**（可重入纪律保持） + MCP/Redis 集成 6 passed + **PG 实测 579 passed + 15 skipped（fresh）+ PG 同库全量复跑全绿（含活体并发用例 4 条真实执行）** + **ruff F/E9 全树零错** + 控制台 typecheck/vitest 14 条 + **E2E（Playwright）12 条全绿** + check_docs/check_observability（8 PASS）绿（openapi 无接口变化未重导出）；CI run 待推送后确认 |
 | 下一主线 | M55 登记②冷启动竞态已销（M57）；余量见「M57 遗留登记」行；外部条件项（⑦-Knowledge 用户主体目录/SDK 发布/seal/i18n 全量/移动端/alertmanager 真实渠道/L 组）不变；Mimosa git-gate 门禁遗留定性项见 M52 遗留登记⑥ |
-| 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ **docs/16（v0.9.0，方法=逐线审查+继承判定+自动化验证，建议补跑 seal）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定 |
+| 审计状态 | docs/12（v0.5）/ docs/13（v0.6）/ docs/15（v0.7）/ docs/16（v0.9.0）/ **docs/17（v1.0.x=批次 17~23/M51~M57，方法=三路并发审计：安全面逐线+继承判定与真修复验证+契约与一致性字节级比对；结论=无新高危、收版门禁通过；2 项【中】登记候选=worker 引导缺口补齐/幂等 mark-read 两态严格化 + 11 项低危/信息项）**；遗留 5 个 MinerU SSRF 维持「补偿控制在位、可接受」判定（parsers.py 范围内零改动核实）；seal 补跑通道已可用（Mimosa MCP），建议对 HEAD 补跑全库 deep 并回写 docs/17 |
 
 ---
 
