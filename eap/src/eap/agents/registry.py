@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -218,19 +219,36 @@ class AgentRegistry:
             await self.start_agent(name)
 
     def _persist(self, agent: RegisteredAgent) -> None:
+        """upsert 语义（M56 冷启动竞态防护）：多副本并发首启时两个副本可能同时通过
+        check-then-insert 的首查（均为 None）再同时 INSERT——一方必撞 agents.name 唯一
+        约束 IntegrityError。捕获后 rollback 重查：对方副本已创建记录，走 update 分支
+        （两副本写入同一 manifest/source，结果等价）。"""
         with SessionLocal() as db:
-            record = db.scalar(select(AgentRecord).where(AgentRecord.name == agent.manifest.name))
-            if record is None:
-                record = AgentRecord(name=agent.manifest.name)
-                db.add(record)
-            record.version = agent.manifest.version
-            record.description = agent.manifest.description
-            record.manifest = agent.manifest.model_dump()
-            record.source = agent.source
-            record.module = agent.module
-            record.status = agent.status
-            record.health = agent.health
-            db.commit()
+            try:
+                record = db.scalar(select(AgentRecord).where(AgentRecord.name == agent.manifest.name))
+                if record is None:
+                    record = AgentRecord(name=agent.manifest.name)
+                    db.add(record)
+                record.version = agent.manifest.version
+                record.description = agent.manifest.description
+                record.manifest = agent.manifest.model_dump()
+                record.source = agent.source
+                record.module = agent.module
+                record.status = agent.status
+                record.health = agent.health
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                record = db.scalar(select(AgentRecord).where(AgentRecord.name == agent.manifest.name))
+                assert record is not None, "IntegrityError 后重查必命中对方副本已建记录"
+                record.version = agent.manifest.version
+                record.description = agent.manifest.description
+                record.manifest = agent.manifest.model_dump()
+                record.source = agent.source
+                record.module = agent.module
+                record.status = agent.status
+                record.health = agent.health
+                db.commit()
 
     # ---------- 调用 ----------
 

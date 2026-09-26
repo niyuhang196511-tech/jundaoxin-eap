@@ -5,13 +5,28 @@ from __future__ import annotations
 import sys
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .models import ApiKey, ModelRecord, Tenant
 
 
-def run(engine) -> None:  # noqa: C901
+def run(engine) -> None:
+    """种子幂等入口（M56）：多副本并发首启的冷启动竞态防护。
+
+    两个 API 副本同瞬首启时，check-then-insert 在唯一约束（agents/tenants/... name）
+    上可能撞 IntegrityError——副本各自事务回滚进度不同。种子本身按名幂等（先查后插，
+    已存在即跳过），故整体重跑一遍即收敛：第一遍撞约束 → rollback → 第二遍时对方
+    已提交的部分全部走「已存在」分支。第二次仍撞 = 非幂等种子缺陷，直接抛出。
+    """
+    try:
+        _run_once(engine)
+    except IntegrityError:
+        _run_once(engine)  # 恰好重跑一次（幂等保证收敛；再撞即缺陷）
+
+
+def _run_once(engine) -> None:  # noqa: C901
     s = get_settings()
     with Session(engine) as db:
         tenant = db.scalar(select(Tenant).where(Tenant.name == s.dev_tenant))
