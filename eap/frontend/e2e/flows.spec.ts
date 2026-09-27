@@ -316,15 +316,18 @@ test.describe.serial('确认流第二批（M62）：Knowledge 文档删除 / Mod
     expect(docId).toBeTruthy()
   })
 
-  test('Models 模型删除：LoRA/模型行删除按钮 → ConfirmDialog → 确认后模型消失', async ({ page, request }) => {
-    // API 预置：mock provider 模型（非 openai_compat 免 base_url 要求）
-    const res = await request.post(`${API}/api/v1/models`, {
-      headers: AUTH, data: { name: MODEL, capabilities: ['chat'], provider: 'mock' },
+  test('LoRA adapter 删除：登记 → 页签行删除按钮 → ConfirmDialog「删除 adapter」→ 确认后消失', async ({ page, request }) => {
+    // 「删除 adapter」确认流属 LoRA 适配器页签（LoraTab）——主表模型只有启用/停用
+    // （首版误写主表模型删除，CI 全新库无 LoRA 行→选择器超时暴露）
+    const res = await request.post(`${API}/api/v1/lora`, {
+      headers: AUTH,
+      data: { name: MODEL, base_model: 'e2e-base-model', source_path: '/gpu/adapter/e2e' },
     })
     expect(res.ok()).toBeTruthy()
 
     await login(page)
     await page.goto('/models')
+    await page.getByRole('tab', { name: 'LoRA 适配器' }).click()
     const row = page.locator('tr', { hasText: MODEL }).first()
     await expect(row).toBeVisible({ timeout: 15_000 })
     await row.getByRole('button', { name: '删除' }).click()
