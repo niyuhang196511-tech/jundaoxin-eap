@@ -238,3 +238,43 @@ test.describe.serial('工作流版本 diff 与 env-protection 428（M54-B/M55-E�
     await request.delete(`${API}/api/v1/workflows/${WF}`, { headers: AUTH })
   })
 })
+
+
+test.describe.serial('HITL 审批确认流（M61，M51-B 金标准范本本体）', () => {
+  const RUN = `e2e-hitl-${Date.now().toString(36)}`
+  let taskId = ''
+
+  test('HITL 任务进入 WAITING_APPROVAL → Tasks 页批准 → ConfirmDialog → 任务继续', async ({ page, request }) => {
+    // API 预置：提交一个会挂起审批的 agent.hitl 任务（payload 对齐 evals 抽检同款形态）
+    // order-agent + 连接器下单工具 requires_approval=True → WAITING_HUMAN
+    // （形态对齐 tests/test_connectors.py:64 的既有离线断言）
+    const submit = await request.post(`${API}/api/v1/tasks`, {
+      headers: AUTH,
+      data: {
+        type: 'agent.hitl',
+        payload: { agent: 'order-agent', input: '帮我下一台 EAP 一体机' },
+      },
+    })
+    expect([200, 202]).toContain(submit.status())
+    taskId = (await submit.json()).task_id
+    expect(taskId).toBeTruthy()
+
+    await login(page)
+    await page.goto('/tasks')
+    // 任务行出现（前端列表轮询）——WAITING_HUMAN 态行含「待审批」徽标与 批准/否决 按钮
+    const row = page.locator('tr', { hasText: taskId.slice(0, 8) }).first()  // Tasks 表 ID 列只渲染前 8 位
+    await expect(row).toBeVisible({ timeout: 20_000 })
+    const approve = row.getByRole('button', { name: '批准' })
+    await expect(approve).toBeVisible({ timeout: 20_000 })
+    await approve.click()
+    // ConfirmDialog 金标准（M51-B 范本本体）：确认按钮驱动
+    const dialog = page.locator('[role="dialog"]')
+    await expect(dialog).toBeVisible()
+    // ConfirmDialog 确认按钮文案由 confirmLabel 注入（本流='批准'，见 Tasks.tsx）
+    await dialog.getByRole('button', { name: '批准' }).click()
+    // 审批提交后任务离开 WAITING_HUMAN（批准/否决按钮消失；执行完成或继续运行——
+    // 审批路径本身已验证；行内残留两条历史 WAITING_HUMAN 行属既有数据不受影响）
+    await expect(page.locator('tr', { hasText: taskId.slice(0, 8) }).first()).toBeVisible()
+    await expect(row.getByRole('button', { name: '批准' })).toHaveCount(0, { timeout: 20_000 })
+  })
+})
