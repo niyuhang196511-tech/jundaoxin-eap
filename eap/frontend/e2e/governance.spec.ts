@@ -15,13 +15,13 @@ async function login(page: import('@playwright/test').Page) {
 
 const NAME = `e2e-gate-${Date.now().toString(36)}`
 
-test('kind 下拉包含全部九种（含 M30/M33/M42-B 新增三种）', async ({ page }) => {
+test('kind 下拉包含全部十种（含 M30/M33/M42-B/M55-E 新增四种）', async ({ page }) => {
   await login(page)
   await page.goto('/gov')
   await page.getByRole('tab', { name: '策略' }).click()
   await page.getByRole('button', { name: '创建策略' }).click()
   for (const kind of ['tool-sandbox', 'a2a-delegate-allowlist', 'eval-gate',
-    'tool-allowlist', 'tool-risk-approval', 'agent-allowlist']) {
+    'tool-allowlist', 'tool-risk-approval', 'agent-allowlist', 'env-protection']) {
     await expect(page.locator('select option', { hasText: kind }).first()).toBeAttached()
   }
 })

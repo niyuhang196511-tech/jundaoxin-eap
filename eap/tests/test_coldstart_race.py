@@ -1,4 +1,4 @@
-"""M56 冷启动竞态防护回归：多副本并发首启的 check-then-insert 唯一约束竞态。
+"""M57 冷启动竞态防护回归：多副本并发首启的 check-then-insert 唯一约束竞态。
 
 M55-A 压测实证（docs/progress-plan.md M55 遗留登记）：两个 API 副本同瞬首启时，
 registry._persist 与 seed.run 的 check-then-insert 在唯一约束（agents/tenants/...

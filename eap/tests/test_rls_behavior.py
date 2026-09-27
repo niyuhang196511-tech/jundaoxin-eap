@@ -93,7 +93,7 @@ _INSERT_TRIGGER = sa_text(
     "INSERT INTO trigger_rules (name, tenant_id, source, event_type,"
     " target_type, target_name, input_mode, min_interval_s, enabled,"
     " created_at, updated_at) VALUES (:n, :t, 'event', :ev,"
-    " 'agent', 'faq', 'payload', 0, true, now(), now())")
+    " 'agent', 'faq-agent', 'payload', 0, true, now(), now())")
 _INSERT_HOOK = sa_text(
     "INSERT INTO webhook_endpoints (name, url, events, tenant_id, enabled,"
     " created_at, updated_at) VALUES (:n, 'https://probe.invalid/hook', :evs,"
@@ -530,7 +530,7 @@ def test_http_jwt_channel_rls_enforced_under_app_role(client, fake_idp_m51c, app
     r = client.post("/api/v1/triggers", headers=hdr_a, json={
         "name": _HTTP_TRIG_A, "tenant_id": tenant_a, "source": "event",
         "event_type": "rls.probe.none",  # 无害事件类型（不被引擎执行，同 fail-closed 探针先例）
-        "target_type": "agent", "target_name": "faq"})
+        "target_type": "agent", "target_name": "faq-agent"})
     assert r.status_code == 200, r.text
     r = client.get("/api/v1/triggers", headers=hdr_a)
     assert r.status_code == 200, r.text
@@ -564,7 +564,7 @@ def test_http_cross_tenant_write_blocked_by_rls(client, fake_idp_m51c, app_role_
     with pytest.raises(DBAPIError) as ei:
         client.post("/api/v1/triggers", headers=_jwt(_HTTP_TENANT_B_ID), json={
             "name": "rls-m51c-trig-x", "tenant_id": tenant_a, "source": "event",
-            "event_type": "rls.probe.none", "target_type": "agent", "target_name": "faq"})
+            "event_type": "rls.probe.none", "target_type": "agent", "target_name": "faq-agent"})
     assert "row-level security" in str(ei.value)
     with engine.connect() as conn:  # 零落库（跨租户写入被策略拒绝）
         assert conn.execute(sa_text(

@@ -79,12 +79,26 @@ def _view(rule: TriggerRuleRecord) -> dict:
             "created_at": str(rule.created_at), "updated_at": str(rule.updated_at)}
 
 
+def _validate_target(db: Session, target_type: str, target_name: str) -> None:
+    """目标存在性校验（M58，docs/17 审计 #5 闭环）：悬空规则每触发落 EAP-4004
+    审计噪音——创建/更新时即拦截。与连接器 DELETE 的 409 引用检查对称。"""
+    from ...models import AgentRecord, ConnectorRecord, WorkflowRecord
+
+    exists = {"agent": AgentRecord, "workflow": WorkflowRecord, "connector": ConnectorRecord}.get(target_type)
+    if exists is None:
+        return  # 未知 target_type 由字段约束/引擎侧负责，此处不重复校验
+    if db.scalar(select(exists).where(exists.name == target_name)) is None:
+        raise fastapi.HTTPException(
+            status_code=400, detail=f"EAP-4000 触发目标 {target_type}:{target_name} 不存在")
+
+
 def _validate(db: Session, body: TriggerCreate) -> None:
-    """来源语义校验：event 必填 event_type；cron 必填且合法；名称唯一。"""
+    """来源语义校验：event 必填 event_type；cron 必填且合法；名称唯一；目标存在（M58）。"""
     if db.scalar(select(TriggerRuleRecord).where(TriggerRuleRecord.name == body.name)):
         raise fastapi.HTTPException(status_code=409, detail=f"EAP-2002 触发器 {body.name} 已存在")
     if body.source == "event" and not body.event_type:
         raise fastapi.HTTPException(status_code=400, detail="EAP-4000 source=event 须指定 event_type")
+    _validate_target(db, body.target_type, body.target_name)
     if body.source == "cron":
         if not body.cron:
             raise fastapi.HTTPException(status_code=400, detail="EAP-4000 source=cron 须指定 cron 表达式")
@@ -148,6 +162,11 @@ async def patch_trigger(rule_id: int, body: TriggerPatch, request: fastapi.Reque
     if record is None:
         raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 触发器 {rule_id} 不存在")
     changes = {}
+    if (body.target_type is not None or body.target_name is not None) and (
+            body.target_type or record.target_type) and (
+            body.target_name or record.target_name):
+        _validate_target(db, body.target_type or record.target_type,
+                         body.target_name or record.target_name)  # M58：target 变更校验存在性
     for field, value in body.model_dump(exclude_unset=True, exclude_none=False).items():
         if value is None and field != "match" and field != "template":
             continue

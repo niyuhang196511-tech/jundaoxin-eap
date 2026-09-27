@@ -129,3 +129,69 @@ def test_worker_bootstraps_agent_registry(tmp_path):
     assert state == "COMPLETED", (
         f"独立 worker 应执行 agent.invoke 到 COMPLETED（修复前 FAILED：智能体未注册），"
         f"实际 {state}\nworker 日志:\n{log_path.read_text(errors='replace')[-2000:]}")
+
+
+def test_worker_executes_workflow_agent_task(tmp_path):
+    """M58 回归守卫（docs/17 审计【中】#1）：workflow-as-agent 任务在独立 worker 执行。
+
+    M55-A 的 bootstrap 修复只补了三步中的一步——独立 worker 缺
+    workflows_svc.load_enabled()（workflow-as-agent 注册进同一注册表），
+    HA 任务通道指向 workflow-as-agent 名会 FAILED「智能体 X 未注册」。
+    预置一条启用 DSL 工作流 + PENDING agent.invoke 任务（agent=工作流名）→
+    起 worker 子进程 → 断言 COMPLETED（修复前 FAILED）。
+    """
+    run = uuid.uuid4().hex[:8]
+    task_id = f"worker-wf-{run}"
+    wf_name = f"wf-m58-{run}"
+    db_path = (tmp_path / "wwf.db").as_posix()
+    env = os.environ.copy()
+    env.update({
+        "EAP_DB_URL": f"sqlite:///{db_path}",
+        "EAP_SKIP_MIGRATIONS": "1",
+        "EAP_WORKER_COUNT": "1",
+    })
+    env.pop("EAP_REDIS_URL", None)
+    setup_code = (
+        "from eap.db import init_db; init_db()\n"
+        "from eap.db import SessionLocal\n"
+        "from eap.models import TaskRecord, WorkflowRecord\n"
+        "from sqlalchemy import select\n"
+        "db = SessionLocal()\n"
+        f"dsl = {{'name': {wf_name!r}, 'version': '1.0.0', 'description': 'M58 worker 回归',\n"
+        "       'steps': [{'id': 'reply', 'type': 'llm', 'system': '你是助手', 'prompt_name': None, 'query_var': 'input'}]}\n"
+        f"db.add(WorkflowRecord(name={wf_name!r}, dsl=dsl, enabled=True))\n"
+        f"db.add(TaskRecord(id={task_id!r}, type='agent.invoke', state='PENDING',\n"
+        f"                  payload={{'agent': {wf_name!r}, 'input': 'workflow worker 回归'}}))\n"
+        "db.commit(); db.close()\n"
+        "print('seeded')")
+    setup = subprocess.run([sys.executable, "-c", setup_code],
+                           env=env, cwd=_ROOT, capture_output=True, text=True, timeout=120)
+    assert setup.returncode == 0, f"预置失败: {setup.stdout[-800:]} {setup.stderr[-800:]}"
+
+    log_path = tmp_path / "worker-wf.log"
+    with open(log_path, "wb") as log:
+        worker = subprocess.Popen([sys.executable, "-m", "eap.worker"], env=env, cwd=_ROOT,
+                                  stdout=log, stderr=subprocess.STDOUT)
+        try:
+            poll_code = (
+                "import sqlite3, sys, time\n"
+                f"con = sqlite3.connect({db_path!r}, timeout=10)\n"
+                "deadline = time.time() + 75\n"
+                "state = None\n"
+                "while time.time() < deadline:\n"
+                f"    row = con.execute('SELECT state FROM tasks WHERE id=?', ({task_id!r},)).fetchone()\n"
+                "    state = row[0] if row else None\n"
+                "    if state in ('COMPLETED', 'FAILED'):\n"
+                "        break\n"
+                "    time.sleep(0.4)\n"
+                "print(state or 'TIMEOUT')")
+            poll = subprocess.run([sys.executable, "-c", poll_code],
+                                  timeout=90, capture_output=True, text=True)
+            state = poll.stdout.strip().splitlines()[-1] if poll.stdout.strip() else "NO_OUTPUT"
+        finally:
+            worker.terminate()
+            worker.wait(timeout=15)
+    assert state == "COMPLETED", (
+        "独立 worker 应执行 workflow-as-agent 任务到 COMPLETED（M58 修复前 FAILED：智能体未注册），"
+        f"实际 {state} | worker 日志: {log_path.read_text(errors='replace')[-1500:]}")
+

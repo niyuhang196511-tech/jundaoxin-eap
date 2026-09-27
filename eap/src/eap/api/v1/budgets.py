@@ -66,13 +66,13 @@ def cost_report(tenant_id: int, days: int = 30, db: Session = fastapi.Depends(ge
 
 def _report_payload(db: Session, tenant_id: int, days: int) -> dict:
     """报表聚合（report 查询与 export 导出共用，M48-A）：since 语义 days 夹取 [1, 365]。"""
-    from datetime import datetime, timedelta
+    from datetime import timezone, datetime, timedelta
 
     from sqlalchemy import func
 
     from ...models import UsageRecord
 
-    since = datetime.utcnow() - timedelta(days=max(1, min(days, 365)))
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=max(1, min(days, 365)))
     by_model = db.execute(
         select(UsageRecord.model,
                func.count(UsageRecord.id),

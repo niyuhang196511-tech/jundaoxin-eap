@@ -17,7 +17,7 @@ def key_hash(plain: str) -> str:
 
 def revoke_token(token: str, expires_at, reason: str = "") -> None:
     """吊销 JWT：存 token 哈希 + 原过期时刻（到点后黑名单条目失去意义，可被惰性清理）。"""
-    from datetime import datetime
+    from datetime import timezone, datetime
 
 
     from .models import RevokedToken
@@ -27,12 +27,12 @@ def revoke_token(token: str, expires_at, reason: str = "") -> None:
 
     with SessionLocal() as db:
         db.merge(RevokedToken(token_hash=key_hash(token), expires_at=expires_at,
-                              revoked_at=datetime.utcnow(), reason=reason))
+                              revoked_at=datetime.now(timezone.utc).replace(tzinfo=None), reason=reason))
         db.commit()
 
 
 def is_revoked(token: str) -> bool:
-    from datetime import datetime
+    from datetime import datetime, timezone
 
 
     from .db import SessionLocal
@@ -42,7 +42,7 @@ def is_revoked(token: str) -> bool:
         record = db.get(RevokedToken, key_hash(token))
         if record is None:
             return False
-        if record.expires_at < datetime.utcnow():
+        if record.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
             db.delete(record)  # 惰性清理：过期的黑名单条目无意义（token 本身已过期）
             db.commit()
             return False

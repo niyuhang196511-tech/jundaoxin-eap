@@ -382,7 +382,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
     async def _execute_shared(self, request: Request, call_next, key: str) -> Response:
         """执行入口：Redis 配置时先抢跨副本在途标记；未配置/不可达退化为进程内语义。"""
         marked = await self._redis_mark_inflight(key)
-        if marked is None:  # Redis 未配置/不可达 → 现状进程内路径
+        if marked is None:  # Redis 未配置/不可达 → 现状进程内路径（M49-B fail-open 契约，M58 docstring 取舍声明）
             return await self._execute(request, call_next, key)
         if marked:
             try:
@@ -407,7 +407,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         marked = await self._redis_mark_inflight(key)
         if marked is False:  # 其他等待副本抢先接管
             return self._idem_conflict()
-        try:  # None（Redis 退化）或 True（接管成功）→ 执行
+        try:  # None（未配置/抖动退化）或 True（接管成功）→ 执行（M58 docstring 取舍声明）
             return await self._execute(request, call_next, key)
         finally:
             if marked:
@@ -420,7 +420,16 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                        headers={"Retry-After": "1"})
 
     async def _redis_mark_inflight(self, key: str) -> bool | None:
-        """SETNX 在途标记（TTL 防执行方崩溃死锁）。None = Redis 未配置/不可达。"""
+        """SETNX 在途标记（TTL 防执行方崩溃死锁）。None = 未配置**或已配置但异常**。
+
+        M58 取舍声明（docs/17 审计【中】#2 的处置）：异常与「未配置」同流 None=退化
+        进程内执行，是 M49-B 全机制一致的 fail-open 契约（不可达→回退进程内，测试
+        test_unreachable_redis_degrades_to_inprocess_and_warns_once 固化）——而非探测
+        路径的 fail-safe（None 不接管），因后者代价是抖动期间全部幂等请求 409（可用性
+        骤降），前者仅「抖动+同键并发+跨副本」窄窗口可能重复执行且幂等响应缓存自愈。
+        已知残余窗口如实登记账本（docs/17 §四 #2）；严格化方向=区分「未配置/已配置但
+        异常」两态并 409 拒绝，待重复执行实际发生或契约变更时再评估。
+        """
         url = get_settings().redis_url
         if not url:
             return None
@@ -524,8 +533,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             data = _json.loads(raw)
             # 本地 expires_at 填 0.0：Redis TTL 已治理过期，重放前不再本地校验
             return (0.0, int(data["status"]), base64.b64decode(data["body"]), data["content_type"])
-        except Exception:
-            return None
+        except Exception as e:
+            _warn_degraded("idempotency", e)
+            return None  # M58 取舍声明：异常视同无缓存继续本地路径（M49-B fail-open 契约；
+            # 严格化方向=区分「未配置/已配置但异常」两态，已登记账本 docs/17 §四 #2）
 
     async def _redis_put(self, key: str, entry: tuple[float, int, bytes, str]) -> None:
         url = get_settings().redis_url

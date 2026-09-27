@@ -51,10 +51,22 @@ async def _serve() -> None:
     # M55-A（双进程压测发现）：独立 worker 同样需要注册引导——registry.bootstrap
     # 原先只在 API 进程 lifespan 执行，HA 形态（API EAP_WORKER_COUNT=0 + 独立 worker，
     # deploy/docker-compose.ha.yml）下 worker 注册表为空，agent.invoke/hitl 任务
-    # 全数 FAILED（"智能体 faq-agent 未注册"）。与 lifespan 同序：init_db → bootstrap → 引擎。
+    # 全数 FAILED（"智能体 faq-agent 未注册"）。
+    # M58（docs/17 审计【中】#1）：M55-A 只补了 bootstrap 三步中的一步——对齐 lifespan
+    # 完整注册序：init_db → bootstrap → load_enabled（workflow-as-agent）→ load_plugins
+    # （插件智能体）→ start_subscriber（跨副本管理操作广播），否则 HA 任务通道指向
+    # workflow-as-agent/插件智能体同样 FAILED「未注册」。
     from .agents.registry import registry
 
     await registry.bootstrap()
+    from . import workflows as workflows_svc
+
+    await workflows_svc.load_enabled()
+    from .agents import registry_sync
+    from .plugins import load_plugins
+
+    load_plugins()  # 扩展开发体系：插件目录加载（单插件失败不阻断启动）
+    registry_sync.start_subscriber(registry.apply_remote_event)  # M10：跨副本管理操作广播
     engine = create_task_engine()
     await engine.start(workers=s.worker_count)
     log.info("EAP worker v%s 就绪：workers=%d lease=%ds backend=%s db=%s",
@@ -78,6 +90,7 @@ async def _serve() -> None:
 
     await stop_event.wait()
     await engine.drain(timeout=_DRAIN_TIMEOUT_S)  # 第一阶段：停入队、等在途完成
+    await registry_sync.stop_subscriber()  # M58：与 start_subscriber 对称
     await engine.stop()  # 第二阶段：停 worker/调度/租约扫描/队列后端
     log.info("worker 已退出")
 

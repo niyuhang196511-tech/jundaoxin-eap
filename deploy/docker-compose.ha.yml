@@ -16,9 +16,6 @@
 #   3. docker compose -f deploy/docker-compose.ha.yml up -d
 #      启动顺序由 depends_on + healthcheck 保证：postgres/redis 先健康 → API → worker → nginx。
 #
-# 注：当前 eap/src/eap/main.py 的 lifespan 固定 task_engine.start(workers=2)（P1 交付时
-# API 内嵌 worker 的存量行为），EAP_WORKER_COUNT=0 要完全生效需该处改读 settings.worker_count；
-# 多副本多 worker 并发由租约/幂等键保证安全，本样例按目标状态书写。
 
 name: eap-ha
 

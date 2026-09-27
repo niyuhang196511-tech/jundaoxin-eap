@@ -219,7 +219,7 @@ class AgentRegistry:
             await self.start_agent(name)
 
     def _persist(self, agent: RegisteredAgent) -> None:
-        """upsert 语义（M56 冷启动竞态防护）：多副本并发首启时两个副本可能同时通过
+        """upsert 语义（M57 冷启动竞态防护）：多副本并发首启时两个副本可能同时通过
         check-then-insert 的首查（均为 None）再同时 INSERT——一方必撞 agents.name 唯一
         约束 IntegrityError。捕获后 rollback 重查：对方副本已创建记录，走 update 分支
         （两副本写入同一 manifest/source，结果等价）。"""
