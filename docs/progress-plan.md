@@ -19,7 +19,7 @@
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
 | 最新里程碑 | M58（audit-M58 docs/17 审计发现消化：worker 引导序列补齐+workflow-as-agent 回归 / 幂等 fail-open 取舍声明 / 触发器 target 存在性校验 / RLS 测试数据修正 + 低危六项） |
-| 代码 commit |  |
+| 代码 commit | 4fc16a2 |
 | 快照日期 | 2026-09-25 |
 | 测试基线 | **SQLite 560 passed + 35 skipped**（fresh）+ **同库脏复跑两连遍全绿**（可重入纪律保持）+ MCP/Redis 集成 6 passed + **PG 实测 580 passed + 15 skipped（fresh）+ PG 同库全量复跑全绿**（RLS 测试数据修正后 13 RLS 全绿） + **ruff F/E9 全树零错** + 控制台 typecheck/vitest 14 条 + **E2E（Playwright）12 条全绿**（kind 十种断言） + check_docs/check_observability（8 PASS）绿（openapi 无接口形状变化未重导出）；CI run 待推送后确认 |
 | 下一主线 | docs/17 审计发现全消化（批次 24：两【中】+低危清单）；余量见「M58 遗留登记」行；外部条件项（⑦-Knowledge 用户主体目录/SDK 发布/seal/i18n 全量/移动端/alertmanager 真实渠道/L 组）不变；Mimosa git-gate 门禁遗留定性项见 M52 遗留登记⑥ |
