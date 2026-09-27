@@ -80,7 +80,8 @@ def test_registry_persist_upsert_on_simulated_race(tmp_path, monkeypatch):
         from eap.agents.manifest import AgentManifest
         from eap.agents.registry import AgentRegistry, RegisteredAgent
 
-        # 注意：eap.agents.registry 在 sys.modules 被 registry 单例遮蔽（extension
+        # 注意（docs/17 勘误）：import eap.agents.registry as m 经属性查找命中
+        # eap.agents 包的重导出属性（registry=单例）而非 sys.modules 真模块——真模块在
         # 动态导入机制把单例注册成伪模块）——import 拿到的是实例而非模块。patch
         # 目标须走 _persist.__globals__（定义时模块真身的命名空间）。
         persist_globals = AgentRegistry._persist.__globals__

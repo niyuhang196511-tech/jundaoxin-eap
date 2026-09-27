@@ -436,3 +436,20 @@ sql kind 连接器（只读 SELECT 白名单）在 sqlite 之外支持 postgresq
   job 同款），缺驱动时运行时报清晰错误。
 - 健康探测（`POST /api/v1/connectors/{name}/health`、`/{name}/validate`）对 postgresql 执行
   `SELECT 1`；响应 detail 只含 `env:VAR` 字面量，不回显 DSN。
+
+### 9.9 工作流环境保护规则（M55-E，Policy kind `env-protection`）
+
+发布/回滚到受保护环境（PROD/STAGING 等）时的闸门语义与运维边界：
+
+- 规则形态：Policy kind `env-protection`，config = `{"rules": [{"env": "PROD",
+  "allowed_actors": ["jwt:alice"], "require_confirm": true}]}`（Governance 策略页
+  专用子表单或 JSON 模式）。多规则命中同一环境取**最严合并**：任一规则不含操作者
+  → 403 EAP-3010；空 `allowed_actors` = 冻结该环境。
+- `require_confirm: true`：发布/回滚首次返回 428 EAP-3011，前端弹确认框自动带
+  `confirm: true` 重发。**注意这是「操作者自知确认」（同一操作者二次肯定+审计
+  留痕），不是第二人审批**——多人审批待 HITL 审批形态扩展。
+- **操作者身份粒度（docs/17 审计 #4 明示）**：`allowed_actors` 匹配的是审计 actor
+  字符串——JWT 通道为 `jwt:<user>`（可精确到人），**API Key 通道恒为 `api-key`
+  （无个体区分能力）**：名单含 `api-key` 时任何 API Key 持有者都可过闸。需要
+  精确到人的环境保护请只用 `jwt:<user>` 并把 API Key 排除在名单外。
+- 拒绝/确认请求均落审计 `workflow.env_protected`（detail 不含 allowed_actors 名单）。
