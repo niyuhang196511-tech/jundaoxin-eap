@@ -411,3 +411,35 @@ test.describe.serial('M64：Webhook 端点删除确认流（M51-B 确认流，In
     await expect(page.locator('tr', { hasText: EP })).toHaveCount(0, { timeout: 15_000 })
   })
 })
+
+
+test.describe.serial('M65：记忆遗忘确认流（Governance 记忆治理页签）', () => {
+  const UID = `user-e2e-m65-${Date.now().toString(36)}`
+
+  test('记忆治理页签：写入用户记忆 → 输入 user_id → 遗忘 → ConfirmDialog「遗忘全部记忆」→ toast 成功', async ({ page, request }) => {
+    // API 预置：user 级记忆一条
+    const res = await request.post(`${API}/api/v1/memory`, {
+      headers: AUTH,
+      data: { scope: 'user', user_id: UID, content: 'e2e forget regression', importance: 0.5 },
+    })
+    expect(res.ok()).toBeTruthy()
+
+    await login(page)
+    await page.goto('/gov')
+    await page.getByRole('tab', { name: '记忆治理' }).click()
+    // 数据权利区：输入 user_id → 「遗忘」按钮（danger）
+    const uidInput = page.locator('input[placeholder*="user_id"]')
+    await uidInput.fill(UID)
+    await page.getByRole('button', { name: '遗忘' }).click()
+    // ConfirmDialog「遗忘用户「UID」的全部记忆？」（后果：不可恢复）
+    const dialog = page.locator('[role="dialog"]', { hasText: `遗忘用户「${UID}」的全部记忆？` })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText(/不可恢复/)).toBeVisible()
+    await dialog.getByRole('button', { name: '遗忘' }).click()
+    // toast 成功 + API 复核：该用户记忆清零（再 forget 返回 deleted=0 或列表空）
+    await expect(page.getByText(`已遗忘用户 ${UID}`)).toBeVisible({ timeout: 10_000 })
+    const check = await request.get(`${API}/api/v1/memory/users/${UID}/export`, { headers: AUTH })
+    const data = await check.json()
+    expect((data.memories ?? data ?? [])).toHaveLength(0)
+  })
+})
