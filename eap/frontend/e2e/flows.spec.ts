@@ -337,3 +337,48 @@ test.describe.serial('确认流第二批（M62）：Knowledge 文档删除 / Mod
     await expect(page.locator('tr', { hasText: MODEL })).toHaveCount(0, { timeout: 15_000 })
   })
 })
+
+
+test.describe.serial('M63：ChatPanel 会话删除确认流（docs/17 确认流清单）', () => {
+  const SID = `e2e-chat-${Date.now().toString(36)}`
+
+  test('Agents 页选中智能体 → ChatPanel 会话行删除按钮 → ConfirmDialog → 会话消失', async ({ page, request }) => {
+    // API 预置会话：faq-agent 一次 invoke（session_id 固定）→ conversations 落库
+    const inv = await request.post(`${API}/api/v1/agents/faq-agent/invocations`, {
+      headers: AUTH,
+      data: { input: 'e2e 会话删除回归', session_id: SID },
+    })
+    expect(inv.ok()).toBeTruthy()
+    // 会话列表可见性确认（API 侧）
+    const list = await request.get(`${API}/api/v1/conversations?agent=faq-agent`, { headers: AUTH })
+    expect((await list.json()).some(c => c.session_id === SID)).toBeTruthy()
+
+    await login(page)
+    await page.goto('/agents')
+    // 选中 faq-agent（左栏智能体行）
+    await page.getByText('faq-agent', { exact: true }).first().click()
+    // 前置清理：删除该 agent 全部历史 e2e 会话（多次运行的相同输入行在 DOM 不可区分——
+    // last_message 同文；只留本遍 SID 会话使行定位唯一）
+    const preList = await request.get(`${API}/api/v1/conversations?agent=faq-agent`, { headers: AUTH })
+    for (const c of (await preList.json()).filter(c => c.session_id.startsWith('e2e-chat-'))) {
+      await request.delete(`${API}/api/v1/conversations/${c.session_id}`, { headers: AUTH })
+    }
+    // ChatPanel 会话列表行：last_message 含 e2e 输入（mock 回复回显输入），
+    // 删除按钮 hidden group-hover:block → 先 hover 行再点删除
+    const delBtn = page.locator('button[title="删除会话"]')
+    await expect(delBtn).toBeAttached({ timeout: 15_000 })
+    // 删除按钮 hidden group-hover:block——hover 行内文本触发 group-hover 后按钮可见
+    await page.getByText('e2e 会话删除回归').first().hover()
+    await delBtn.first().click()
+    // ConfirmDialog（ChatPanel 删除会话确认）
+    const dialog = page.locator('[role="dialog"]')
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: /删除|确认/ }).click()
+    // 会话行消失（列表刷新——按消息内容定位的行归零）
+    await expect(page.locator('div', { hasText: 'e2e 会话删除回归' })
+      .filter({ has: page.locator('button[title="删除会话"]') })).toHaveCount(0, { timeout: 15_000 })
+    // API 侧复核：conversations 不再含该 session
+    const after = await request.get(`${API}/api/v1/conversations?agent=faq-agent`, { headers: AUTH })
+    expect((await after.json()).some(c => c.session_id === SID)).toBeFalsy()
+  })
+})
