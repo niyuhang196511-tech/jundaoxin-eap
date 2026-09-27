@@ -382,3 +382,32 @@ test.describe.serial('M63：ChatPanel 会话删除确认流（docs/17 确认流�
     expect((await after.json()).some(c => c.session_id === SID)).toBeFalsy()
   })
 })
+
+
+test.describe.serial('M64：Webhook 端点删除确认流（M51-B 确认流，Integrations Webhooks 页签）', () => {
+  const EP = `e2e-hook-${Date.now().toString(36)}`
+
+  test('Webhooks 页签：API 预置端点 → 行「删除」→ ConfirmDialog「删除端点」→ 确认后行消失', async ({ page, request }) => {
+    // API 预置 webhook 端点
+    const res = await request.post(`${API}/api/v1/webhooks`, {
+      headers: AUTH,
+      data: { name: EP, url: 'https://e2e.invalid/hook', events: ['agent.*'], enabled: true },
+    })
+    expect(res.ok()).toBeTruthy()
+
+    await login(page)
+    await page.goto('/conn')
+    await page.getByRole('tab', { name: 'Webhooks' }).click()
+    // 端点行（name 唯一）→ 行内「删除」文字按钮
+    const row = page.locator('tr', { hasText: EP }).first()
+    await expect(row).toBeVisible({ timeout: 15_000 })
+    await row.getByRole('button', { name: '删除' }).click()
+    // ConfirmDialog「删除端点」（后果：订阅事件不再推送，不可恢复）
+    const dialog = page.locator('[role="dialog"]', { hasText: `删除端点「${EP}」？` })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText(/不再向该端点推送/)).toBeVisible()
+    await dialog.getByRole('button', { name: '删除' }).click()
+    // 行消失（列表刷新）
+    await expect(page.locator('tr', { hasText: EP })).toHaveCount(0, { timeout: 15_000 })
+  })
+})
