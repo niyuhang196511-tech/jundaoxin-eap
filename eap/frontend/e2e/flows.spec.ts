@@ -160,6 +160,36 @@ test.describe.serial('工作流版本 diff 与 env-protection 428（M54-B/M55-E�
     await fromSel.selectOption({ label: 'v1（e2e v1）' })
     await expect(diff.getByText(/v1（e2e v1）.*→/)).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Escape')
+
+    // M60 深度补齐：PUT dsl 造出与 v1/v2 不同的草稿（修改 s1.system + 新增 s3）→
+    // 重开对比（基准=v2，目标=草稿）→ 断言染色渲染（修改琥珀/新增绿，含步骤名与字段变化）
+    const changed = {
+      name: WF, version: '1.2.0', description: 'e2e diff 已改动',
+      steps: [
+        { id: 's1', type: 'llm', system: 'e2e 已改动的 system', prompt_name: null },
+        { id: 's2', type: 'llm', system: 'e2e v1', prompt_name: null },
+        { id: 's3', type: 'llm', system: 'e2e 新增步骤', prompt_name: null },
+      ],
+      edges: [],
+    }
+    const putRes = await request.put(`${API}/api/v1/workflows/${WF}/dsl`, {
+      headers: AUTH, data: changed,
+    })
+    expect(putRes.ok()).toBeTruthy()
+    await drawer.getByRole('button', { name: '对比' }).click()
+    await expect(diff.getByText(`版本对比 · ${WF}`)).toBeVisible({ timeout: 10_000 })
+    await toSel.selectOption({ label: '草稿（当前 DSL）' })
+    // 修改步骤 s1：琥珀着色 + 字段变化 system 旧→新
+    // 修改步骤 s1：字段级变化段 'system: 旧值→新值' 同段可见（实测 DOM 形态）
+    await expect(diff.getByText('system: e2e v1→e2e 已改动的 system')).toBeVisible({ timeout: 10_000 })
+    // 步骤级变化：'新增 步骤'（PUT 草稿相对基准多出的 s3）
+    await expect(diff.getByText('新增', { exact: true })).toBeVisible()
+    await expect(diff.getByText('e2e 新增步骤')).toBeVisible()
+    // description 元信息变化（e2e diff 基准→e2e diff 已改动）
+    await expect(diff.getByText('description: e2e diff 基准→e2e diff 已改动')).toBeVisible()
+    // 差异非空（非「0 条差异」空态）
+    await expect(diff.getByText('两侧无差异：步骤与连线完全一致')).toHaveCount(0)
+    await page.keyboard.press('Escape')
   })
 
   test('env-protection：策略创建对话框专用子表单 → PROD 发布 428 → 确认重发成功', async ({ page, request }) => {

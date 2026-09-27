@@ -409,3 +409,51 @@ def test_member_cannot_write_versions(client: TestClient, fake_idp):  # noqa: F8
                        json={"env": "dev"}).status_code == 403
     assert client.post(f"/api/v1/workflows/{F_RBAC}/versions/1/rollback", headers=m,
                        json={"env": "dev"}).status_code == 403
+
+def test_update_dsl_endpoint(client: TestClient):
+    """M60：PUT /{name}/dsl——画布保存对存量工作流的死路修复。
+
+    修复前：POST 同名 409 且无任何 DSL 更新端点（画布「保存」对存量是死路）。
+    语义：直写 WorkflowRecord.dsl（非版本层）+ refresh_registration 热更新 +
+    审计 workflow.dsl.update；404/400（空体/DSL 校验失败/name 不一致）。
+    """
+    from eap.observability.audit_actions import AUDIT_ACTIONS
+    from eap.models import AuditLog, WorkflowRecord
+
+    name = f"wf-m60-dsl-{uuid.uuid4().hex[:8]}"
+    dsl_v1 = {"name": name, "version": "1.0.0", "description": "v1",
+              "steps": [{"id": "s1", "type": "llm", "system": "v1", "prompt_name": None,
+                          "query_var": "input"}]}
+    r = client.post("/api/v1/workflows", headers=AUTH, json=dsl_v1)
+    assert r.status_code == 200, r.text
+
+    dsl_v2 = {**dsl_v1, "version": "1.1.0",
+              "steps": [{"id": "s1", "type": "llm", "system": "v2 改动", "prompt_name": None,
+                          "query_var": "input"},
+                         {"id": "s2", "type": "llm", "system": "新增步骤", "prompt_name": None,
+                          "query_var": "input"}]}
+    r = client.put(f"/api/v1/workflows/{name}/dsl", headers=AUTH, json=dsl_v2)
+    assert r.status_code == 200, r.text
+    assert r.json()["steps"] == 2
+
+    r = client.get(f"/api/v1/workflows/{name}/dsl", headers=AUTH)
+    assert r.json()["steps"][0]["system"] == "v2 改动"
+
+    assert (client.put(f"/api/v1/workflows/{name}/dsl", headers=AUTH, json={})).status_code == 400
+    bad = {**dsl_v2, "name": "other-name"}
+    assert (client.put(f"/api/v1/workflows/{name}/dsl", headers=AUTH, json=bad)).status_code == 400
+    bad2 = {**dsl_v2, "steps": []}
+    assert (client.put(f"/api/v1/workflows/{name}/dsl", headers=AUTH, json=bad2)).status_code == 400
+    assert (client.put("/api/v1/workflows/wf-m60-nope/dsl", headers=AUTH, json=dsl_v2)).status_code == 404
+
+    with SessionLocal() as db:
+        rows = db.scalars(select(AuditLog).where(
+            AuditLog.action == "workflow.dsl.update",
+            AuditLog.target == name)).all()
+        assert len(rows) == 1
+    assert "workflow.dsl.update" in AUDIT_ACTIONS
+
+    with SessionLocal() as db:
+        rec = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+        rec.enabled = False
+        db.commit()

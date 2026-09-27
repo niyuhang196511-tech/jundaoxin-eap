@@ -12252,6 +12252,59 @@
           }
         ],
         "summary": "Get Workflow Dsl"
+      },
+      "put": {
+        "description": "更新既有工作流的画布 DSL（M60：画布「保存」对存量工作流的死路修复——\nPOST 同名 409 且无任何 DSL 更新端点，审计 e2e 过程发现）。\n\n语义：直写 WorkflowRecord.dsl（对齐 M32 画布编辑的直改口径，非版本层操作——\n版本快照仍走 publish），随后 refresh_registration 热更新注册表（workflow-as-agent\n立即用新 DSL）。name 不可变；新建走 POST \"\"。",
+        "operationId": "update_workflow_dsl_api_v1_workflows__name__dsl_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Workflow Dsl"
       }
     },
     "/api/v1/workflows/{name}/runs": {

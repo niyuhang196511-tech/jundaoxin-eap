@@ -288,10 +288,17 @@ export default function WorkflowCanvasPage() {
     setSaving(true)
     try {
       const payload = flowToDsl(dsl, nodes, edges)
-      await api('POST', '/api/v1/workflows', payload)
+      const isExisting = list.some(w => w.name === payload.name)
+      if (isExisting) {
+        // M60：存量工作流走 PUT dsl（此前 POST 同名 409——画布「保存」对存量是死路）
+        await api('PUT', `/api/v1/workflows/${encodeURIComponent(payload.name)}/dsl`, payload)
+        toast.success(`已保存并热更新智能体 ${payload.name}`)
+      } else {
+        await api('POST', '/api/v1/workflows', payload)
+        toast.success(`已保存并注册为智能体 ${payload.name}`)
+      }
       setDsl(payload)
       setDirty(false)
-      toast.success(`已保存并注册为智能体 ${payload.name}`)
       loadList()
     } catch (e) {
       toast.error(`保存失败：${(e as Error).message}`)

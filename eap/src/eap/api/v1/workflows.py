@@ -55,6 +55,38 @@ def get_workflow_dsl(name: str, db: Session = fastapi.Depends(get_db)):
     return record.dsl or {}
 
 
+@router.put("/{name}/dsl", dependencies=[fastapi.Depends(require_admin)])
+async def update_workflow_dsl(name: str, body: dict, request: fastapi.Request,
+                              db: Session = fastapi.Depends(get_db)):
+    """更新既有工作流的画布 DSL（M60：画布「保存」对存量工作流的死路修复——
+    POST 同名 409 且无任何 DSL 更新端点，审计 e2e 过程发现）。
+
+    语义：直写 WorkflowRecord.dsl（对齐 M32 画布编辑的直改口径，非版本层操作——
+    版本快照仍走 publish），随后 refresh_registration 热更新注册表（workflow-as-agent
+    立即用新 DSL）。name 不可变；新建走 POST ""。
+    """
+    record = db.scalar(select(WorkflowRecord).where(WorkflowRecord.name == name))
+    if record is None:
+        raise fastapi.HTTPException(status_code=404, detail=f"EAP-4004 工作流 {name} 不存在")
+    if not isinstance(body, dict) or not body:
+        raise fastapi.HTTPException(status_code=400, detail="EAP-4000 DSL 须为非空 JSON 对象")
+    try:
+        spec = WorkflowSpec(**body)
+    except Exception as e:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 DSL 校验失败: {e}") from e
+    if spec.name != name:
+        raise fastapi.HTTPException(status_code=400, detail=f"EAP-4000 DSL.name 与路径 {name} 不一致")
+    record.dsl = spec.model_dump()
+    record.version = spec.version
+    db.commit()
+    await refresh_registration(name)
+    audit.record("workflow.dsl.update", actor=audit.actor_of(request), target=name,
+                 detail={"steps": len(spec.steps), "edges": len(spec.edges)},
+                 trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": record.name, "version": record.version, "steps": len(spec.steps),
+            "invoke": f"/api/v1/agents/{name}/invocations"}
+
+
 @router.post("/{name}/test-run")
 async def test_run(name: str, body: dict):
     """后台执行一次试运行，立即返回 run_id（逐节点执行历史落 workflow_runs）。

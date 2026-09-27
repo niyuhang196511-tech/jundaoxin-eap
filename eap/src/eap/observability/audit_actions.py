@@ -132,6 +132,7 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     # workflow —— 工作流 CRUD / 版本 / 重载 / 停用（api/v1/workflows.py）
     "workflow.create",
     "workflow.disable",
+    "workflow.dsl.update",
     "workflow.env_protected",
     "workflow.reload",
     "workflow.version.create",
