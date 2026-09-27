@@ -278,3 +278,59 @@ test.describe.serial('HITL 审批确认流（M61，M51-B 金标准范本本体�
     await expect(row.getByRole('button', { name: '批准' })).toHaveCount(0, { timeout: 20_000 })
   })
 })
+
+
+test.describe.serial('确认流第二批（M62）：Knowledge 文档删除 / Models 模型删除', () => {
+  const KB = `e2e-kb-${SFX}`
+  const DOC = `e2e-doc-${SFX}`
+  const MODEL = `e2e-model-${SFX}`
+
+  test('Knowledge 文档删除：库详情文档行删除按钮 → ConfirmDialog 级联清理文案 → 确认后文档消失', async ({ page, request }) => {
+    // API 预置：KB + 文档（POST /documents text 摄入）
+    const kbRes = await request.post(`${API}/api/v1/kb`, {
+      headers: AUTH, data: { name: KB, title: 'e2e 删除流库', type: 'doc' },
+    })
+    expect(kbRes.ok()).toBeTruthy()
+    const docRes = await request.post(`${API}/api/v1/kb/${KB}/documents`, {
+      headers: AUTH, data: { title: DOC, text: 'e2e 删除流测试文档内容', source: 'text' },
+    })
+    expect(docRes.ok()).toBeTruthy()
+    const docId = (await docRes.json()).document_id
+
+    await login(page)
+    await page.goto('/kb')
+    // 库卡片是 Card div（onClick 进详情）——按 KB 名定位卡片并点击
+    await page.locator('div', { hasText: KB }).last().filter({ has: page.locator('p', { hasText: KB }) }).first().click()
+    // 详情文档列表：文档标题按钮可见
+    const docBtn = page.locator('button', { hasText: DOC }).first()
+    await expect(docBtn).toBeVisible({ timeout: 15_000 })
+    // 该文档行内的删除按钮（title="删除"）
+    const delBtn = docBtn.locator('xpath=ancestor::div[contains(@class,"flex")]//button[@title="删除"]').first()
+    await delBtn.click()
+    // ConfirmDialog：级联清理文案（标题含文档名）
+    const dialog = page.locator('[role="dialog"]', { hasText: `删除文档「${DOC}」？` })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText(/级联清理/)).toBeVisible()
+    await dialog.getByRole('button', { name: '删除' }).click()
+    await expect(page.locator('button', { hasText: DOC })).toHaveCount(0, { timeout: 15_000 })
+    expect(docId).toBeTruthy()
+  })
+
+  test('Models 模型删除：LoRA/模型行删除按钮 → ConfirmDialog → 确认后模型消失', async ({ page, request }) => {
+    // API 预置：mock provider 模型（非 openai_compat 免 base_url 要求）
+    const res = await request.post(`${API}/api/v1/models`, {
+      headers: AUTH, data: { name: MODEL, capabilities: ['chat'], provider: 'mock' },
+    })
+    expect(res.ok()).toBeTruthy()
+
+    await login(page)
+    await page.goto('/models')
+    const row = page.locator('tr', { hasText: MODEL }).first()
+    await expect(row).toBeVisible({ timeout: 15_000 })
+    await row.getByRole('button', { name: '删除' }).click()
+    const dialog = page.locator('[role="dialog"]', { hasText: `删除 adapter「${MODEL}」？` })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: '删除' }).click()
+    await expect(page.locator('tr', { hasText: MODEL })).toHaveCount(0, { timeout: 15_000 })
+  })
+})
