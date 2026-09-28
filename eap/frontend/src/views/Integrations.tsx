@@ -726,6 +726,7 @@ function ImTab() {
   const [agents, setAgents] = useState<string[]>([])
   const [open, setOpen] = useState(false)
   const [dirChannel, setDirChannel] = useState<ImChannel | null>(null)
+  const [removeCh, setRemoveCh] = useState<ImChannel | null>(null)
   const [form, setForm] = useState({ name: '', platform: 'feishu', agent: 'faq-agent', webhookUrl: '', secret: '' })
   const [busy, setBusy] = useState('')
 
@@ -775,6 +776,20 @@ function ImTab() {
     }
   }
 
+  const doRemoveCh = async (name: string) => {
+    setBusy(name)
+    try {
+      await api('DELETE', `/api/v1/im/channels/${encodeURIComponent(name)}`)
+      toast.success('渠道已删除（密钥随行删除，回调 URL 失效）')
+      setRemoveCh(null)
+      load()
+    } catch (e) {
+      toast.error(`删除失败：${(e as Error).message}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -802,12 +817,22 @@ function ImTab() {
                 <Button size="xs" variant="secondary" loading={busy === c.name} onClick={() => test(c.name)}>
                   发测试消息
                 </Button>
+                {/* M66：删除走 ConfirmDialog 确认（回调 URL 失效/密钥随行删除不可恢复） */}
+                <Button size="xs" variant="ghost" onClick={() => setRemoveCh(c)}>
+                  删除
+                </Button>
               </div>
             ) },
           ]}
           empty="IM 渠道接入后，群内 @机器人 即可对话（webhook 回调 → 智能体 → 群消息回复）"
         />
       </div>
+
+      {/* M66 删除确认：后果如实写明（回调 URL 失效/密钥随行删除不可恢复） */}
+      <ConfirmDialog open={!!removeCh} onCancel={() => setRemoveCh(null)}
+        title={`删除 IM 渠道「${removeCh?.name ?? ''}」？`}
+        description="删除后该渠道的回调 URL 立即失效（IM 平台侧订阅需自行清理）；应用凭据（app_secret）随行删除不可恢复。投递历史日志保留。"
+        confirmLabel="删除" busy={busy === `remove-${removeCh?.name}`} onConfirm={() => removeCh && doRemoveCh(removeCh.name)} />
 
       <DialogContent open={open} onOpenChange={setOpen} title="登记 IM 渠道"
         description="webhook 回调地址形如 /api/v1/im/{platform}/{name}/webhook"

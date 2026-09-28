@@ -20,6 +20,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import AUTH
+from .test_oidc import fake_idp, _make_id_token  # noqa: F401 复用模拟 IdP 夹具（fixture 再导出，test_jwt_auth 同款）
+from eap.db import SessionLocal
+from eap.models import AuditLog, IMChannelRecord
+from sqlalchemy import select
 
 HEADERS = {**AUTH, "Content-Type": "application/json"}
 
@@ -284,3 +288,38 @@ def test_directory_audit_no_pii(client: TestClient):
                       params={"action": "im.directory.query",
                               "target": ch["name"]}).json()
     assert any(x["detail"]["kind"] == "chats" for x in rows)
+
+
+def test_channel_delete(client: TestClient, fake_idp, monkeypatch):  # noqa: F811 夹具再导出（test_webhooks 同款）
+    """M66：DELETE /channels/{ident}——渠道删除（M65 遗留①：渠道管理此前无删除）。
+
+    admin 语义；ident 双形态（name/id）；密文随行；投递日志保留（无 FK 跨库设计）；
+    审计 im.channel.delete。
+    """
+    channel = _create_channel(client, f"im-del-{uuid.uuid4().hex[:8]}", "feishu")
+    name = channel["name"]
+
+    # member JWT → 403（test_jwt_auth 的 member token 形态：_make_id_token 同款签名，
+    # 需 fake_idp 环境让 resolve_tenant 的 OIDC 校验走模拟 IdP——夹具在本文件内重建）
+    from .test_jwt_auth import _access_token as _jwt
+    member = _jwt(roles=["member"])
+    r = client.delete(f"/api/v1/im/channels/{name}", headers={"Authorization": f"Bearer {member}"})
+    assert r.status_code == 403
+
+    r = client.delete(f"/api/v1/im/channels/{name}", headers=AUTH)
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
+    assert name not in [c["name"] for c in client.get("/api/v1/im/channels", headers=AUTH).json()]
+    assert client.delete(f"/api/v1/im/channels/{name}", headers=AUTH).status_code == 404
+
+    with SessionLocal() as db:
+        rows = db.scalars(select(AuditLog).where(
+            AuditLog.action == "im.channel.delete", AuditLog.target == name)).all()
+        assert len(rows) == 1
+
+    # ident 按 id 删除（先建再删）
+    name2 = _create_channel(client, f"im-del-{uuid.uuid4().hex[:8]}", "dingtalk")["name"]
+    with SessionLocal() as db:
+        rec = db.scalar(select(IMChannelRecord).where(IMChannelRecord.name == name2))
+        cid = rec.id
+    assert client.delete(f"/api/v1/im/channels/{cid}", headers=AUTH).status_code == 200
+    assert client.delete(f"/api/v1/im/channels/{name2}", headers=AUTH).status_code == 404

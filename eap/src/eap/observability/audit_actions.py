@@ -62,6 +62,7 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     "harness.remote.approve",
     # im —— IM 渠道 / 凭证 / 卡片 / 通讯录代理查询（api/v1/im.py；M55-C directory）
     "im.channel.create",
+    "im.channel.delete",
     "im.credentials",
     "im.directory.query",
     "im.send_card",

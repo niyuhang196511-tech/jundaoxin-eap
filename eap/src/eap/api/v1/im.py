@@ -9,6 +9,7 @@
 
 M30 新增管理端点（admin + 审计）：
 - POST /channels/{name}/credentials：应用级凭据配置（Fernet 加密存储，响应不回显明文）
+- DELETE /channels/{ident}：渠道删除（M65 遗留①，admin；密文随行删除，投递日志保留）
 - POST /channels/{id}/send-card：出站卡片消息（平台无关卡片 → 三平台适配，event_key 幂等）
 
 M39-B 新增（docs/18 §二.5 移动远程操作，回调处理内、路由到智能体之前）：
@@ -122,6 +123,26 @@ class ChannelCredentials(BaseModel):
 
     app_id: str = Field(default="", max_length=128)
     app_secret: str | None = Field(default=None, max_length=256)
+
+
+@router.delete("/channels/{ident}", dependencies=ADMIN_DEP)
+def delete_channel(ident: str, request: fastapi.Request, db: Session = fastapi.Depends(get_db)):
+    """删除 IM 渠道（M65 遗留①：渠道管理此前无删除——建错只能改名弃用）。
+
+    语义（对齐连接器 DELETE 409 先例）：
+    - 触发器引用检查：TriggerRuleRecord 不含 im 目标类型（target 仅 agent/workflow/
+      connector），无悬空引用面——但 webhook 回调 URL（/im/{platform}/{name}/webhook）
+      会随渠道消失，IM 平台侧的订阅配置需自行清理（docstring 如实说明）；
+    - 密文（app_secret_enc）与出站投递日志（im_outbound_logs，无 FK 跨库设计）：
+      密文随行删除；投递日志为历史记录**保留**（对齐 shadow_runs 先例）；
+    - 审计 im.channel.delete。
+    """
+    record = _resolve_channel(db, ident)
+    db.delete(record)
+    db.commit()
+    audit.record("im.channel.delete", actor=audit.actor_of(request), target=record.name,
+                 detail={"platform": record.platform}, trace_id=getattr(request.state, "trace_id", ""))
+    return {"name": record.name, "platform": record.platform, "status": "deleted"}
 
 
 @router.post("/channels/{name}/credentials", dependencies=ADMIN_DEP)
