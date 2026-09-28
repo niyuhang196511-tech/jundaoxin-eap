@@ -443,3 +443,34 @@ test.describe.serial('M65：记忆遗忘确认流（Governance 记忆治理页�
     expect((data.memories ?? data ?? [])).toHaveLength(0)
   })
 })
+
+
+test.describe.serial('M66：IM 渠道删除确认流（后端 DELETE 端点新增）', () => {
+  const CH = `e2e-imch-${Date.now().toString(36)}`
+
+  test('IM 渠道页签：API 预置渠道 → 行「删除」→ ConfirmDialog「删除 IM 渠道」→ 确认后行消失', async ({ page, request }) => {
+    // API 预置渠道（admin）
+    const res = await request.post(`${API}/api/v1/im/channels`, {
+      headers: AUTH,
+      data: { name: CH, platform: 'feishu', agent: 'faq-agent',
+              webhook_url: 'https://e2e.invalid/hook', secret: 'e2e-secret' },
+    })
+    expect(res.ok()).toBeTruthy()
+
+    await login(page)
+    await page.goto('/conn')
+    await page.getByRole('tab', { name: 'IM 渠道' }).click()
+    const row = page.locator('tr', { hasText: CH }).first()
+    await expect(row).toBeVisible({ timeout: 15_000 })
+    await row.getByRole('button', { name: '删除' }).click()
+    // ConfirmDialog「删除 IM 渠道」（后果文案：回调 URL 失效/密钥随行删除不可恢复）
+    const dialog = page.locator('[role="dialog"]', { hasText: `删除 IM 渠道「${CH}」？` })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText(/回调 URL 立即失效/)).toBeVisible()
+    await dialog.getByRole('button', { name: '删除' }).click()
+    // 行消失（列表刷新）+ API 复核
+    await expect(page.locator('tr', { hasText: CH })).toHaveCount(0, { timeout: 15_000 })
+    const after = await request.get(`${API}/api/v1/im/channels`, { headers: AUTH })
+    expect((await after.json()).some(c => c.name === CH)).toBeFalsy()
+  })
+})
