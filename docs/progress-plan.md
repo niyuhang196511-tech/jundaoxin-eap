@@ -19,7 +19,7 @@
 |---|---|
 | 平台版本 | v1.0.0（已发布，tag v1.0.0）+ M36 批次 7（L6 RAG 文档级 ACL，见下） |
 | 最新里程碑 | M66（conn-M66 IM 渠道 DELETE 端点（后端能力补齐）+删除确认流 e2e——确认流 11/13→12/13 收官，e2e 22 条全绿） |
-| 代码 commit | @@HASH@@ |
+| 代码 commit | e8cfc3e |
 | 快照日期 | 2026-09-25 |
 | 测试基线 | **SQLite 560 passed + 35 skipped**（fresh，无 src 变化沿 M58 版本）+ **E2E（Playwright）22 条全绿**（+IM 渠道删除确认流） + 控制台 typecheck/vitest 14 条 + **ruff F/E9 全树零错** + check_docs/check_observability（8 PASS）绿 + **openapi 重导出（177 paths/**215** endpoints）**；CI run 待推送后确认 |
 | 下一主线 | M59 遗留①画布保存 upsert 已销（M60）；e2e 确认流 5/13+diff 深度实证；剩余=外部条件项（⑦-Knowledge 用户主体目录/SDK 发布/seal/i18n 全量/移动端/alertmanager 真实渠道）不变；Mimosa git-gate 门禁遗留定性项见 M52 遗留登记⑥ |
